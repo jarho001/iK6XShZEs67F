@@ -183,3 +183,19 @@ def test_engine_tables_and_pp(tables):
 		assert int(t.move_max_pp[row]) == expected
 	assert int(t.move_max_pp[tables.moves.index["trumpcard"]]) == 5
 	assert int(t.move_max_pp[tables.moves.index["struggle"]]) == 1
+
+
+@pytest.mark.parametrize("ability", ["noability", "", "levitate"])
+def test_arceus_actual_types_without_multitype(synthetic_pool, tables, ability):
+	# data/conditions.ts:856-869 and Pokemon.getTypes:2164: Arceus's Type
+	# hook returns Normal without Multitype, regardless of the displayed form.
+	teams = teams_from_pool(synthetic_pool, 0, 1)
+	t = build_engine_tables(tables)
+	forms = [id_ for id_ in tables.species.ids if id_.startswith("arceus")]
+	for form in forms:
+		teams = teams._replace(
+			species=teams.species.at[0, 0].set(tables.species.index[form]),
+			ability=teams.ability.at[0, 0].set(tables.abilities.index[ability]),
+		)
+		state = jax.jit(reset)(jax.random.key(0), teams, t)
+		np.testing.assert_array_equal(state.types[0, 0], [tables.types.index["normal"], -1])

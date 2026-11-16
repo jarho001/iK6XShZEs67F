@@ -1,0 +1,244 @@
+"""Replay decision-point JSONL recordings against the Phase 1 engine.
+
+Run ``python -m pokejax.diff PATH`` (plain JSONL or gzip). One compiled scan
+replays the whole file; host comparison reports the first mismatch per battle.
+Step numbers in reports are zero-based; ``initial`` precedes every action.
+"""
+
+import argparse
+import gzip
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from time import perf_counter
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+from pokejax.engine.data import build_engine_tables
+from pokejax.engine.randomness import UNFORCED, forced_from_records
+from pokejax.engine.reset import check_teams, reset, teams_from_pool
+from pokejax.engine.state import HP, MOVE, NONE, ONGOING, SWITCH, TIE
+from pokejax.engine.step import step
+from pokejax.tables import load_tables
+from pokejax.teams import FORMAT, MOVE_SLOTS, team_pool_from_data
+
+KEY = jax.random.key(0)
+ROOT = Path(__file__).resolve().parents[1]
+REQUESTS = {"none": NONE, "move": MOVE, "switch": SWITCH}
+
+
+def comparable(state):
+	"""Only observable fields covered by this mechanic group; supports batches."""
+	return {
+		"active": state.active,
+		"boosts": state.boosts,
+		"request": state.request,
+		"hp": state.hp,
+		"maxhp": state.stats[..., HP],
+		"pp": state.pp,
+		"fainted": state.hp == 0,
+		"turn": state.turn,
+		"winner": state.winner,
+	}
+
+
+def recorded_state(snapshot):
+	"""Convert oracle snapshots without deriving fainted or any compared value."""
+	sides = snapshot["sides"]
+	members = [side["members"] for side in sides]
+	winner = snapshot["winner"]
+	return {
+		"active": np.asarray([side["active"] for side in sides]),
+		"boosts": np.asarray([side["boosts"] for side in sides]),
+		"request": np.asarray([REQUESTS[side["request"]] for side in sides]),
+		**{
+			name: np.asarray([[member[name] for member in team] for team in members])
+			for name in ("hp", "maxhp", "fainted")
+		},
+		"pp": np.asarray(
+			[
+				[member["pp"] + [0] * (MOVE_SLOTS - len(member["pp"])) for member in team]
+				for team in members
+			]
+		),
+		"turn": np.asarray(snapshot["turn"]),
+		"winner": np.asarray(ONGOING if winner is None else TIE if winner == "tie" else winner),
+	}
+
+
+@jax.jit
+def _replay(teams, actions, forced, valid, tables):
+	states = jax.vmap(reset, in_axes=(None, 0, None))(KEY, teams, tables)
+	initial = comparable(states)
+
+	def advance(states, inputs):
+		actions, forced, valid, index = inputs
+		out = jax.vmap(step, in_axes=(0, 0, None, 0, None))(
+			states, actions, jax.random.fold_in(KEY, index), forced, tables
+		)
+		# Even a turn-limited recording can be padded without advancing its state.
+		out = jax.tree.map(
+			lambda new, old: jnp.where(valid.reshape((-1,) + (1,) * (new.ndim - 1)), new, old),
+			out,
+			states,
+		)
+		return out, comparable(out)
+
+	_, history = jax.lax.scan(
+		advance,
+		states,
+		(
+			jnp.swapaxes(actions, 0, 1),
+			jnp.swapaxes(forced, 0, 1),
+			jnp.swapaxes(valid, 0, 1),
+			jnp.arange(actions.shape[1]),
+		),
+	)
+	return jax.tree.map(
+		lambda first, rest: jnp.concatenate((first[:, None], jnp.swapaxes(rest, 0, 1)), axis=1),
+		initial,
+		history,
+	)
+
+
+@dataclass(frozen=True)
+class Mismatch:
+	battle: int
+	step: int  # -1 is initial state
+	field: str
+	engine: object
+	showdown: object
+	actions: object
+	outcomes: object
+
+	def __str__(self):
+		point = "initial" if self.step == -1 else f"step {self.step}"
+		return (
+			f"Battle {self.battle}, {point}, {self.field}: "
+			f"engine={self.engine!r}, Showdown={self.showdown!r}\n"
+			f"  actions={self.actions}, outcomes={self.outcomes}"
+		)
+
+
+@dataclass(frozen=True)
+class ReplayResult:
+	battles: int
+	steps: int
+	mismatches: tuple[Mismatch, ...]
+	seconds: float
+
+	def report(self):
+		return "\n".join(
+			[str(mismatch) for mismatch in self.mismatches]
+			+ [
+				(
+					f"{self.battles - len(self.mismatches)}/{self.battles} battles match; "
+					f"{self.steps} decisions; {self.seconds:.3f}s (including compilation)"
+				)
+			]
+		)
+
+
+def load_recording(path):
+	"""Reject incompatible or incomplete recordings before compiling anything."""
+	path = Path(path)
+	opener = gzip.open if path.suffix == ".gz" else open
+	with opener(path, "rt", encoding="utf-8") as source:
+		header, *battles = [json.loads(line) for line in source if line.strip()]
+	if header["type"] != "header" or header["schemaVersion"] != 1:
+		raise ValueError("Expected differential JSONL schema v1 header")
+	lock = json.loads((ROOT / "reference-lock.json").read_text())
+	if header["showdownCommit"] != lock["commit"] or header["format"] != FORMAT:
+		raise ValueError("Recording does not use the pinned Showdown commit and format")
+	if not battles or len(battles) != header["count"]:
+		raise ValueError("Battle count does not match header")
+	if len({battle["index"] for battle in battles}) != len(battles):
+		raise ValueError("Duplicate battle indices")
+	for battle in battles:
+		if battle["type"] != "battle":
+			raise ValueError("Expected a battle record")
+		if battle["initialOverrides"] != []:
+			raise ValueError(
+				f"Battle {battle['index']}: unknown initialOverrides: {battle['initialOverrides']!r}"
+			)
+	return header, battles
+
+
+def replay_file(path) -> ReplayResult:
+	"""Replay ALL battles with one jit/scan/vmap, then compare exactly on the host."""
+	start = perf_counter()
+	header, battles = load_recording(path)
+	tables = load_tables()
+	pool = team_pool_from_data(
+		dict(
+			header,
+			teams=[team for battle in battles for team in battle["teams"]],
+			count=2 * len(battles),
+		),
+		tables,
+	)
+	indices = np.arange(len(battles)) * 2
+	teams = teams_from_pool(pool, indices, indices + 1)
+	check_teams(teams, tables)
+	lengths = np.asarray([len(battle["steps"]) for battle in battles])
+	shape = (len(battles), int(lengths.max()))
+	actions = np.zeros((*shape, 2), np.int32)
+	forced = np.full((*shape, *UNFORCED.shape), -1, np.int8)
+	for b, battle in enumerate(battles):
+		for t, record in enumerate(battle["steps"]):
+			choice = np.asarray(record["actions"])
+			if (
+				choice.shape != (2,)
+				or choice.dtype.kind not in "iu"
+				or np.any((choice < 0) | (choice > 8))
+			):
+				raise ValueError(f"Battle {battle['index']} step {t}: invalid actions")
+			actions[b, t] = choice
+			forced[b, t] = forced_from_records(record["outcomes"])
+	valid = np.arange(shape[1])[None] < lengths[:, None]
+	actual = jax.device_get(_replay(teams, actions, forced, valid, build_engine_tables(tables)))
+	mismatches = []
+	for b, battle in enumerate(battles):
+		snapshots = [battle["initialState"]] + [record["state"] for record in battle["steps"]]
+		expected = [recorded_state(snapshot) for snapshot in snapshots]
+		# Check padding too: it must keep the last recorded state, even after a win.
+		expected += [expected[-1]] * (shape[1] + 1 - len(expected))
+		fields = {name: np.stack([state[name] for state in expected]) for name in actual}
+		first = None
+		for name, wanted in fields.items():
+			where = np.argwhere(actual[name][b] != wanted)
+			if where.size:
+				address = tuple(where[0])
+				point, *axes = address
+				if first is None or point < first[0]:
+					first = (point, name, address, axes)
+		if first is not None:
+			point, name, address, axes = first
+			record = battle["steps"][point - 1] if 0 < point <= lengths[b] else None
+			mismatches.append(
+				Mismatch(
+					battle["index"],
+					int(point) - 1,
+					name + "".join(f"[{i}]" for i in axes),
+					actual[name][b][address].item(),
+					fields[name][address].item(),
+					record["actions"] if record else None,
+					record["outcomes"] if record else None,
+				)
+			)
+	return ReplayResult(len(battles), int(lengths.sum()), tuple(mismatches), perf_counter() - start)
+
+
+def main():
+	parser = argparse.ArgumentParser(description=__doc__)
+	parser.add_argument("path", type=Path)
+	args = parser.parse_args()
+	result = replay_file(args.path)
+	print(result.report())
+	raise SystemExit(bool(result.mismatches))
+
+
+if __name__ == "__main__":
+	main()

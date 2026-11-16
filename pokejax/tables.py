@@ -44,6 +44,7 @@ class RowTable:
 
 @dataclass(frozen=True)
 class SpeciesTable(RowTable):
+	cosmetic_aliases: dict[str, str]
 	base_stats: NDArray[np.uint8]
 	types: NDArray[np.int8]
 	abilities: NDArray[np.int16]
@@ -143,6 +144,14 @@ def _build_natures(rows):
 
 def _build_species(rows, types, abilities):
 	ids, index, names = _identity(rows, reserve_none=True)
+	# Match generate-teams.cjs: preserve exported forms; collapse only cosmetic
+	# forms explicitly marked by Showdown when they have no row in this export.
+	cosmetic_aliases = {
+		_showdown_id(form): species["id"]
+		for species in rows
+		for form in species.get("cosmeticFormes", ())
+		if _showdown_id(form) not in index
+	}
 	count = len(ids)
 	base_stats = np.zeros((count, len(STAT_NAMES)), dtype=np.uint8)
 	type_rows = np.zeros((count, SPECIES_TYPE_SLOTS), dtype=np.int8)
@@ -161,7 +170,9 @@ def _build_species(rows, types, abilities):
 			ability_rows[row, slot] = abilities.index.get(ability, NONE_ROW)
 		weight_hg[row] = species["weighthg"]
 		num[row] = species["num"]
-	return SpeciesTable(ids, index, names, base_stats, type_rows, ability_rows, weight_hg, num)
+	return SpeciesTable(
+		ids, index, names, cosmetic_aliases, base_stats, type_rows, ability_rows, weight_hg, num
+	)
 
 
 def _build_moves(rows, types, target_names, flag_names):

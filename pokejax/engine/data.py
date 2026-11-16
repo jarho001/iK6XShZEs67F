@@ -12,6 +12,7 @@ from pokejax.tables import Tables
 class EngineTables(NamedTuple):
 	species_base_stats: jax.Array
 	species_types: jax.Array
+	species_plain_types: jax.Array
 	species_shedinja: jax.Array
 	move_type: jax.Array
 	move_category: jax.Array
@@ -26,6 +27,7 @@ class EngineTables(NamedTuple):
 	type_immune: jax.Array
 	nature_multipliers: jax.Array
 	struggle_id: jax.Array
+	multitype_id: jax.Array
 
 
 def build_engine_tables(tables: Tables) -> EngineTables:
@@ -34,12 +36,17 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 	pp = moves.pp.astype(np.int32)
 	no_boost = moves.no_pp_boosts | (np.asarray(moves.ids) == "trumpcard")
 	max_pp = np.where(no_boost, pp, pp * 8 // 5).astype(np.uint8)
+	# data/conditions.ts arceus.onType: in Gen 5 all forms are Normal
+	# without Multitype. The Pokedex's displayed form types are not actual types.
+	plain_types = tables.species.types.copy()
+	plain_types[tables.species.num == 493] = [tables.types.index["normal"], -1]
 	return EngineTables(
 		*map(
 			jnp.asarray,
 			(
 				tables.species.base_stats,
 				tables.species.types,
+				plain_types,
 				np.asarray(tables.species.ids) == "shedinja",
 				moves.type,
 				moves.category,
@@ -54,6 +61,7 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 				tables.types.immune,
 				tables.natures.multipliers,
 				np.asarray(moves.index["struggle"], dtype=np.int32),
+				np.asarray(tables.abilities.index["multitype"], dtype=np.int32),
 			),
 		)
 	)

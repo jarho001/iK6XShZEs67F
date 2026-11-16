@@ -108,7 +108,11 @@ def reset(key, teams: Teams, engine_tables: EngineTables) -> BattleState:
 	return BattleState(
 		species=teams.species.astype(jnp.int16),
 		level=teams.level.astype(jnp.uint8),
-		types=t.species_types[teams.species],
+		types=jnp.where(
+			(teams.ability == t.multitype_id)[..., None],
+			t.species_types[teams.species],
+			t.species_plain_types[teams.species],
+		),
 		stats=stats,
 		hp=stats[..., 0],
 		moves=teams.moves.astype(jnp.int16),

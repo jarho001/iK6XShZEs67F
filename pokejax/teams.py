@@ -84,13 +84,17 @@ def _move_id(move, member, tables):
 
 
 def load_team_pool(path, tables: Tables) -> TeamPool:
+	"""Read a JSON pool and resolve its recorded sets."""
+	with Path(path).open(encoding="utf-8") as source:
+		return team_pool_from_data(json.load(source), tables)
+
+
+def team_pool_from_data(data, tables: Tables) -> TeamPool:
 	"""Resolve all ids, reporting every unknown id and its occurrence count.
 
 	Inputs must contain exactly six members per team and one to four moves
 	per member. Numeric ranges are checked before casting to compact dtypes.
 	"""
-	with Path(path).open(encoding="utf-8") as source:
-		data = json.load(source)
 	if data["format"] != FORMAT:
 		raise ValueError(f"Expected format {FORMAT}, got {data['format']!r}")
 	teams = data["teams"]
@@ -115,6 +119,8 @@ def load_team_pool(path, tables: Tables) -> TeamPool:
 
 	def resolve(kind, id_):
 		table = getattr(tables, kind)
+		if kind == "species":
+			id_ = table.cosmetic_aliases.get(id_, id_)
 		if id_ not in table.index:
 			unresolved[kind, id_] += 1
 			return NONE_ROW

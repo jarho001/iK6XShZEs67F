@@ -220,3 +220,14 @@ def test_hidden_power_type_mismatch(data, tables, tmp_path):
 	member["ivs"] = dict.fromkeys(STAT_NAMES, 31)  # All odd IVs mean Dark.
 	with pytest.raises(ValueError, match="Hidden Power IVs"):
 		load_team_pool(write_data(tmp_path, data), tables)
+
+
+def test_cosmetic_resolution_preserves_exported_forms(data, tables, tmp_path):
+	data = deepcopy(data)
+	for member, species in zip(
+		data["teams"][0], ["sawsbuckwinter", "gastrodoneast", "basculinbluestriped"]
+	):
+		member["species"] = species
+	pool = load_team_pool(write_data(tmp_path, data), tables)
+	for slot, expected in enumerate(["sawsbuck", "gastrodoneast", "basculinbluestriped"]):
+		assert tables.species.ids[pool.species[0, slot]] == expected
