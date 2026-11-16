@@ -142,18 +142,33 @@ Exit: tables load, team pool exists, coverage table shows 0% supported.
 
 ### Phase 1: playable skeleton, benchmark, smoke test
 
-- State, `reset(key, teams)`, `step(state, actions)`, legal-action mask.
-- Full 6v6 turn loop: switching, priority and speed order with random ties,
-  accuracy, critical hits, type chart and immunities, STAB, damage with the
-  roll, PP, Struggle, fainting, forced replacement, win detection.
-- Every move behaves as a plain damaging move from its table row; status
-  moves do nothing; abilities and items do nothing.
-- Differential suite against Showdown using teams restricted to plain
-  damaging moves with abilities and items stripped.
-- Benchmark script reporting steps per second and compile time.
-- Observation function (first version, own side fully visible, opponent side
-  as revealed so far) and a small recurrent PPO that learns to beat the random
-  policy. This is a smoke test, not the final algorithm; a few hundred lines.
+Tasks, in order. Task 5 depends only on the forced-outcome format from task 1,
+so it can run alongside tasks 2 and 3.
+
+1. State and randomness: fixed-shape state, the single sample-or-force
+   function for random outcomes (Contract item 3), and `reset(key, teams)`.
+2. Actions and turn order: legal-action mask, switching, priority and speed
+   order with random ties, forced replacement after a faint as a decision
+   point.
+3. Moves and damage: accuracy, critical hits, type chart and immunities,
+   STAB, damage with the roll, PP, Struggle, fainting, win detection. Every
+   move behaves as a plain damaging move from its table row; status moves do
+   nothing; abilities and items do nothing.
+4. Benchmark script reporting steps per second and compile time, with a
+   random legal policy. Run it as soon as task 3 works, so a slow design
+   shows up before more is built on it.
+5. Showdown side of the differential suite: teams restricted to plain
+   damaging moves with abilities and items stripped (few pool sets have four
+   such moves, so pool Pokemon get their moves replaced), recorded actions,
+   random outcomes and state at each decision point.
+6. Python side of the differential suite: replay with forced outcomes through
+   one compiled step function, then fix the engine until it passes.
+7. Observation function, first version: own side fully visible, opponent side
+   as revealed so far.
+8. A small recurrent PPO that learns to beat the random policy. This is a
+   smoke test, not the final algorithm; a few hundred lines.
+9. Measure the gates and record them in the README; adjust the throughput
+   target once, as the Testing rules say.
 
 Exit: differential suite passes, gates measured and recorded in the README,
 PPO beats random clearly.
