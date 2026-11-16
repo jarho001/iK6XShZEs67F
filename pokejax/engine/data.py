@@ -25,6 +25,7 @@ class EngineTables(NamedTuple):
 	type_exponent: jax.Array
 	type_immune: jax.Array
 	nature_multipliers: jax.Array
+	struggle_id: jax.Array
 
 
 def build_engine_tables(tables: Tables) -> EngineTables:
@@ -52,6 +53,7 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 				tables.types.exponent,
 				tables.types.immune,
 				tables.natures.multipliers,
+				np.asarray(moves.index["struggle"], dtype=np.int32),
 			),
 		)
 	)
