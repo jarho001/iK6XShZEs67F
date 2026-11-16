@@ -61,6 +61,7 @@ class MoveTable(RowTable):
 	always_hits: NDArray[np.bool_]
 	priority: NDArray[np.int8]
 	pp: NDArray[np.uint8]
+	no_pp_boosts: NDArray[np.bool_]
 	crit_ratio: NDArray[np.uint8]
 	target: NDArray[np.uint8]
 	flags: NDArray[np.bool_]
@@ -176,6 +177,7 @@ def _build_moves(rows, types, target_names, flag_names):
 		"always_hits": np.zeros(count, dtype=np.bool_),
 		"priority": np.zeros(count, dtype=np.int8),
 		"pp": np.zeros(count, dtype=np.uint8),
+		"no_pp_boosts": np.zeros(count, dtype=np.bool_),
 		"crit_ratio": np.zeros(count, dtype=np.uint8),
 		"target": np.zeros(count, dtype=np.uint8),
 		"flags": np.zeros((count, len(flag_names)), dtype=np.bool_),
@@ -189,6 +191,7 @@ def _build_moves(rows, types, target_names, flag_names):
 			("crit_ratio", "critRatio"),
 		):
 			columns[column][row] = move[key]
+		columns["no_pp_boosts"][row] = move.get("noPPBoosts", False)
 		columns["type"][row] = types.index[_showdown_id(move["type"])]
 		columns["category"][row] = CATEGORY_INDEX[move["category"]]
 		columns["always_hits"][row] = move["accuracy"] is True

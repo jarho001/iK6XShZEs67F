@@ -66,6 +66,7 @@ def test_shapes_and_dtypes(tables, data):
 			"always_hits": (np.bool_, ()),
 			"priority": (np.int8, ()),
 			"pp": (np.uint8, ()),
+			"no_pp_boosts": (np.bool_, ()),
 			"crit_ratio": (np.uint8, ()),
 			"target": (np.uint8, ()),
 			"flags": (np.bool_, (len(tables.moves.flag_names),)),
@@ -120,6 +121,7 @@ def test_moves_round_trip(tables, data):
 			("crit_ratio", "critRatio"),
 		):
 			assert getattr(tables.moves, column)[row] == source[key]
+		assert tables.moves.no_pp_boosts[row] == source.get("noPPBoosts", False)
 		assert tables.types.ids[tables.moves.type[row]] == source["type"].lower()
 		assert ("Physical", "Special", "Status")[tables.moves.category[row]] == source["category"]
 		assert tables.moves.always_hits[row] == (source["accuracy"] is True)
