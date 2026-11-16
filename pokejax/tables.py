@@ -39,6 +39,7 @@ def _read_data(path):
 class RowTable:
 	ids: tuple[str, ...]
 	index: dict[str, int]
+	names: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -101,12 +102,14 @@ class Tables:
 
 def _identity(rows, *, reserve_none=False):
 	ids = tuple(row["id"] for row in rows)
+	names = tuple(row["name"] for row in rows)
 	if reserve_none:
 		ids = (NONE_ID,) + ids
+		names = ("",) + names
 	index = {id_: row for row, id_ in enumerate(ids)}
 	if len(index) != len(ids):
 		raise ValueError("Duplicate Showdown ids in table")
-	return ids, index
+	return ids, index, names
 
 
 def _showdown_id(name):
@@ -114,7 +117,7 @@ def _showdown_id(name):
 
 
 def _build_types(rows):
-	ids, index = _identity(rows)
+	ids, index, names = _identity(rows)
 	shape = (len(rows), len(rows))
 	exponent = np.zeros(shape, dtype=np.int8)
 	immune = np.zeros(shape, dtype=np.bool_)
@@ -123,22 +126,22 @@ def _build_types(rows):
 			code = defending["damageTaken"].get(attacking["name"], TYPE_NEUTRAL)
 			exponent[attacker, defender] = TYPE_EXPONENT[code]
 			immune[attacker, defender] = code == TYPE_IMMUNE
-	return TypeTable(ids, index, exponent, immune)
+	return TypeTable(ids, index, names, exponent, immune)
 
 
 def _build_natures(rows):
-	ids, index = _identity(rows)
+	ids, index, names = _identity(rows)
 	multipliers = np.full((len(rows), len(STAT_NAMES)), NATURE_NEUTRAL, dtype=np.int16)
 	for row, nature in enumerate(rows):
 		if "plus" in nature:
 			multipliers[row, STAT_NAMES.index(nature["plus"])] = NATURE_PLUS
 		if "minus" in nature:
 			multipliers[row, STAT_NAMES.index(nature["minus"])] = NATURE_MINUS
-	return NatureTable(ids, index, multipliers)
+	return NatureTable(ids, index, names, multipliers)
 
 
 def _build_species(rows, types, abilities):
-	ids, index = _identity(rows, reserve_none=True)
+	ids, index, names = _identity(rows, reserve_none=True)
 	count = len(ids)
 	base_stats = np.zeros((count, len(STAT_NAMES)), dtype=np.uint8)
 	type_rows = np.zeros((count, SPECIES_TYPE_SLOTS), dtype=np.int8)
@@ -157,12 +160,12 @@ def _build_species(rows, types, abilities):
 			ability_rows[row, slot] = abilities.index.get(ability, NONE_ROW)
 		weight_hg[row] = species["weighthg"]
 		num[row] = species["num"]
-	return SpeciesTable(ids, index, base_stats, type_rows, ability_rows, weight_hg, num)
+	return SpeciesTable(ids, index, names, base_stats, type_rows, ability_rows, weight_hg, num)
 
 
 def _build_moves(rows, types, target_names, flag_names):
 	target_index = {name: index for index, name in enumerate(target_names)}
-	ids, index = _identity(rows, reserve_none=True)
+	ids, index, names = _identity(rows, reserve_none=True)
 	count = len(ids)
 	columns = {
 		"num": np.zeros(count, dtype=np.int16),
@@ -192,7 +195,7 @@ def _build_moves(rows, types, target_names, flag_names):
 		columns["accuracy"][row] = 0 if move["accuracy"] is True else move["accuracy"]
 		columns["target"][row] = target_index[move["target"]]
 		columns["flags"][row] = [bool(move["flags"].get(flag)) for flag in flag_names]
-	return MoveTable(ids, index, **columns, target_names=target_names, flag_names=flag_names)
+	return MoveTable(ids, index, names, **columns, target_names=target_names, flag_names=flag_names)
 
 
 def load_tables(path=None) -> Tables:
@@ -211,16 +214,18 @@ def load_tables(path=None) -> Tables:
 	target_names = tuple(sorted({move["target"] for move in data["moves"]}))
 	flag_names = tuple(sorted({flag for move in data["moves"] for flag in move["flags"]}))
 	types = _build_types(data["types"])
-	ability_ids, ability_index = _identity(rows["abilities"], reserve_none=True)
+	ability_ids, ability_index, ability_names = _identity(rows["abilities"], reserve_none=True)
 	abilities = AbilityTable(
 		ability_ids,
 		ability_index,
+		ability_names,
 		np.array([0] + [entry["num"] for entry in rows["abilities"]], dtype=np.int16),
 	)
-	item_ids, item_index = _identity(rows["items"], reserve_none=True)
+	item_ids, item_index, item_names = _identity(rows["items"], reserve_none=True)
 	items = ItemTable(
 		item_ids,
 		item_index,
+		item_names,
 		np.array([0] + [entry["num"] for entry in rows["items"]], dtype=np.int16),
 		np.array([False] + [entry["isBerry"] for entry in rows["items"]], dtype=np.bool_),
 	)

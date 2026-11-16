@@ -35,6 +35,8 @@ def test_counts_ids_and_none_rows(tables, data):
 		if reserved:
 			expected = ("",) + expected
 		assert table.ids == expected
+		names = {entry["id"]: entry["name"] for entry in data[kind]}
+		assert table.names == tuple(names.get(id_, "") for id_ in expected)
 		assert len(table.ids) == len(data[kind]) + int(reserved)
 		assert table.index == {id_: row for row, id_ in enumerate(expected)}
 		if reserved:
@@ -208,12 +210,14 @@ def test_explicit_path_and_input_order(tables, data, tmp_path):
 def test_move_names_come_from_selected_export(data, tmp_path):
 	data = deepcopy(data)
 	move = data["moves"][0]
+	move["name"] = "Custom Display Name"
 	move["target"] = "customTarget"
 	move["flags"] = {"customFlag": 1, "disabledFlag": 0}
 	data["moves"] = [move]
 	path = tmp_path / "custom-export.json"
 	path.write_text(json.dumps(data), encoding="utf-8")
 	moves = load_tables(path).moves
+	assert moves.names == ("", "Custom Display Name")
 	assert moves.target_names == ("customTarget",)
 	assert moves.flag_names == ("customFlag", "disabledFlag")
 	assert moves.target[moves.index[move["id"]]] == 0
