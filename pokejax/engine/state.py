@@ -28,6 +28,8 @@ class BattleState(NamedTuple):
 	Species, moves, ability, item and stored stats/HP are int16. Level, PP,
 	EVs, IVs and happiness are uint8. Other member/side fields are int8;
 	turn is int32. Boost order is atk/def/spa/spd/spe/accuracy/evasion.
+	seen_order is int8 [2, 6]: 0 for unseen, otherwise 1-based first appearance.
+	revealed_moves is uint8 [2, 6, 4], indexed by the owner's fixed move slots.
 	"""
 
 	species: jax.Array
@@ -47,6 +49,8 @@ class BattleState(NamedTuple):
 	happiness: jax.Array
 	status: jax.Array
 	status_counter: jax.Array
+	seen_order: jax.Array
+	revealed_moves: jax.Array
 	active: jax.Array
 	boosts: jax.Array
 	request: jax.Array

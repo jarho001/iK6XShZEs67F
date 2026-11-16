@@ -20,7 +20,11 @@ def _switch(state, side, action, enabled):
 		jnp.where(enabled, target, state.active[side]).astype(state.active.dtype)
 	)
 	boosts = state.boosts.at[side].set(jnp.where(enabled, 0, state.boosts[side]))
-	return state._replace(active=active, boosts=boosts)
+	order = state.seen_order[side, target]
+	order = jnp.where(enabled & (order == 0), jnp.max(state.seen_order[side]) + 1, order)
+	return state._replace(
+		active=active, boosts=boosts, seen_order=state.seen_order.at[side, target].set(order)
+	)
 
 
 def _move(state, side, action, move, enabled, key, forced, tables):
@@ -31,7 +35,11 @@ def _move(state, side, action, move, enabled, key, forced, tables):
 	slot = jnp.minimum(action, 3)
 	pp = state.pp[side, user, slot].astype(jnp.int32)
 	new_pp = jnp.maximum(pp - (enabled & ~struggle), 0).astype(state.pp.dtype)
-	state = state._replace(pp=state.pp.at[side, user, slot].set(new_pp))
+	revealed = state.revealed_moves[side, user, slot] | (enabled & ~struggle)
+	state = state._replace(
+		pp=state.pp.at[side, user, slot].set(new_pp),
+		revealed_moves=state.revealed_moves.at[side, user, slot].set(revealed),
+	)
 	damage, success = move_damage(state, side, move, key, forced, tables)
 	damage = jnp.where(enabled, damage, 0)
 	hp = state.hp.astype(jnp.int32)

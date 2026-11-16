@@ -12,6 +12,7 @@ import numpy as np
 
 from pokejax.engine.actions import legal_actions
 from pokejax.engine.data import build_engine_tables
+from pokejax.engine.observation import observe
 from pokejax.engine.randomness import UNFORCED
 from pokejax.engine.reset import Teams, check_teams, reset
 from pokejax.engine.state import ONGOING, TEAM_SLOTS
@@ -33,7 +34,7 @@ def _new_states(key, pool, tables, batch_size):
 	return jax.vmap(reset, in_axes=(0, 0, None))(keys, teams, tables)
 
 
-def rollout(carry, pool, tables, steps):
+def rollout(carry, pool, tables, steps, with_observation=False):
 	"""Advance a batch and return completed count and total completed lengths."""
 
 	def advance(carry, _):
@@ -46,6 +47,13 @@ def rollout(carry, pool, tables, steps):
 		state = jax.vmap(step, in_axes=(0, 0, 0, None, None))(
 			state, actions, keys, UNFORCED, tables
 		)
+		# Consume every observation leaf so XLA cannot discard observation work.
+		checksum = jnp.float32(0)
+		if with_observation:
+			observations = jax.vmap(
+				lambda s: jax.vmap(observe, in_axes=(None, 0, None))(s, jnp.arange(2), tables)
+			)(state)
+			checksum = sum(jnp.sum(x.astype(jnp.float32)) for x in jax.tree.leaves(observations))
 		finished = state.winner != ONGOING
 		lengths = lengths + 1
 		completed_length = jnp.sum(jnp.where(finished, lengths, 0))
@@ -58,10 +66,11 @@ def rollout(carry, pool, tables, steps):
 			state,
 		)
 		lengths = jnp.where(finished, 0, lengths)
-		return (state, key, lengths), (jnp.sum(finished), completed_length)
+		stats = (jnp.sum(finished), completed_length)
+		return (state, key, lengths), (*stats, checksum) if with_observation else stats
 
-	carry, (counts, lengths) = jax.lax.scan(advance, carry, None, length=steps)
-	return carry, (jnp.sum(counts), jnp.sum(lengths))
+	carry, stats = jax.lax.scan(advance, carry, None, length=steps)
+	return carry, tuple(jnp.sum(x) for x in stats)
 
 
 def benchmark(
@@ -70,6 +79,7 @@ def benchmark(
 	steps=DEFAULT_STEPS,
 	repetitions=DEFAULT_REPETITIONS,
 	seed=0,
+	with_observation=False,
 ):
 	"""Benchmark on the default device; use a fresh process for a cold compile."""
 	if min(batch_size, steps, repetitions) < 1:
@@ -90,7 +100,7 @@ def benchmark(
 	state = _new_states(init_key, pool, engine_tables, batch_size)
 	carry = (state, key, jnp.zeros(batch_size, dtype=jnp.int32))
 	jax.block_until_ready((carry, pool, engine_tables))
-	run = jax.jit(lambda carry, pool, tables: rollout(carry, pool, tables, steps))
+	run = jax.jit(lambda carry, pool, tables: rollout(carry, pool, tables, steps, with_observation))
 	start = time.perf_counter()
 	carry, _ = jax.block_until_ready(run(carry, pool, engine_tables))
 	compile_seconds = time.perf_counter() - start
@@ -110,6 +120,8 @@ def benchmark(
 		"device": str(jax.devices()[0].device_kind),
 		"jax_version": jax.__version__,
 		"batch_size": batch_size,
+		"with_observation": with_observation,
+		"observation_checksum": float(stats[2]) if with_observation else None,
 		"steps_per_call": steps,
 		"repetitions": repetitions,
 		"compile_seconds": compile_seconds,
@@ -132,8 +144,18 @@ def main():
 	parser.add_argument("--seed", type=int, default=0)
 	parser.add_argument("--team-pool", type=Path, default=DEFAULT_POOL)
 	parser.add_argument("--json", action="store_true")
+	parser.add_argument(
+		"--with-observation", action="store_true", help="observe both sides each step"
+	)
 	args = parser.parse_args()
-	result = benchmark(args.team_pool, args.batch_size, args.steps, args.repetitions, args.seed)
+	result = benchmark(
+		args.team_pool,
+		args.batch_size,
+		args.steps,
+		args.repetitions,
+		args.seed,
+		args.with_observation,
+	)
 	if args.json:
 		print(json.dumps(result))
 	else:
