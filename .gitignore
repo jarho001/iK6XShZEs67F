@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv*/
+reference/vendor/
+work/
+*.log
+*.npz

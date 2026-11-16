@@ -1,0 +1,3 @@
+# Only requirements.txt is copied into the image; the repo is mounted at run time.
+*
+!requirements.txt

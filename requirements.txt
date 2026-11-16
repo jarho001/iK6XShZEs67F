@@ -1,0 +1,11 @@
+# Python pins for this repo, used by the Dockerfile and usable outside Docker
+# (Python 3.12 or newer). On Linux this installs the CUDA 13 GPU build of JAX;
+# elsewhere it falls back to the CPU build.
+jax[cuda13]==0.12.0.1; sys_platform == "linux"
+jax==0.12.0.1; sys_platform != "linux"
+jaxlib==0.12.0.1
+flax==0.12.12
+optax==0.2.9
+numpy==2.5.5
+pytest==9.2.0
+ruff==0.17.5
