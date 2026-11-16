@@ -8,9 +8,9 @@ fixed-point modifier, including identity for non-STAB damage.
 
 import jax.numpy as jnp
 
+from .burn import _as_bool
 from .fixedpoint import apply_fixedpoint_modifier
 from .stat_stage import _as_int32
-from .burn import _as_bool
 
 
 def apply_stab(damage, stab_eligible, adaptability, typeless):
@@ -20,7 +20,10 @@ def apply_stab(damage, stab_eligible, adaptability, typeless):
 	adaptability_array = _as_bool(adaptability, "adaptability")
 	typeless_array = _as_bool(typeless, "typeless")
 	value, eligible_array, adaptability_array, typeless_array = jnp.broadcast_arrays(
-		value, eligible_array, adaptability_array, typeless_array,
+		value,
+		eligible_array,
+		adaptability_array,
+		typeless_array,
 	)
 	modifier = jnp.where(
 		eligible_array,

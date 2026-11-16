@@ -18,7 +18,6 @@ import jax.numpy as jnp
 
 from .stat_stage import _as_int32
 
-
 STAT_COUNT = 6
 LOW_16_MASK = 0xFFFF
 
@@ -67,10 +66,14 @@ def derive_stored_stats(base_stats, level, ivs, evs, nature_multipliers, shedinj
 	shedinja_array = shedinja_array[..., None]
 
 	ev_quarters = effort // 4
-	hp = ((2 * base[..., 0] + individual[..., 0] + ev_quarters[..., 0] + 100) * level_array[..., 0]) // 100 + 10
+	hp = (
+		(2 * base[..., 0] + individual[..., 0] + ev_quarters[..., 0] + 100) * level_array[..., 0]
+	) // 100 + 10
 	hp = jnp.where(shedinja_array[..., 0], 1, hp)
 
-	non_hp_base = ((2 * base[..., 1:] + individual[..., 1:] + ev_quarters[..., 1:]) * level_array) // 100 + 5
+	non_hp_base = (
+		(2 * base[..., 1:] + individual[..., 1:] + ev_quarters[..., 1:]) * level_array
+	) // 100 + 5
 	# Gen 5 uses Dex.trunc(product, 16) before dividing by 100 for nature
 	# scaling. Select multipliers first; all evaluated intermediates stay int32.
 	factor = jnp.where(nature[..., 1:] == 11, 110, jnp.where(nature[..., 1:] == 9, 90, 100))

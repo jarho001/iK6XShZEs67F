@@ -31,7 +31,10 @@ def apply_burn_reduction(damage, burned, physical, has_guts):
 	physical_array = _as_bool(physical, "physical")
 	guts_array = _as_bool(has_guts, "has_guts")
 	value, burned_array, physical_array, guts_array = jnp.broadcast_arrays(
-		value, burned_array, physical_array, guts_array,
+		value,
+		burned_array,
+		physical_array,
+		guts_array,
 	)
 	reduced = apply_fixedpoint_modifier(value, jnp.asarray(2048, dtype=jnp.int32))
 	return jnp.where(burned_array & physical_array & ~guts_array, reduced, value).astype(jnp.int32)
