@@ -54,9 +54,9 @@ Useful to read in the archive, as examples only:
 - `reference/shared-engine-cases.cjs`: sets up a custom battle in Showdown and
   dumps state after each step.
 
-Toolchain on this machine: Python 3.11 and Node 20 on Windows. JAX on the GPU
-needs Linux, so run under WSL2 or Docker (the archive has a working
-`Dockerfile`).
+This repo has its own `Dockerfile` with Python 3.13, Node 22 and the pinned
+CUDA 13 GPU build of JAX. See `README.md` for building and running it on the
+Windows dev machine through Docker Desktop / WSL2 or on Linux GPU machines.
 
 ## Contract
 

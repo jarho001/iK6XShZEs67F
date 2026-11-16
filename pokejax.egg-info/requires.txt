@@ -1,0 +1,14 @@
+jaxlib==0.12.0.1
+flax==0.12.12
+optax==0.2.9
+numpy==2.5.5
+
+[:sys_platform != "linux"]
+jax==0.12.0.1
+
+[:sys_platform == "linux"]
+jax[cuda13]==0.12.0.1
+
+[dev]
+pytest==9.2.0
+ruff==0.17.5

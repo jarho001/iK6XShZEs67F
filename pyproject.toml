@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pokejax"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    'jax[cuda13]==0.12.0.1; sys_platform == "linux"',
+    'jax==0.12.0.1; sys_platform != "linux"',
+    "jaxlib==0.12.0.1",
+    "flax==0.12.12",
+    "optax==0.2.9",
+    "numpy==2.5.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.2.0", "ruff==0.17.5"]
+
+[tool.setuptools.packages.find]
+include = ["pokejax*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.format]
+indent-style = "tab"

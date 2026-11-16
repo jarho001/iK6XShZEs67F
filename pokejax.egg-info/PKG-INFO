@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: pokejax
+Version: 0.1.0
+Requires-Python: >=3.12
+Requires-Dist: jax[cuda13]==0.12.0.1; sys_platform == "linux"
+Requires-Dist: jax==0.12.0.1; sys_platform != "linux"
+Requires-Dist: jaxlib==0.12.0.1
+Requires-Dist: flax==0.12.12
+Requires-Dist: optax==0.2.9
+Requires-Dist: numpy==2.5.5
+Provides-Extra: dev
+Requires-Dist: pytest==9.2.0; extra == "dev"
+Requires-Dist: ruff==0.17.5; extra == "dev"

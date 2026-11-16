@@ -1,10 +1,10 @@
 """Bounded composition of the post-core Gen 5 damage arithmetic slices."""
 
-from mechanics.burn import apply_burn_reduction
-from mechanics.damage_roll import apply_damage_roll
-from mechanics.finalize_damage import finalize_damage
-from mechanics.stab import apply_stab
-from mechanics.type_effectiveness import apply_type_effectiveness
+from .burn import apply_burn_reduction
+from .damage_roll import apply_damage_roll
+from .finalize_damage import finalize_damage
+from .stab import apply_stab
+from .type_effectiveness import apply_type_effectiveness
 
 
 def damage_from_preroll(

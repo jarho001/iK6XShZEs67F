@@ -1,7 +1,7 @@
 """Composition from explicit effective stats through neutral final damage."""
 
-from mechanics.damage_composition import damage_from_preroll
-from mechanics.neutral_damage import neutral_damage_before_roll
+from .damage_composition import damage_from_preroll
+from .neutral_damage import neutral_damage_before_roll
 
 
 def damage_from_effective_stats_neutral(
