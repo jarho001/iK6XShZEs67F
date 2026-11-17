@@ -7,6 +7,25 @@ from pokejax.tables import STAT_NAMES, load_tables
 from pokejax.teams import MOVE_SLOTS, TEAM_SLOTS, TeamPool
 
 
+def pytest_addoption(parser):
+	parser.addoption(
+		"--large", action="store_true", help="also replay the 300-battle recordings in work/diff/"
+	)
+
+
+def pytest_configure(config):
+	config.addinivalue_line("markers", "large: replays a 300-battle recording (needs --large)")
+
+
+def pytest_collection_modifyitems(config, items):
+	if config.getoption("--large"):
+		return
+	skip = pytest.mark.skip(reason="300-battle recording; run with --large")
+	for item in items:
+		if "large" in item.keywords:
+			item.add_marker(skip)
+
+
 @pytest.fixture
 def tables():
 	return load_tables()

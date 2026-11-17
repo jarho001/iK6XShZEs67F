@@ -11,8 +11,6 @@ from pokejax.tables import load_tables
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests/fixtures/diff-phase1.jsonl.gz"
-LARGE = ROOT / "work/diff/phase1.jsonl.gz"
-STATUS_LARGE = ROOT / "work/diff/status.jsonl.gz"
 
 
 def test_snapshot_status_mapping():
@@ -29,16 +27,14 @@ def test_fixtures(fixture):
 	assert not result.mismatches, result.report()
 
 
-@pytest.mark.skipif(not LARGE.exists(), reason="Regenerate with reference/record-battles.cjs")
-def test_large_phase1():
-	result = replay_file(LARGE)
-	assert result.battles == 300
-	assert not result.mismatches, result.report()
-
-
-@pytest.mark.skipif(not STATUS_LARGE.exists(), reason="Regenerate the status recording")
-def test_large_status():
-	result = replay_file(STATUS_LARGE)
+# The 300-battle recordings in work/diff/ (git-ignored) run only with --large.
+@pytest.mark.large
+@pytest.mark.parametrize("name", ["phase1", "status"])
+def test_large_recording(name):
+	path = ROOT / f"work/diff/{name}.jsonl.gz"
+	if not path.exists():
+		pytest.skip(f"Regenerate {path} with reference/record-battles.cjs")
+	result = replay_file(path)
 	assert result.battles == 300
 	assert not result.mismatches, result.report()
 
