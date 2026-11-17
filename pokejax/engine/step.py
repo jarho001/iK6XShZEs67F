@@ -7,6 +7,7 @@ masked arithmetic can evaluate unused outcomes without consuming randomness.
 import jax.numpy as jnp
 
 from .actions import SIDES, bench_slots
+from .boosts import apply_boosts
 from .damage import move_damage
 from .order import action_order
 from .residual import residual
@@ -46,6 +47,7 @@ def _move(state, side, action, move, enabled, key, forced, tables):
 	)
 	damage, success, hit = move_damage(state, side, move, key, forced, tables)
 	state = apply_move(state, side, move, enabled, hit, success, damage, key, forced, tables)
+	state = apply_boosts(state, side, move, enabled, hit, success, tables)
 	damage = jnp.where(enabled, damage, 0)
 	hp = state.hp.astype(jnp.int32)
 	hp = hp.at[foe, target].set(jnp.maximum(hp[foe, target] - damage, 0))

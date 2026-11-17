@@ -32,6 +32,10 @@ class EngineTables(NamedTuple):
 	move_defrost: jax.Array
 	move_thaws_target: jax.Array
 	move_checks_immunity: jax.Array
+	move_boosts: jax.Array
+	move_boost_when: jax.Array
+	move_boost_target: jax.Array
+	move_boost_effect: jax.Array
 	status_immune: jax.Array
 	type_exponent: jax.Array
 	type_immune: jax.Array
@@ -70,6 +74,47 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 	):
 		for name in names:
 			effect[moves.index[name]] = value
+	# Only mechanics in this task are enabled; other exported boosts can have
+	# additional effects that belong to later tasks.
+	boost_moves = (
+		"agility",
+		"bulkup",
+		"calmmind",
+		"coil",
+		"cosmicpower",
+		"dragondance",
+		"honeclaws",
+		"nastyplot",
+		"quiverdance",
+		"rockpolish",
+		"shellsmash",
+		"shiftgear",
+		"swordsdance",
+		"tailglow",
+		"workup",
+	)
+	drop_moves = (
+		"closecombat",
+		"dracometeor",
+		"leafstorm",
+		"overheat",
+		"psychoboost",
+		"superpower",
+		"vcreate",
+	)
+	boosts = np.zeros_like(moves.boosts)
+	when = np.zeros(len(moves.ids), np.int8)
+	boost_target = np.zeros(len(moves.ids), np.int8)
+	for name in boost_moves:
+		idx = moves.index[name]
+		boosts[idx], when[idx] = moves.boosts[idx], 1
+		boost_target[idx] = moves.target[idx] != moves.target_names.index("self")
+	for name in drop_moves:
+		idx = moves.index[name]
+		boosts[idx], when[idx] = moves.self_boosts[idx], 2
+	boost_effect = np.zeros(len(moves.ids), np.int8)
+	for value, name in enumerate(("haze", "clearsmog", "bellydrum"), 1):
+		boost_effect[moves.index[name]] = value
 	immune = np.zeros((7, len(tables.types.ids)), np.bool_)
 	for value, names in (
 		(BURN, ("fire",)),
@@ -105,6 +150,10 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 				defrost,
 				thaws_target,
 				np.asarray(moves.ids) == "thunderwave",
+				boosts,
+				when,
+				boost_target,
+				boost_effect,
 				immune,
 				tables.types.exponent,
 				tables.types.immune,

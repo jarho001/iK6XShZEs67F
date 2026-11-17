@@ -66,6 +66,8 @@ class MoveTable(RowTable):
 	crit_ratio: NDArray[np.uint8]
 	target: NDArray[np.uint8]
 	flags: NDArray[np.bool_]
+	boosts: NDArray[np.int8]
+	self_boosts: NDArray[np.int8]
 	target_names: tuple[str, ...]
 	flag_names: tuple[str, ...]
 
@@ -192,6 +194,8 @@ def _build_moves(rows, types, target_names, flag_names):
 		"crit_ratio": np.zeros(count, dtype=np.uint8),
 		"target": np.zeros(count, dtype=np.uint8),
 		"flags": np.zeros((count, len(flag_names)), dtype=np.bool_),
+		"boosts": np.zeros((count, 7), dtype=np.int8),
+		"self_boosts": np.zeros((count, 7), dtype=np.int8),
 	}
 	for row, move in enumerate(rows, start=1):
 		for column, key in (
@@ -202,6 +206,14 @@ def _build_moves(rows, types, target_names, flag_names):
 			("crit_ratio", "critRatio"),
 		):
 			columns[column][row] = move[key]
+		for column, values in (
+			("boosts", move.get("boosts", {})),
+			("self_boosts", move.get("self", {}).get("boosts", {})),
+		):
+			for stat, amount in values.items():
+				columns[column][
+					row, ("atk", "def", "spa", "spd", "spe", "accuracy", "evasion").index(stat)
+				] = amount
 		columns["no_pp_boosts"][row] = move.get("noPPBoosts", False)
 		columns["type"][row] = types.index[_showdown_id(move["type"])]
 		columns["category"][row] = CATEGORY_INDEX[move["category"]]

@@ -223,6 +223,16 @@ test('status isolation fixture regenerates from its recorded seed', () => {
 	}
 });
 
+test('boost isolation fixture regenerates from its recorded seed', () => {
+	const file = path.join(root, 'tests/fixtures/diff-boosts.jsonl.gz');
+	const [boostHeader, ...records] = gunzipSync(fs.readFileSync(file)).toString().trim().split('\n').map(JSON.parse);
+	const pool = JSON.parse(fs.readFileSync(path.join(root, 'work/teams/gen5-teams.json')));
+	for (const index of [0, 1]) {
+		assert.deepEqual(playBattle(index, boostHeader.seed, pool, boostHeader.acceptedMoves,
+			[], [], boostHeader.allowed), records[index]);
+	}
+});
+
 test('freeze prevention records a thaw outcome for the affected side', () => {
 	const battle = createBattle(battles[0]);
 	try {

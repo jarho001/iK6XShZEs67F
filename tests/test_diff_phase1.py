@@ -29,7 +29,7 @@ def test_fixtures(fixture):
 
 # The 300-battle recordings in work/diff/ (git-ignored) run only with --large.
 @pytest.mark.large
-@pytest.mark.parametrize("name", ["phase1", "status"])
+@pytest.mark.parametrize("name", ["phase1", "status", "boosts"])
 def test_large_recording(name):
 	path = ROOT / f"work/diff/{name}.jsonl.gz"
 	if not path.exists():

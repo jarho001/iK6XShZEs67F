@@ -7,6 +7,9 @@
  * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-status.allowed.json --out work/diff/status.jsonl.gz
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-status.allowed.json --out tests/fixtures/diff-status.jsonl.gz
  *
+ * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-boosts.allowed.json --out work/diff/boosts.jsonl.gz
+ * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-boosts.allowed.json --out tests/fixtures/diff-boosts.jsonl.gz
+ *
  * JSONL schema v2: header {type, schemaVersion, showdownCommit, seed, count,
  * acceptedMoves, ...}; battle {type, index, seed (four uint16 words), policySeed,
  * poolIndices, profile, teams (exact constructor inputs), initialOverrides: [],
@@ -265,6 +268,7 @@ function instrument(battle, stats) {
 		};
 	}
 	wrap(battle.actions, 'hitStepAccuracy', (targets, user, move) => ({ kind: 'hit', user, move }));
+	wrap(battle.actions, 'selfDrops', (targets, user, move, moveData) => ({ kind: 'selfDrops', user, move, moveData }));
 	wrap(battle.actions, 'getDamage', (user, target, move) => ({ kind: 'crit', user, move }));
 	wrap(battle, 'randomizer', () => ({ kind: 'damage_roll', user: battle.activePokemon, move: battle.activeMove }));
 	wrap(battle.queue, 'sort', () => ({ kind: 'queue' }));
@@ -297,6 +301,10 @@ function instrument(battle, stats) {
 		const caller = directCaller();
 		const statusScope = this.effect?.effectType === 'Status' ?
 			{ kind: 'status', status: this.effect.id, target: this.effectState.target } : scope;
+		if (scope?.kind === 'selfDrops' && caller === 'BattleActions.selfDrops' && args[0] === 100 &&
+			scope.moveData.self?.boosts && scope.moveData.self.chance === undefined) {
+			return allow('deterministic-self-drop', () => battleRandom.apply(this, args));
+		}
 		const rule = OUTCOME_RULES.find(rule => rule.method === 'random' && rule.matches(statusScope, caller, args));
 		assert(rule, `Unclassified battle.random at ${caller}: ${args}`);
 		const value = allow(rule.kind, () => battleRandom.apply(this, args));
