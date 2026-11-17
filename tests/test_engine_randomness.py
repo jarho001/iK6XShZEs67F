@@ -21,6 +21,7 @@ from pokejax.engine.randomness import (
 	first_side,
 	forced_from_records,
 	integer,
+	random_bits,
 )
 
 
@@ -106,6 +107,17 @@ def test_address_is_stable_and_forcing_is_local():
 	assert bool(chance(key, UNFORCED, HIT, 0, 0, 100, 100))
 	assert int(integer(key, UNFORCED, ORDER, 0, 0, 1)) == 0
 	assert np.all(np.asarray(UNFORCED) == -1)
+
+
+@pytest.mark.parametrize("key", [jax.random.key(7), jax.random.PRNGKey(7)])
+def test_shared_bits_preserve_addressed_results(key):
+	bits = random_bits(key)
+	for kind, side, occurrence in ((ORDER, 0, 2), (HIT, 1, 0), (DAMAGE_ROLL, 1, 7)):
+		assert int(integer(key, UNFORCED, kind, side, occurrence, 16)) == int(
+			integer(bits, UNFORCED, kind, side, occurrence, 16)
+		)
+	forced = forced_from_records([{"kind": "hit", "side": 1, "occurrence": 0, "value": 1}])
+	assert bool(chance(bits, forced, HIT, 1, 0, 0, 100))
 
 
 def test_vmap_batched_forced_arrays():

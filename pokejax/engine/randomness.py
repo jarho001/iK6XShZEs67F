@@ -19,7 +19,7 @@ selects Tri Attack's burn/paralysis/freeze. confusion_duration: recipient side,
 occurrence 0, value 0..3 added to 2. confusion_hit: affected side, occurrence 0,
 value 1=self-hit, 0=acts. confusion_damage_roll: same axes, value 0..15.
 
-Each helper folds kind, then side, then occurrence into the step key. integer
+The step draws a table of random bits once, addressed by kind, side and occurrence. integer
 requires n>0; chance requires 0<=numerator<=denominator and denominator>0.
 These are caller preconditions. A forced integer must be less than n at its
 call site. Samples still evaluate when forced; selection is branch-free.
@@ -85,10 +85,15 @@ def forced_from_records(records, *, host=False) -> Forced:
 	return values if host else jnp.asarray(values)
 
 
+def random_bits(key):
+	"""Draw independent bits for every address used by a step."""
+	return jax.random.bits(key, (NUM_KINDS, NUM_SIDES, MAX_OCCURRENCES), dtype=jnp.uint32)
+
+
 def _sample_or_force(key, forced, kind, side, occ, n):
-	for address in (kind, side, occ):
-		key = jax.random.fold_in(key, address)
-	sample = jax.random.randint(key, (), 0, n, dtype=jnp.int32)
+	# Direct helper calls accept a PRNG key too; step passes the shared table.
+	bits = random_bits(key) if key.ndim < 3 else key
+	sample = (bits[kind, side, occ] % jnp.asarray(n, jnp.uint32)).astype(jnp.int32)
 	value = forced[kind, side, occ].astype(jnp.int32)
 	return jnp.where(value >= 0, value, sample)
 

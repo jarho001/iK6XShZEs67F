@@ -10,6 +10,7 @@ from .actions import SIDES, bench_slots
 from .boosts import apply_boosts
 from .damage import move_damage
 from .order import action_order
+from .randomness import random_bits
 from .residual import residual
 from .secondaries import apply_secondaries
 from .state import MOVE, NONE, ONGOING, SWITCH
@@ -83,6 +84,7 @@ def step(state, actions, key, forced, engine_tables):
 	old turn number. Finishing the replacement step advances it; a win does not.
 	"""
 	t = engine_tables
+	key = random_bits(key)
 	ongoing = state.winner == ONGOING
 	normal = jnp.any(state.request == MOVE) & ongoing
 	replacement = ~normal & jnp.any(state.request == SWITCH) & ongoing
