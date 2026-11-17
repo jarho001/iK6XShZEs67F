@@ -14,7 +14,8 @@ def section_rows(markdown, title):
 	return [line for line in section.splitlines() if line.startswith("| ")][2:]
 
 
-def test_counts_and_sorting(synthetic_pool, tables):
+def test_counts_and_sorting(synthetic_pool, tables, monkeypatch):
+	monkeypatch.setattr(support, "SUPPORTED_MOVES", frozenset())
 	output = render_coverage(synthetic_pool, tables)
 	assert output.splitlines()[0] == (
 		f"Generated file; do not edit by hand. Regenerate with `{REGENERATE_COMMAND}`."

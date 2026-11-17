@@ -16,6 +16,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from pokejax.engine.actions import legal_actions
 from pokejax.engine.data import build_engine_tables
 from pokejax.engine.randomness import UNFORCED, forced_from_records
 from pokejax.engine.reset import check_teams, reset, teams_from_pool
@@ -27,12 +28,24 @@ from pokejax.teams import FORMAT, MOVE_SLOTS, team_pool_from_data
 KEY = jax.random.key(0)
 ROOT = Path(__file__).resolve().parents[1]
 REQUESTS = {"none": NONE, "move": MOVE, "switch": SWITCH}
+NULL_TYPE = -3
 
 
-def comparable(state):
-	"""Only observable fields covered by this mechanic group; supports batches."""
+def comparable(state, tables):
+	"""Map engine state to numeric snapshot fields; supports batches."""
 	return {
 		"active": state.active,
+		"legalActions": jax.vmap(legal_actions, in_axes=(0, None))(state, tables),
+		"status": state.status,
+		"statusCounter": state.status_counter[
+			jnp.arange(state.active.shape[0])[:, None], jnp.arange(2), state.active
+		],
+		"types": state.types[
+			jnp.arange(state.active.shape[0])[:, None], jnp.arange(2), state.active
+		],
+		"item": state.item,
+		"ability": state.ability,
+		"ended": state.winner != ONGOING,
 		"boosts": state.boosts,
 		"request": state.request,
 		"hp": state.hp,
@@ -44,13 +57,37 @@ def comparable(state):
 	}
 
 
-def recorded_state(snapshot):
+def recorded_state(snapshot, tables):
 	"""Convert oracle snapshots without deriving fainted or any compared value."""
 	sides = snapshot["sides"]
 	members = [side["members"] for side in sides]
 	winner = snapshot["winner"]
 	return {
 		"active": np.asarray([side["active"] for side in sides]),
+		"legalActions": np.asarray([side["legalActions"] for side in sides]),
+		"status": np.asarray([[0 if m["status"] == "" else -1 for m in team] for team in members]),
+		"statusCounter": np.asarray([side["statusCounter"] for side in sides]),
+		"types": np.asarray(
+			[
+				(
+					[NULL_TYPE, NULL_TYPE]
+					if side["types"] is None
+					else [tables.types.index.get(t, -2) for t in side["types"]]
+					+ [-1] * (2 - len(side["types"]))
+				)
+				for side in sides
+			]
+		),
+		"item": np.asarray(
+			[
+				[tables.items.index.get(m["item"], -1) if m["item"] else 0 for m in team]
+				for team in members
+			]
+		),
+		"ability": np.asarray(
+			[[tables.abilities.index.get(m["ability"], -1) for m in team] for team in members]
+		),
+		"ended": np.asarray(snapshot["ended"]),
 		"boosts": np.asarray([side["boosts"] for side in sides]),
 		"request": np.asarray([REQUESTS[side["request"]] for side in sides]),
 		**{
@@ -71,7 +108,7 @@ def recorded_state(snapshot):
 @jax.jit
 def _replay(teams, actions, forced, valid, tables):
 	states = jax.vmap(reset, in_axes=(None, 0, None))(KEY, teams, tables)
-	initial = comparable(states)
+	initial = comparable(states, tables)
 
 	def advance(states, inputs):
 		actions, forced, valid, index = inputs
@@ -84,7 +121,7 @@ def _replay(teams, actions, forced, valid, tables):
 			out,
 			states,
 		)
-		return out, comparable(out)
+		return out, comparable(out, tables)
 
 	_, history = jax.lax.scan(
 		advance,
@@ -147,8 +184,8 @@ def load_recording(path):
 	opener = gzip.open if path.suffix == ".gz" else open
 	with opener(path, "rt", encoding="utf-8") as source:
 		header, *battles = [json.loads(line) for line in source if line.strip()]
-	if header["type"] != "header" or header["schemaVersion"] != 1:
-		raise ValueError("Expected differential JSONL schema v1 header")
+	if header["type"] != "header" or header["schemaVersion"] != 2:
+		raise ValueError("Expected differential JSONL schema v2 header")
 	lock = json.loads((ROOT / "reference-lock.json").read_text())
 	if header["showdownCommit"] != lock["commit"] or header["format"] != FORMAT:
 		raise ValueError("Recording does not use the pinned Showdown commit and format")
@@ -166,10 +203,10 @@ def load_recording(path):
 	return header, battles
 
 
-def replay_file(path) -> ReplayResult:
+def replay_file(path, *, recording=None) -> ReplayResult:
 	"""Replay ALL battles with one jit/scan/vmap, then compare exactly on the host."""
 	start = perf_counter()
-	header, battles = load_recording(path)
+	header, battles = load_recording(path) if recording is None else recording
 	tables = load_tables()
 	pool = team_pool_from_data(
 		dict(
@@ -202,18 +239,42 @@ def replay_file(path) -> ReplayResult:
 	mismatches = []
 	for b, battle in enumerate(battles):
 		snapshots = [battle["initialState"]] + [record["state"] for record in battle["steps"]]
-		expected = [recorded_state(snapshot) for snapshot in snapshots]
+		expected = [recorded_state(snapshot, tables) for snapshot in snapshots]
 		# Check padding too: it must keep the last recorded state, even after a win.
 		expected += [expected[-1]] * (shape[1] + 1 - len(expected))
 		fields = {name: np.stack([state[name] for state in expected]) for name in actual}
 		first = None
 		for name, wanted in fields.items():
-			where = np.argwhere(actual[name][b] != wanted)
+			different = actual[name][b] != wanted
+			if name == "types":
+				different &= wanted != NULL_TYPE
+			where = np.argwhere(different)
 			if where.size:
 				address = tuple(where[0])
 				point, *axes = address
 				if first is None or point < first[0]:
 					first = (point, name, address, axes)
+		# Fields without a state representation have explicit fixed defaults here.
+		# Active aliases are checked independently so no snapshot field is ignored.
+		for point, snapshot in enumerate(snapshots):
+			extra = {
+				"weather": ("", snapshot["weather"]),
+				"weatherTurns": (0, snapshot["weatherTurns"]),
+				"pseudoWeather": (
+					{"sleepclausemod": {"layers": 0, "turns": 0}},
+					snapshot["pseudoWeather"],
+				),
+			}
+			for side_index, side in enumerate(snapshot["sides"]):
+				member = side["members"][side["active"]]
+				for key in ("status", "item", "ability"):
+					extra[f"sides[{side_index}].{key}"] = (member[key], side[key])
+				if side["volatiles"] is not None:
+					extra[f"sides[{side_index}].volatiles"] = ([], side["volatiles"])
+				extra[f"sides[{side_index}].sideConditions"] = ({}, side["sideConditions"])
+			for name, (engine, wanted) in extra.items():
+				if engine != wanted and (first is None or point < first[0]):
+					first = (point, name, None, (engine, wanted))
 		if first is not None:
 			point, name, address, axes = first
 			record = battle["steps"][point - 1] if 0 < point <= lengths[b] else None
@@ -221,9 +282,9 @@ def replay_file(path) -> ReplayResult:
 				Mismatch(
 					battle["index"],
 					int(point) - 1,
-					name + "".join(f"[{i}]" for i in axes),
-					actual[name][b][address].item(),
-					fields[name][address].item(),
+					name + ("".join(f"[{i}]" for i in axes) if address is not None else ""),
+					actual[name][b][address].item() if address is not None else axes[0],
+					fields[name][address].item() if address is not None else axes[1],
 					record["actions"] if record else None,
 					record["outcomes"] if record else None,
 				)

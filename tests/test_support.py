@@ -6,8 +6,9 @@ import pytest
 from pokejax import support
 
 
-def test_empty_support(synthetic_pool, tables):
-	assert support.SUPPORTED_MOVES == frozenset()
+def test_initial_support(synthetic_pool, tables):
+	assert len(support.SUPPORTED_MOVES) == 56
+	assert "tackle" in support.SUPPORTED_MOVES
 	assert support.SUPPORTED_ABILITIES == frozenset()
 	assert support.SUPPORTED_ITEMS == frozenset()
 	result = support.team_supported(synthetic_pool, tables)

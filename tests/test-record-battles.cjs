@@ -1,7 +1,8 @@
 'use strict';
 
 // Run with node --test tests/test-record-battles.cjs (requires pinned Showdown).
-const { acceptedMoves, instrument, legalChoices, newStats, playBattle } = require('../reference/record-battles.cjs');
+const { acceptedMoves, instrument, legalChoices, newStats, playBattle, snapshot, isolationMember } = require('../reference/record-battles.cjs');
+const { PRNG } = require('../reference/vendor/pokemon-showdown/dist/sim/prng');
 const { Battle } = require('../reference/vendor/pokemon-showdown/dist/sim/battle');
 const { Dex } = require('../reference/vendor/pokemon-showdown/dist/sim/dex');
 const assert = require('node:assert/strict');
@@ -21,6 +22,7 @@ function createBattle(record) {
 }
 
 function checkState(battle, fixed, state) {
+	assert.deepEqual(state, snapshot(battle, fixed));
 	assert.equal(state.turn, battle.turn);
 	assert.equal(state.ended, battle.ended);
 	assert.equal(state.winner, !battle.ended ? null : !battle.winner ? 'tie' : Number(battle.winner.slice(-1)));
@@ -29,6 +31,10 @@ function checkState(battle, fixed, state) {
 		const actual = battle.sides[s];
 		const expected = state.sides[s];
 		assert.equal(fixed[s][expected.active], actual.active[0]);
+		assert.deepEqual(expected.types, actual.active[0].fainted ? null :
+			actual.active[0].getTypes().map(type => dex.toID(type)));
+		assert.deepEqual(expected.volatiles, actual.active[0].fainted ? null :
+			Object.keys(actual.active[0].volatiles).sort());
 		assert.deepEqual(expected.boosts, ['atk', 'def', 'spa', 'spd', 'spe', 'accuracy', 'evasion'].map(k => actual.active[0].boosts[k]));
 		assert.equal(expected.request, battle.ended || actual.activeRequest?.wait ? 'none' :
 			actual.activeRequest?.forceSwitch ? 'switch' : 'move');
@@ -37,26 +43,31 @@ function checkState(battle, fixed, state) {
 			const pokemon = fixed[s][slot];
 			assert.deepEqual(expected.members[slot], {
 				hp: pokemon.hp, maxhp: pokemon.maxhp, pp: pokemon.moveSlots.map(m => m.pp), fainted: pokemon.fainted,
+				status: pokemon.status === 'fnt' ? '' : pokemon.status, item: pokemon.item, ability: pokemon.ability,
 			});
 		}
 	}
 }
 
-test('move filter fails closed on overrides, callbacks, effects, and unfamiliar flags', () => {
+test('move filter accepts plain overrides and fails closed on callbacks and effects', () => {
 	const exported = JSON.parse(fs.readFileSync(path.join(root, 'data/gen5-data-v1.json')));
 	const moves = acceptedMoves(exported);
-	assert.equal(moves.length, 45);
+	assert.equal(moves.length, 56);
 	assert.deepEqual(moves, header.acceptedMoves);
-	for (const id of ['hiddenpower', 'struggle', 'aurasphere', 'crabhammer', 'earthquake', 'uturn',
+	for (const id of ['hiddenpower', 'struggle', 'aurasphere', 'uturn',
 		'flamethrower', 'doubleedge', 'feint', 'judgment', 'psyshock', 'sacredsword', 'falseswipe']) {
 		assert(!moves.includes(id), id);
 	}
+	for (const id of ['earthquake', 'surf', 'hydropump', 'crabhammer', 'hypervoice']) assert(moves.includes(id), id);
+	const wrongExport = structuredClone(exported);
+	wrongExport.moves.find(move => move.id === 'hydropump').basePower++;
+	assert.throws(() => acceptedMoves(wrongExport), /Export mismatch for hydropump.basePower/);
 	assert(moves.includes('stoneedge')); // High crit ratio is allowed.
 	assert(moves.includes('extremespeed')); // Priority is allowed.
 	const raw = dex.data.Moves.pound;
 	for (const [key, value] of [['onHit', () => {}], ['futureUnknownEffect', true],
 		['secondary', { chance: 10, status: 'brn' }], ['self', { boosts: { atk: -1 } }],
-		['flags', { ...raw.flags, recharge: 1 }]]) {
+		['flags', { ...raw.flags, recharge: 1 }], ['flags', { ...raw.flags, contact: () => {} }]]) {
 		const before = raw[key];
 		try {
 			raw[key] = value;
@@ -76,7 +87,7 @@ test('the guard rejects unclassified raw draws and chance/shuffle call sites', (
 		assert.throws(() => battle.prng.randomChance(1, 2), /Unclassified PRNG/);
 		assert.throws(() => battle.sample([1, 2]), /Unclassified PRNG/);
 		assert.throws(() => battle.random(16), /Unclassified battle.random/);
-		assert.throws(() => battle.randomChance(1, 16), /Missing move context/);
+		assert.throws(() => battle.randomChance(1, 16), /Unclassified randomChance/);
 		assert.throws(() => battle.prng.shuffle([1, 2]), /Unclassified shuffle/);
 		guard.end();
 	} finally { battle.destroy(); }
@@ -118,7 +129,7 @@ test('queue ties address action and replacement contexts, and duplicate addresse
 });
 
 test('fixture actions independently replay through Showdown with exact decision snapshots', () => {
-	assert.equal(header.schemaVersion, 1);
+	assert.equal(header.schemaVersion, 2);
 	assert.equal(header.count, 40);
 	assert.equal(battles.length, 40);
 	assert(fs.statSync(fixturePath).size < 1_000_000);
@@ -198,4 +209,26 @@ test('seeded generation regenerates a fixture battle byte for byte without overr
 		assert.equal(JSON.stringify(playBattle(index, header.seed, pool, header.acceptedMoves, ghosts, lowPP)),
 			JSON.stringify(battles[index]));
 	}
+});
+
+
+test('isolation keeps allowed pool choices and replaces only disallowed choices', () => {
+	const member = { species: 'Pikachu', level: 80, nature: 'Serious', gender: 'M',
+		evs: { hp: 85 }, ivs: { hp: 31 }, happiness: 200, moves: ['Tackle', 'Toxic'],
+		ability: 'Static', item: 'Light Ball' };
+	const moves = ['tackle', 'quickattack', 'scratch', 'pound', 'toxic'];
+	const options = { taskMoves: ['toxic'], abilities: ['static'], items: ['lightball'] };
+	const kept = isolationMember(member, moves, options, new PRNG([1, 2, 3, 4]));
+	assert(kept.moves.includes('tackle') && kept.moves.includes('toxic'));
+	assert.equal(new Set(kept.moves).size, 4);
+	assert(kept.moves.every(id => moves.includes(id)));
+	assert.equal(kept.ability, 'Static');
+	assert.equal(kept.item, 'Light Ball');
+	for (const key of ['species', 'level', 'nature', 'gender', 'evs', 'ivs', 'happiness']) {
+		assert.deepEqual(kept[key], member[key]);
+	}
+	const stripped = isolationMember(member, moves.filter(id => id !== 'toxic'), {}, new PRNG([1, 2, 3, 4]));
+	assert(!stripped.moves.includes('toxic'));
+	assert.equal(stripped.ability, 'noability');
+	assert.equal(stripped.item, '');
 });
