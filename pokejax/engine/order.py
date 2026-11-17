@@ -6,7 +6,7 @@ from pokejax.mechanics.stat_stage import scale_stat_stage
 
 from .actions import SIDES
 from .randomness import ACTION_ORDER, SWITCH_IN_ORDER, first_side
-from .state import BOOST_SPE, SPE
+from .state import BOOST_SPE, PARALYSIS, SPE
 
 
 def action_order(state, actions, moves, replacement, key, forced, tables):
@@ -21,6 +21,7 @@ def action_order(state, actions, moves, replacement, key, forced, tables):
 		state.stats[SIDES, state.active, SPE].astype(jnp.int32),
 		state.boosts[:, BOOST_SPE].astype(jnp.int32),
 	)
+	speed = jnp.where(state.status[SIDES, state.active] == PARALYSIS, speed // 4, speed)
 	# Pokemon.getStat caps speed; getActionSpeed then truncates to 13 bits.
 	speed = jnp.minimum(speed, 10000) & 8191
 	context = jnp.where(replacement, SWITCH_IN_ORDER, ACTION_ORDER)

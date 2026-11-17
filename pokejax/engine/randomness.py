@@ -11,6 +11,8 @@ hit: side is attacker, occurrence is hit index, value 1=hit, 0=miss. Consult
 only if the move checks accuracy. crit: same address axes, value 1=crit, 0=no.
 damage_roll: same axes, value 0..15 is Showdown random(16), multiplying damage
 by (100-value)/100. Occurrences are zero-based, at most 7.
+full_paralysis and thaw: side is the affected Pokemon, value 0/1. sleep_duration:
+side is the recipient, value 0..2, added to 2 for Showdown's initial timer.
 
 Each helper folds kind, then side, then occurrence into the step key. integer
 requires n>0; chance requires 0<=numerator<=denominator and denominator>0.
@@ -22,9 +24,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-KIND_NAMES = ("order", "hit", "crit", "damage_roll")
+KIND_NAMES = ("order", "hit", "crit", "damage_roll", "full_paralysis", "thaw", "sleep_duration")
 NUM_KINDS = len(KIND_NAMES)
 ORDER, HIT, CRIT, DAMAGE_ROLL = map(KIND_NAMES.index, ("order", "hit", "crit", "damage_roll"))
+FULL_PARALYSIS, THAW, SLEEP_DURATION = map(KIND_NAMES.index, KIND_NAMES[4:])
 ACTION_ORDER, SWITCH_IN_ORDER, RESIDUAL_ORDER = range(3)
 MAX_OCCURRENCES = 8
 NUM_SIDES = 2
@@ -50,7 +53,7 @@ def forced_from_records(records) -> Forced:
 			raise ValueError("Outcome address out of range")
 		if kind == ORDER and (side != 0 or occ > RESIDUAL_ORDER):
 			raise ValueError("Invalid order context")
-		maximum = 15 if kind == DAMAGE_ROLL else 1
+		maximum = 15 if kind == DAMAGE_ROLL else 2 if kind == SLEEP_DURATION else 1
 		if not 0 <= value <= maximum:
 			raise ValueError("Outcome value out of range")
 		if values[kind, side, occ] != NOT_FORCED:

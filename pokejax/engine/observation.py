@@ -33,6 +33,7 @@ class OwnObservation(NamedTuple):
 	level: jax.Array  # float32 [6]
 	pp: jax.Array  # float32 [6, 4]
 	hp: jax.Array  # float32 [6]
+	status: jax.Array  # int16 [6], major status ID (0 means healthy)
 	fainted: jax.Array  # float32 [6]
 	is_active: jax.Array  # float32 [6]
 	stats: jax.Array  # float32 [6, 6], hp/atk/def/spa/spd/spe
@@ -45,6 +46,7 @@ class OpponentObservation(NamedTuple):
 	moves: jax.Array  # int16 [6, 4], revealed IDs descending, then zeros
 	level: jax.Array  # float32 [6]
 	hp: jax.Array  # float32 [6], protocol percentage / 100
+	status: jax.Array  # int16 [6], zero for unseen members
 	fainted: jax.Array  # float32 [6]
 	is_active: jax.Array  # float32 [6]
 	unseen: jax.Array  # float32 [6]
@@ -73,6 +75,7 @@ def observe(state, side, engine_tables) -> Observation:
 		f(state.level[side]) / 100,
 		f(state.pp[side]) / jnp.maximum(f(state.max_pp[side]), 1),
 		f(state.hp[side]) / jnp.maximum(f(state.stats[side, :, 0]), 1),
+		state.status[side].astype(jnp.int16),
 		f(state.hp[side] == 0),
 		f(jnp.arange(TEAM_SLOTS) == state.active[side]),
 		f(state.stats[side]) / 1000,
@@ -97,6 +100,7 @@ def observe(state, side, engine_tables) -> Observation:
 		jnp.where(seen[:, None], moves, 0),
 		jnp.where(seen, f(state.level[foe, slots]) / 100, 0),
 		jnp.where(seen, f(percent) / 100, 0),
+		jnp.where(seen, state.status[foe, slots], 0).astype(jnp.int16),
 		f(seen & (hp == 0)),
 		f(seen & (slots == state.active[foe])),
 		f(~seen),

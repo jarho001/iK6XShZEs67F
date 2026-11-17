@@ -211,6 +211,32 @@ test('seeded generation regenerates a fixture battle byte for byte without overr
 	}
 });
 
+test('status isolation fixture regenerates from its recorded seed', () => {
+	const file = path.join(root, 'tests/fixtures/diff-status.jsonl.gz');
+	const [statusHeader, ...records] = gunzipSync(fs.readFileSync(file)).toString().trim().split('\n').map(JSON.parse);
+	const pool = JSON.parse(fs.readFileSync(path.join(root, 'work/teams/gen5-teams.json')));
+	const ghosts = pool.teams.flatMap((team, i) => dex.species.get(team[0].species).types.includes('Ghost') ? [i] : []);
+	const lowPP = statusHeader.acceptedMoves.filter(id => dex.moves.get(id).pp <= 10 && !dex.getImmunity(dex.moves.get(id).type, 'Ghost'));
+	for (const index of [0, 1]) {
+		assert.deepEqual(playBattle(index, statusHeader.seed, pool, statusHeader.acceptedMoves,
+			ghosts, lowPP, statusHeader.allowed), records[index]);
+	}
+});
+
+test('freeze prevention records a thaw outcome for the affected side', () => {
+	const battle = createBattle(battles[0]);
+	try {
+		assert(battle.sides[0].active[0].setStatus('frz', null, null, true));
+		const guard = instrument(battle, newStats());
+		guard.begin();
+		assert(battle.choose('p1', 'move 1'));
+		assert(battle.choose('p2', 'switch 2'));
+		const outcomes = guard.end();
+		assert(outcomes.some(outcome => outcome.kind === 'thaw' && outcome.side === 0 &&
+			outcome.occurrence === 0 && [0, 1].includes(outcome.value)));
+	} finally { battle.destroy(); }
+});
+
 
 test('isolation keeps allowed pool choices and replaces only disallowed choices', () => {
 	const member = { species: 'Pikachu', level: 80, nature: 'Serious', gender: 'M',

@@ -8,6 +8,9 @@ import numpy as np
 
 from pokejax.tables import Tables
 
+from .state import BURN, FREEZE, PARALYSIS, POISON, SLEEP, TOXIC
+from .status import PARTY_CURE, REFRESH, REST, TRANSFER
+
 
 class EngineTables(NamedTuple):
 	species_base_stats: jax.Array
@@ -23,11 +26,19 @@ class EngineTables(NamedTuple):
 	move_crit_ratio: jax.Array
 	move_max_pp: jax.Array
 	move_flags: jax.Array
+	move_status: jax.Array
+	move_status_self: jax.Array
+	move_effect: jax.Array
+	move_defrost: jax.Array
+	move_thaws_target: jax.Array
+	move_checks_immunity: jax.Array
+	status_immune: jax.Array
 	type_exponent: jax.Array
 	type_immune: jax.Array
 	nature_multipliers: jax.Array
 	struggle_id: jax.Array
 	multitype_id: jax.Array
+	fire_type: jax.Array
 
 
 def build_engine_tables(tables: Tables) -> EngineTables:
@@ -40,6 +51,37 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 	# without Multitype. The Pokedex's displayed form types are not actual types.
 	plain_types = tables.species.types.copy()
 	plain_types[tables.species.num == 493] = [tables.types.index["normal"], -1]
+	status = np.zeros(len(moves.ids), np.int8)
+	for names, value in (
+		(("toxic",), TOXIC),
+		(("thunderwave", "glare", "stunspore"), PARALYSIS),
+		(("willowisp",), BURN),
+		(("spore", "sleeppowder", "hypnosis", "darkvoid", "lovelykiss"), SLEEP),
+		(("rest",), SLEEP),
+	):
+		for name in names:
+			status[moves.index[name]] = value
+	effect = np.zeros(len(moves.ids), np.int8)
+	for names, value in (
+		(("rest",), REST),
+		(("healbell", "aromatherapy"), PARTY_CURE),
+		(("psychoshift",), TRANSFER),
+		(("refresh",), REFRESH),
+	):
+		for name in names:
+			effect[moves.index[name]] = value
+	immune = np.zeros((7, len(tables.types.ids)), np.bool_)
+	for value, names in (
+		(BURN, ("fire",)),
+		(POISON, ("poison", "steel")),
+		(TOXIC, ("poison", "steel")),
+		(FREEZE, ("ice",)),
+	):
+		for name in names:
+			immune[value, tables.types.index[name]] = True
+	defrost = moves.flags[:, moves.flag_names.index("defrost")]
+	# Gen 5 explicitly removes Scald's later-generation thawsTarget property.
+	thaws_target = np.zeros(len(moves.ids), np.bool_)
 	return EngineTables(
 		*map(
 			jnp.asarray,
@@ -57,11 +99,19 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 				moves.crit_ratio,
 				max_pp,
 				moves.flags,
+				status,
+				np.asarray(moves.ids) == "rest",
+				effect,
+				defrost,
+				thaws_target,
+				np.asarray(moves.ids) == "thunderwave",
+				immune,
 				tables.types.exponent,
 				tables.types.immune,
 				tables.natures.multipliers,
 				np.asarray(moves.index["struggle"], dtype=np.int32),
 				np.asarray(tables.abilities.index["multitype"], dtype=np.int32),
+				np.asarray(tables.types.index["fire"], dtype=np.int32),
 			),
 		)
 	)

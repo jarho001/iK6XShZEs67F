@@ -95,7 +95,7 @@ def test_no_hidden_information(battles, side):
 		stats = s.stats.at[foe].set(s.stats[foe] * 2)
 		hp = s.hp.at[foe].set(s.hp[foe] * 2)
 		updates.update(stats=stats, hp=hp)
-		for name in ("species", "level", "types"):
+		for name in ("species", "level", "types", "status"):
 			x = getattr(s, name)
 			mask = unseen.reshape((6,) + (1,) * (x.ndim - 2))
 			updates[name] = x.at[foe].set(jnp.where(mask, jnp.ones_like(x[foe]), x[foe]))
@@ -200,6 +200,17 @@ def test_hp_rounding_and_visible_features(battles):
 	np.testing.assert_array_equal(OBSERVE(s, 0, t).request, [1, 0, 0])
 
 
+def test_public_status_uses_seen_order(battles):
+	_, t, s, _ = battles
+	status = s.status.at[0].set(jnp.array([1, 2, 3, 4, 5, 6], dtype=jnp.int8))
+	status = status.at[1].set(jnp.array([1, 2, 3, 4, 5, 6], dtype=jnp.int8))
+	seen = s.seen_order.at[1, 5].set(2).at[1, 2].set(3)
+	s = s._replace(status=status, seen_order=seen)
+	o = OBSERVE(s, 0, t)
+	np.testing.assert_array_equal(o.own.status, [1, 2, 3, 4, 5, 6])
+	np.testing.assert_array_equal(o.opponent.status, [1, 6, 3, 0, 0, 0])
+
+
 def test_hp_against_pinned_protocol(battles):
 	root = Path(__file__).resolve().parents[1]
 	if not (root / "reference/vendor/pokemon-showdown/dist").is_dir():
@@ -261,7 +272,9 @@ def test_shapes_dtypes_jit_vmap(battles):
 	assert o_boosted.opponent.boosts[1] == 0.5
 	for team in (o.own, o.opponent):
 		for name, x in zip(team._fields, team):
-			assert x.dtype == (jnp.int16 if name in ("species", "types", "moves") else jnp.float32)
+			assert x.dtype == (
+				jnp.int16 if name in ("species", "types", "moves", "status") else jnp.float32
+			)
 			assert x.shape == {
 				"types": (6, 2),
 				"moves": (6, 4),

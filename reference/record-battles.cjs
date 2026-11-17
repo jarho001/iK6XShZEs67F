@@ -4,6 +4,8 @@
 /* Phase 1 differential oracle. Run:
  * node reference/record-battles.cjs --profile phase1 --count 300 --seed 1 --out work/diff/phase1.jsonl.gz
  * node reference/record-battles.cjs --profile phase1 --count 40 --seed 4 --out tests/fixtures/diff-phase1.jsonl.gz
+ * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-status.allowed.json --out work/diff/status.jsonl.gz
+ * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-status.allowed.json --out tests/fixtures/diff-status.jsonl.gz
  *
  * JSONL schema v2: header {type, schemaVersion, showdownCommit, seed, count,
  * acceptedMoves, ...}; battle {type, index, seed (four uint16 words), policySeed,
@@ -42,7 +44,8 @@
  *    EVERY target has zero handlers for that event, so iteration does nothing.
  * 2. runSwitch's allActive speed shuffle: this sets internal speedOrder solely
  *    for SwitchIn handler ordering (sim/battle.ts resolvePriority). Runtime checks
- *    establish there are no SwitchIn handlers, hazards, items, or abilities.
+ *    allow only the independent sleep and toxic switch-in status handlers, with
+ *    no hazards, items, abilities, or other SwitchIn handlers.
  *    It is distinct from queue replacement order, which IS recorded as context 1.
  * There are no other exceptions during steps. Constructor draws precede the
  * initial snapshot and are reproducible from the recorded battle seed; this
@@ -204,6 +207,18 @@ function directCaller() {
 
 // Each rule identifies a draw site and translates its result to an addressed outcome.
 const OUTCOME_RULES = [
+	{ kind: 'sleep_duration', method: 'random', matches: (scope, caller, args) =>
+		scope?.kind === 'status' && scope.status === 'slp' && caller === 'Battle.onStart' &&
+		args[0] === 2 && args[1] === 5,
+		address: scope => [scope.target.side.n, 0], value: value => value - 2 },
+	{ kind: 'full_paralysis', method: 'chance', matches: (scope, caller, args) =>
+		scope?.kind === 'status' && scope.status === 'par' && caller === 'Battle.onBeforeMove' &&
+		args[0] === 1 && args[1] === 4,
+		address: scope => [scope.target.side.n, 0], value: value => Number(value) },
+	{ kind: 'thaw', method: 'chance', matches: (scope, caller, args) =>
+		scope?.kind === 'status' && scope.status === 'frz' && caller === 'Battle.onBeforeMove' &&
+		args[0] === 1 && args[1] === 5,
+		address: scope => [scope.target.side.n, 0], value: value => Number(value) },
 	{ kind: 'hit', method: 'chance', matches: (scope, caller, args) =>
 		scope?.kind === 'hit' && caller === 'BattleActions.hitStepAccuracy' && args[1] === 100,
 		address: scope => [scope.user.side.n, 0], value: value => Number(value) },
@@ -217,6 +232,8 @@ const OUTCOME_RULES = [
 	{ kind: 'order', method: 'shuffle', matches: scope => scope?.kind === 'queue',
 		address: (scope, tied) => [0, tied.every(a => a.choice === 'instaswitch') ? 1 : 0],
 		value: (value, list, start) => list[start].pokemon.side.n },
+	{ kind: 'order', method: 'shuffle', matches: scope => scope?.kind === 'residual',
+		address: () => [0, 2], value: (value, list, start) => list[start].effectHolder.side.n },
 ];
 
 function instrument(battle, stats) {
@@ -253,6 +270,7 @@ function instrument(battle, stats) {
 	wrap(battle.queue, 'sort', () => ({ kind: 'queue' }));
 	wrap(battle, 'eachEvent', event => ({ kind: 'eachEvent', event }));
 	wrap(battle.actions, 'runSwitch', () => ({ kind: 'runSwitch' }));
+	wrap(battle, 'fieldEvent', event => ({ kind: event === 'Residual' ? 'residual' : 'fieldEvent' }));
 
 	const random = battle.prng.random;
 	battle.prng.random = function (...args) {
@@ -265,20 +283,24 @@ function instrument(battle, stats) {
 	const chance = battle.randomChance;
 	battle.randomChance = function (numerator, denominator) {
 		const caller = directCaller();
+		const statusScope = this.effect?.effectType === 'Status' ?
+			{ kind: 'status', status: this.effect.id, target: this.effectState.target } : scope;
 		const rule = OUTCOME_RULES.find(rule => rule.method === 'chance' &&
-			rule.matches(scope, caller, [numerator, denominator]));
+			rule.matches(statusScope, caller, [numerator, denominator]));
 		assert(rule, `Unclassified randomChance(${numerator}, ${denominator}) at ${caller}`);
 		const value = allow(rule.kind, () => chance.call(this, numerator, denominator));
-		record(rule.kind, ...rule.address(scope), rule.value(value));
+		record(rule.kind, ...rule.address(statusScope), rule.value(value));
 		return value;
 	};
 	const battleRandom = battle.random;
 	battle.random = function (...args) {
 		const caller = directCaller();
-		const rule = OUTCOME_RULES.find(rule => rule.method === 'random' && rule.matches(scope, caller, args));
+		const statusScope = this.effect?.effectType === 'Status' ?
+			{ kind: 'status', status: this.effect.id, target: this.effectState.target } : scope;
+		const rule = OUTCOME_RULES.find(rule => rule.method === 'random' && rule.matches(statusScope, caller, args));
 		assert(rule, `Unclassified battle.random at ${caller}: ${args}`);
 		const value = allow(rule.kind, () => battleRandom.apply(this, args));
-		record(rule.kind, ...rule.address(scope), rule.value(value));
+		record(rule.kind, ...rule.address(statusScope), rule.value(value));
 		return value;
 	};
 	const shuffle = battle.prng.shuffle;
@@ -295,13 +317,17 @@ function instrument(battle, stats) {
 			const replacement = tied.every(a => a.choice === 'instaswitch');
 			assert(replacement || tied.every(a => a.choice !== 'instaswitch'));
 			rule = OUTCOME_RULES.find(row => row.method === 'shuffle' && row.matches(scope, caller, tied));
+		} else if (scope?.kind === 'residual') {
+			assert(tied.every(h => ['brn', 'psn', 'tox'].includes(h.effect.id)) &&
+				tied[0].effectHolder.side !== tied[1].effectHolder.side);
+			rule = OUTCOME_RULES.find(row => row.method === 'shuffle' && row.matches(scope));
 		} else if (scope?.kind === 'eachEvent' && ['Update', 'BeforeTurn'].includes(scope.event)) {
 			assert(tied.every(p => battle.findEventHandlers(p, scope.event).length === 0),
 				`Nonempty ${scope.event} handlers: cannot ignore order`);
 			exception = `empty-eachEvent-${scope.event}`;
 		} else if (scope?.kind === 'runSwitch') {
 			assert(tied.every(p => p.ability === 'noability' && !p.item &&
-				battle.findPokemonEventHandlers(p, 'onSwitchIn').length === 0 &&
+				battle.findPokemonEventHandlers(p, 'onSwitchIn').every(h => ['slp', 'tox'].includes(h.effect.id)) &&
 				battle.findPokemonEventHandlers(p, 'onAnySwitchIn').length === 0 &&
 				battle.findSideEventHandlers(p.side, 'onSideSwitchIn', undefined, p).length === 0 &&
 				battle.findSideEventHandlers(p.side, 'onSwitchIn', undefined, p).length === 0 &&
@@ -326,7 +352,7 @@ function instrument(battle, stats) {
 }
 
 function newStats() {
-	return { steps: 0, outcomes: Object.fromEntries(['order', ...OUTCOME_RULES.map(rule => rule.kind).filter(kind => kind !== 'order')].map(kind => [kind, 0])),
+	return { steps: 0, outcomes: Object.fromEntries(['order', 'hit', 'crit', 'damage_roll'].map(kind => [kind, 0])),
 		misses: 0, crits: 0, ties: 0, struggles: 0, doubleKOs: 0, forcedReplacements: 0,
 		prngDraws: 0, exceptions: Object.fromEntries(EXCEPTIONS.map(key => [key, 0])) };
 }
@@ -401,7 +427,7 @@ function playBattle(index, masterSeed, pool, moves, ghostTeams, exhaustionMoves,
 			const state = snapshot(battle, fixed);
 			steps.push({ actions: selected.map(choice => choice.action), outcomes, state });
 			for (const outcome of outcomes) {
-				stats.outcomes[outcome.kind]++;
+				stats.outcomes[outcome.kind] = (stats.outcomes[outcome.kind] || 0) + 1;
 				if (outcome.kind === 'hit' && outcome.value === 0) stats.misses++;
 				if (outcome.kind === 'crit' && outcome.value === 1) stats.crits++;
 				if (outcome.kind === 'order') stats.ties++;
@@ -433,7 +459,10 @@ async function main() {
 	assert.equal(pool.showdownCommit, lock.commit);
 	const supported = JSON.parse(execFileSync('python', ['-m', 'pokejax.support'], { cwd: root, encoding: 'utf8' }));
 	const extra = values.allowed ? JSON.parse(fs.readFileSync(values.allowed, 'utf8')) : {};
-	const moves = [...new Set([...supported.moves, ...(extra.moves || []).map(id => dex.toID(id))])].sort();
+	const plainMoves = values.profile === 'phase1' ?
+		new Set(acceptedMoves(JSON.parse(fs.readFileSync(path.join(root, 'data/gen5-data-v1.json'))))) : null;
+	const baseMoves = plainMoves ? supported.moves.filter(id => plainMoves.has(id)) : supported.moves;
+	const moves = [...new Set([...baseMoves, ...(extra.moves || []).map(id => dex.toID(id))])].sort();
 	const options = { profile: values.profile, taskMoves: (extra.moves || []).map(id => dex.toID(id)),
 		abilities: [...supported.abilities, ...(extra.abilities || []).map(id => dex.toID(id))],
 		items: [...supported.items, ...(extra.items || []).map(id => dex.toID(id))] };
@@ -467,7 +496,7 @@ async function main() {
 			await write(record);
 			for (const [key, value] of Object.entries(record.stats)) {
 				if (typeof value === 'number') summary[key] += value;
-				else for (const [name, n] of Object.entries(value)) summary[key][name] += n;
+				else for (const [name, n] of Object.entries(value)) summary[key][name] = (summary[key][name] || 0) + n;
 			}
 			summary.turnLimitHits += Number(record.turnLimitHit);
 			if ((index + 1) % 20 === 0) console.log(`Recorded ${index + 1}/${count} battles`);

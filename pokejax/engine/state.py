@@ -16,6 +16,8 @@ NUM_BOOSTS = 7
 HP, ATK, DEF, SPA, SPD, SPE = range(NUM_STATS)
 BOOST_ATK, BOOST_DEF, BOOST_SPA, BOOST_SPD, BOOST_SPE, ACCURACY, EVASION = range(NUM_BOOSTS)
 EMPTY = 0
+HEALTHY, BURN, POISON, TOXIC, PARALYSIS, SLEEP, FREEZE = range(7)
+STATUS_NAMES = ("", "brn", "psn", "tox", "par", "slp", "frz")
 NO_TYPE = -1
 NONE, MOVE, SWITCH = range(3)
 ONGOING, SIDE0, SIDE1, TIE = -1, 0, 1, 2
@@ -30,6 +32,8 @@ class BattleState(NamedTuple):
 	turn is int32. Boost order is atk/def/spa/spd/spe/accuracy/evasion.
 	seen_order is int8 [2, 6]: 0 for unseen, otherwise 1-based first appearance.
 	revealed_moves is uint8 [2, 6, 4], indexed by the owner's fixed move slots.
+	sleep_start and sleep_from_foe are [2, 6] bytes for the Gen 5 switch reset
+	and Sleep Clause, respectively; status and status_counter are [2, 6] int8.
 	"""
 
 	species: jax.Array
@@ -49,6 +53,8 @@ class BattleState(NamedTuple):
 	happiness: jax.Array
 	status: jax.Array
 	status_counter: jax.Array
+	sleep_start: jax.Array
+	sleep_from_foe: jax.Array
 	seen_order: jax.Array
 	revealed_moves: jax.Array
 	active: jax.Array

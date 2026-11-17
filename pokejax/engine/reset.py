@@ -127,6 +127,8 @@ def reset(key, teams: Teams, engine_tables: EngineTables) -> BattleState:
 		happiness=teams.happiness.astype(jnp.uint8),
 		status=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.int8),
 		status_counter=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.int8),
+		sleep_start=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.int8),
+		sleep_from_foe=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.uint8),
 		seen_order=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.int8).at[:, 0].set(1),
 		revealed_moves=jnp.zeros((NUM_SIDES, TEAM_SLOTS, MOVE_SLOTS), jnp.uint8),
 		active=jnp.zeros(NUM_SIDES, jnp.int8),

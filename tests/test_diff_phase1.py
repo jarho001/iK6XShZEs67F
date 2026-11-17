@@ -5,11 +5,22 @@ from pathlib import Path
 
 import pytest
 
-from pokejax.diff import load_recording, replay_file
+from pokejax.diff import load_recording, recorded_state, replay_file
+from pokejax.engine.state import STATUS_NAMES
+from pokejax.tables import load_tables
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests/fixtures/diff-phase1.jsonl.gz"
 LARGE = ROOT / "work/diff/phase1.jsonl.gz"
+STATUS_LARGE = ROOT / "work/diff/status.jsonl.gz"
+
+
+def test_snapshot_status_mapping():
+	_, battles = load_recording(FIXTURE)
+	snapshot = copy.deepcopy(battles[0]["initialState"])
+	for member, name in zip(snapshot["sides"][0]["members"], STATUS_NAMES[1:], strict=True):
+		member["status"] = name
+	assert recorded_state(snapshot, load_tables())["status"][0].tolist() == list(range(1, 7))
 
 
 @pytest.mark.parametrize("fixture", sorted((ROOT / "tests/fixtures").glob("diff-*.jsonl.gz")))
@@ -21,6 +32,13 @@ def test_fixtures(fixture):
 @pytest.mark.skipif(not LARGE.exists(), reason="Regenerate with reference/record-battles.cjs")
 def test_large_phase1():
 	result = replay_file(LARGE)
+	assert result.battles == 300
+	assert not result.mismatches, result.report()
+
+
+@pytest.mark.skipif(not STATUS_LARGE.exists(), reason="Regenerate the status recording")
+def test_large_status():
+	result = replay_file(STATUS_LARGE)
 	assert result.battles == 300
 	assert not result.mismatches, result.report()
 

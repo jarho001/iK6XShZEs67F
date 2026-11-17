@@ -8,7 +8,7 @@ Showdown commit: `1242c1e2d9763ba5b85d33f13aecb89bae19ae3d`
 
 | Kind | Distinct | Supported | Supported occurrences |
 | --- | ---: | ---: | ---: |
-| Moves | 223 | 27 | 15.9% |
+| Moves | 223 | 42 | 25.0% |
 | Abilities | 126 | 0 | 0.0% |
 | Items | 44 | 0 | 0.0% |
 
@@ -19,7 +19,7 @@ Fully supported teams: 0.0%
 | Id | Display name | Occurrences | Teams | Supported |
 | --- | --- | ---: | ---: | --- |
 | earthquake | Earthquake | 13324 | 78.8% | yes |
-| toxic | Toxic | 9953 | 66.8% | no |
+| toxic | Toxic | 9953 | 66.8% | yes |
 | hiddenpower | Hidden Power | 7918 | 57.8% | no |
 | stoneedge | Stone Edge | 7278 | 55.0% | yes |
 | icebeam | Ice Beam | 6893 | 52.6% | no |
@@ -36,7 +36,7 @@ Fully supported teams: 0.0%
 | psychic | Psychic | 3201 | 29.0% | no |
 | calmmind | Calm Mind | 3247 | 28.8% | no |
 | substitute | Substitute | 3216 | 28.6% | no |
-| thunderwave | Thunder Wave | 3162 | 28.2% | no |
+| thunderwave | Thunder Wave | 3162 | 28.2% | yes |
 | recover | Recover | 3139 | 27.6% | no |
 | focusblast | Focus Blast | 3040 | 27.3% | no |
 | closecombat | Close Combat | 2777 | 25.1% | no |
@@ -45,7 +45,7 @@ Fully supported teams: 0.0%
 | gigadrain | Giga Drain | 2507 | 22.9% | no |
 | nastyplot | Nasty Plot | 2502 | 22.7% | no |
 | hydropump | Hydro Pump | 2367 | 22.1% | yes |
-| rest | Rest | 2117 | 19.6% | no |
+| rest | Rest | 2117 | 19.6% | yes |
 | voltswitch | Volt Switch | 2000 | 18.9% | no |
 | psyshock | Psyshock | 1882 | 17.9% | no |
 | icepunch | Ice Punch | 1898 | 17.7% | no |
@@ -59,7 +59,7 @@ Fully supported teams: 0.0%
 | doubleedge | Double-Edge | 1688 | 15.9% | no |
 | earthpower | Earth Power | 1690 | 15.7% | no |
 | bugbuzz | Bug Buzz | 1636 | 15.7% | no |
-| willowisp | Will-O-Wisp | 1616 | 15.1% | no |
+| willowisp | Will-O-Wisp | 1616 | 15.1% | yes |
 | ironhead | Iron Head | 1459 | 14.1% | no |
 | airslash | Air Slash | 1455 | 14.0% | no |
 | toxicspikes | Toxic Spikes | 1388 | 13.8% | no |
@@ -70,9 +70,9 @@ Fully supported teams: 0.0%
 | sleeptalk | Sleep Talk | 1398 | 13.4% | no |
 | facade | Facade | 1326 | 12.8% | no |
 | nightslash | Night Slash | 1336 | 12.7% | yes |
-| healbell | Heal Bell | 1268 | 12.6% | no |
+| healbell | Heal Bell | 1268 | 12.6% | yes |
 | taunt | Taunt | 1287 | 12.3% | no |
-| sleeppowder | Sleep Powder | 1281 | 12.2% | no |
+| sleeppowder | Sleep Powder | 1281 | 12.2% | yes |
 | seismictoss | Seismic Toss | 1278 | 12.2% | no |
 | rapidspin | Rapid Spin | 1208 | 12.0% | no |
 | quiverdance | Quiver Dance | 1227 | 11.9% | no |
@@ -108,8 +108,8 @@ Fully supported teams: 0.0%
 | painsplit | Pain Split | 681 | 6.7% | no |
 | slackoff | Slack Off | 677 | 6.6% | no |
 | hurricane | Hurricane | 666 | 6.6% | no |
-| spore | Spore | 656 | 6.4% | no |
-| hypnosis | Hypnosis | 658 | 6.4% | no |
+| spore | Spore | 656 | 6.4% | yes |
+| hypnosis | Hypnosis | 658 | 6.4% | yes |
 | honeclaws | Hone Claws | 636 | 6.2% | no |
 | machpunch | Mach Punch | 631 | 6.2% | yes |
 | firepunch | Fire Punch | 624 | 6.1% | no |
@@ -151,7 +151,7 @@ Fully supported teams: 0.0%
 | knockoff | Knock Off | 357 | 3.5% | no |
 | boltstrike | Bolt Strike | 351 | 3.5% | no |
 | iciclecrash | Icicle Crash | 348 | 3.5% | no |
-| aromatherapy | Aromatherapy | 342 | 3.4% | no |
+| aromatherapy | Aromatherapy | 342 | 3.4% | yes |
 | triattack | Tri Attack | 339 | 3.4% | no |
 | payback | Payback | 307 | 3.1% | no |
 | counter | Counter | 304 | 3.0% | no |
@@ -174,7 +174,7 @@ Fully supported teams: 0.0%
 | heavyslam | Heavy Slam | 244 | 2.4% | no |
 | powergem | Power Gem | 239 | 2.4% | yes |
 | eruption | Eruption | 236 | 2.4% | no |
-| glare | Glare | 235 | 2.3% | no |
+| glare | Glare | 235 | 2.3% | yes |
 | jumpkick | Jump Kick | 222 | 2.2% | no |
 | shiftgear | Shift Gear | 217 | 2.2% | no |
 | dragontail | Dragon Tail | 210 | 2.1% | no |
@@ -198,7 +198,7 @@ Fully supported teams: 0.0%
 | tailslap | Tail Slap | 175 | 1.8% | no |
 | waterspout | Water Spout | 175 | 1.7% | no |
 | trickroom | Trick Room | 172 | 1.7% | no |
-| stunspore | Stun Spore | 170 | 1.7% | no |
+| stunspore | Stun Spore | 170 | 1.7% | yes |
 | meteormash | Meteor Mash | 164 | 1.6% | no |
 | sunnyday | Sunny Day | 164 | 1.6% | no |
 | blueflare | Blue Flare | 163 | 1.6% | no |
@@ -206,7 +206,7 @@ Fully supported teams: 0.0%
 | geargrind | Gear Grind | 161 | 1.6% | no |
 | iciclespear | Icicle Spear | 160 | 1.6% | no |
 | hornleech | Horn Leech | 157 | 1.6% | no |
-| darkvoid | Dark Void | 156 | 1.6% | no |
+| darkvoid | Dark Void | 156 | 1.6% | yes |
 | drillpeck | Drill Peck | 156 | 1.6% | no |
 | seedflare | Seed Flare | 153 | 1.5% | no |
 | focuspunch | Focus Punch | 152 | 1.5% | no |
@@ -232,15 +232,15 @@ Fully supported teams: 0.0%
 | gyroball | Gyro Ball | 78 | 0.8% | no |
 | pluck | Pluck | 78 | 0.8% | no |
 | chatter | Chatter | 72 | 0.7% | no |
-| lovelykiss | Lovely Kiss | 71 | 0.7% | no |
+| lovelykiss | Lovely Kiss | 71 | 0.7% | yes |
 | cosmicpower | Cosmic Power | 61 | 0.6% | no |
-| psychoshift | Psycho Shift | 61 | 0.6% | no |
+| psychoshift | Psycho Shift | 61 | 0.6% | yes |
 | fierydance | Fiery Dance | 57 | 0.6% | no |
 | icefang | Ice Fang | 50 | 0.5% | no |
 | magmastorm | Magma Storm | 38 | 0.4% | no |
 | fusionflare | Fusion Flare | 37 | 0.4% | no |
 | fusionbolt | Fusion Bolt | 27 | 0.3% | no |
-| refresh | Refresh | 19 | 0.2% | no |
+| refresh | Refresh | 19 | 0.2% | yes |
 
 ## Abilities
 

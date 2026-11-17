@@ -1,7 +1,8 @@
 """Plain Gen 5 move arithmetic; sim/battle-actions.ts:1658-1901.
 
-Move callbacks, flags, effects, abilities and items are intentionally outside
-Phase 1. Struggle alone overrides its table type to ??? (data/moves.ts).
+Status burn is applied here and other move effects are handled separately.
+Abilities and items remain for later groups. Struggle overrides its table type
+to ??? (data/moves.ts).
 """
 
 import jax.numpy as jnp
@@ -11,7 +12,7 @@ from pokejax.mechanics.neutral_damage import neutral_damage_before_roll
 from pokejax.mechanics.stat_stage import scale_stat_stage
 
 from .randomness import CRIT, DAMAGE_ROLL, HIT, chance, integer
-from .state import ACCURACY, EVASION
+from .state import ACCURACY, BURN, EVASION
 
 CRIT_DENOMINATORS = jnp.asarray([1, 16, 8, 4, 3, 2], jnp.int32)
 
@@ -67,11 +68,11 @@ def move_damage(state, side, move, key, forced, tables):
 		False,
 		struggle,
 		exponent,
-		False,
+		state.status[side, user] == BURN,
 		physical,
 		False,
 		4096,
 	)
 	success = hit & ~immune & (power > 0) & (t.move_category[move] != 2)
 	success &= state.hp[foe, target] > 0
-	return jnp.where(success, damage, 0), success
+	return jnp.where(success, damage, 0), success, hit & (~immune | ~t.move_checks_immunity[move])

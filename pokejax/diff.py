@@ -20,7 +20,7 @@ from pokejax.engine.actions import legal_actions
 from pokejax.engine.data import build_engine_tables
 from pokejax.engine.randomness import UNFORCED, forced_from_records
 from pokejax.engine.reset import check_teams, reset, teams_from_pool
-from pokejax.engine.state import HP, MOVE, NONE, ONGOING, SWITCH, TIE
+from pokejax.engine.state import HP, MOVE, NONE, ONGOING, STATUS_NAMES, SWITCH, TIE
 from pokejax.engine.step import step
 from pokejax.tables import load_tables
 from pokejax.teams import FORMAT, MOVE_SLOTS, team_pool_from_data
@@ -65,7 +65,15 @@ def recorded_state(snapshot, tables):
 	return {
 		"active": np.asarray([side["active"] for side in sides]),
 		"legalActions": np.asarray([side["legalActions"] for side in sides]),
-		"status": np.asarray([[0 if m["status"] == "" else -1 for m in team] for team in members]),
+		"status": np.asarray(
+			[
+				[
+					STATUS_NAMES.index(m["status"]) if m["status"] in STATUS_NAMES else -1
+					for m in team
+				]
+				for team in members
+			]
+		),
 		"statusCounter": np.asarray([side["statusCounter"] for side in sides]),
 		"types": np.asarray(
 			[
