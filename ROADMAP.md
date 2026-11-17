@@ -103,11 +103,11 @@ These decisions are fixed. Changing one needs the owner's agreement.
 
 ## Testing rules
 
-- **Per group, one differential suite.** A Node script sets up battles in
+- **Per task, one differential suite.** A Node script sets up battles in
   Showdown, plays scripted or random actions, and writes out the actions, the
   random outcomes and the state at each decision point. A Python test replays
   them through the engine with forced outcomes and compares state. A few
-  hundred short battles per group is typical; they run through one compiled
+  hundred short battles per task is typical; they run through one compiled
   step function.
 - **Whole-battle statistics.** From Phase 2 on, play a few thousand random-policy
   battles in both simulators from the same team pool and compare win rate by
@@ -177,34 +177,73 @@ PPO beats random clearly.
 
 ### Phase 2: mechanics in large groups
 
-Work down this list. One group is one commit with its differential suite.
-Within a group, order by frequency in the coverage table.
+Work down this list. One task is one commit with its differential suite, the
+support registry and `COVERAGE.md` updated, and the benchmark change stated.
+Within a task, order by frequency in the coverage table. A group introduces
+the engine structure it is the first to need (prevention before moving,
+volatiles, resumable turns) instead of a separate task for it.
 
-1. Major status and its effects: burn, poison, toxic, paralysis, sleep,
-   freeze, plus Sleep Clause.
-2. Stat boosts and drops, including accuracy and evasion.
-3. Declarative move effects: secondaries, drain, recoil, multi-hit, healing,
-   fixed damage, one-hit KO, high crit rate, self-destruct, flinch, confusion.
-4. Field: weather, entry hazards, screens, Rapid Spin, and their end-of-turn
-   handling. Get the end-of-turn order right here once.
-5. Protect family, two-turn moves, recharge, locked moves (Outrage), partial
-   trapping, pivoting moves (U-turn, Volt Switch), phazing (Roar, Dragon Tail).
-6. Items by hook: Choice items, Life Orb, Leftovers, Black Sludge, berries,
-   Focus Sash, gems, Eviolite, status orbs, Rocky Helmet, and the rest.
-7. Abilities by hook: stat and damage modifiers, immunities and absorption,
-   switch-in effects (Intimidate, weather setters), end-of-turn, contact,
-   on-faint, and the rest.
-8. Variable-power and conditional moves: Hidden Power, Return, Gyro Ball,
-   Eruption, weight moves, Facade, Acrobatics, Sucker Punch, Pursuit, Counter.
-9. Long tail, strictly by frequency: Substitute, Trick and Knock Off, Taunt,
-   Encore, Disable, Leech Seed, Wish, Baton Pass, Sleep Talk, Transform and
-   Imposter, Illusion, form changes, ability-changing moves, Magic Bounce.
+Isolation teams for a task are pool teams with every move, ability and item
+outside the allowed set (supported mechanics plus the task's own) replaced or
+removed. Unchanged pool teams only become fully supported late (Leftovers is
+on 95% of teams), so the whole-battle statistics also use isolation teams,
+the same ones in both simulators. Stealth Rock, screens, Baton Pass and
+one-hit KO moves do not occur in the pool and are not implemented.
 
-After groups 4 and 7 and at the end, run the whole-battle statistics.
+0. Harness for Phase 2: the snapshot grows with the engine to cover every
+   Contract field (status, volatiles, field, item, ability, current types),
+   the legal actions are compared with Showdown's request (Phase 1 did not),
+   the isolation team builder, and outcome kinds added through one table on
+   each side. Check: the Phase 1 suite passes under the new harness.
+1. Major status: burn, poison, toxic, paralysis, sleep, freeze, Sleep Clause,
+   the status moves and cures (Toxic, Thunder Wave, Will-O-Wisp, sleep moves,
+   Rest, Heal Bell, Aromatherapy, Psycho Shift, Refresh), the prevention
+   stage before a move, and residual damage with Showdown's residual order
+   as a table that later groups add rows to.
+2. Stat boosts and drops: boosting moves, self-drops after attacks (Close
+   Combat, Draco Meteor and the like), accuracy and evasion, Haze, Belly
+   Drum, Curse for non-Ghosts.
+3. Declarative move effects, part 1: secondaries (status, boost, flinch,
+   confusion chance), volatile storage, confusion and flinch.
+4. Declarative move effects, part 2: drain, recoil, crash damage, healing
+   moves (Recover, Roost with its Flying removal, the weather-dependent ones
+   with weather left for group 6), fixed damage (Seismic Toss, Night Shade,
+   Super Fang), Pain Split, multi-hit, high crit rate, Explosion.
+5. Whole-battle statistics tool: a few thousand random-policy battles in
+   both simulators from the same isolation teams; compare win rate by side,
+   battle length, and move, status and faint frequencies.
+6. Field: weather (moves, duration, residual damage, damage and accuracy
+   changes, Sandstorm Special Defense), Spikes, Toxic Spikes, Rapid Spin,
+   and the complete end-of-turn order. Then run the statistics.
+7. Protect family, Fake Out, two-turn moves, recharge, locked moves (Outrage,
+   Petal Dance), partial trapping.
+8. Resumable turns: the rest of the turn stored in the state so step can stop
+   mid-turn; U-turn, Volt Switch, phazing (Roar, Whirlwind, Dragon Tail,
+   Circle Throw), and faint replacement around them.
+9. Items, all 44 in the pool by hook: Choice items and choice lock, Life Orb,
+   Leftovers, Black Sludge, berries, Focus Sash, gems, Eviolite, status
+   orbs, Rocky Helmet, White Herb, plates and the rest.
+10. Abilities, part 1: stat and damage modifiers, immunities and absorption,
+    switch-in effects (Intimidate, weather setters).
+11. Abilities, part 2: end-of-turn, contact, on-faint, switch-out
+    (Regenerator, Natural Cure), Pressure, Prankster, Sturdy, Magic Guard
+    and the rest. Then run the statistics.
+12. Variable-power and conditional moves: Hidden Power, Return, Facade,
+    Acrobatics, weight moves, Gyro Ball, Eruption, Stored Power, Foul Play,
+    Psyshock, Sucker Punch, Pursuit, Counter, Mirror Coat, Retaliate,
+    Focus Punch and the rest.
+13. Long tail, part 1, the common ones: Substitute, Encore, Wish, Sleep Talk,
+    Taunt, Leech Seed, Trick and Switcheroo, Knock Off, Yawn, Destiny Bond,
+    Healing Wish, Disable, Trick Room.
+14. Long tail, part 2, strictly by frequency: Transform and Imposter,
+    Illusion, Nature Power, form changes, Trace, Magic Bounce and what
+    remains above the 0.5% rule.
+15. Exit: the sampler, final statistics on unchanged pool teams, gates.
 
-Exit: at least 99% of teams in the pool are fully supported, statistics agree
-with Showdown within sampling noise, gates still pass. Remaining unsupported
-teams are filtered out by the sampler and listed in `COVERAGE.md`.
+Exit: at least 99% of the teams in the pool are fully supported, measured as
+the exact set of excluded teams, statistics agree with Showdown within
+sampling noise, gates still pass. Remaining unsupported teams are filtered
+out by the sampler and listed in `COVERAGE.md`.
 
 ### Phase 3: environment
 
@@ -265,13 +304,14 @@ damage rolls).
 ## Working rules
 
 - Finish a phase's exit checks before starting the next phase.
-- One commit per group or coherent piece of work, with a plain message.
+- One commit per task or coherent piece of work, with a plain message.
 - When something in this roadmap turns out wrong, change the roadmap in the
   same commit and say why in one or two sentences. Do not add other planning,
   status or handoff documents.
 - When Showdown's behaviour is unclear, read the pinned Showdown source and
   write a differential case. Do not guess from memory of the games.
 - If a mechanic would need a special code path and appears in under 0.5% of
-  teams, leave it unsupported and move on.
+  teams, leave it unsupported and move on, as long as all teams excluded
+  this way together stay under 1% of the pool.
 - Report honestly: a failing suite or a missed gate is stated in the commit
   message and the README, not worked around.
