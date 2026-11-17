@@ -103,11 +103,11 @@ These decisions are fixed. Changing one needs the owner's agreement.
 
 ## Testing rules
 
-- **Per task, one differential suite.** A Node script sets up battles in
+- **Per group, one differential suite.** A Node script sets up battles in
   Showdown, plays scripted or random actions, and writes out the actions, the
   random outcomes and the state at each decision point. A Python test replays
   them through the engine with forced outcomes and compares state. A few
-  hundred short battles per task is typical; they run through one compiled
+  hundred short battles per group is typical; they run through one compiled
   step function.
 - **Whole-battle statistics.** From Phase 2 on, play a few thousand random-policy
   battles in both simulators from the same team pool and compare win rate by
@@ -175,106 +175,34 @@ so it can run alongside tasks 2 and 3.
 Exit: differential suite passes, gates measured and recorded in the README,
 PPO beats random clearly.
 
-### Phase 2: mechanics
+### Phase 2: mechanics in large groups
 
-The original nine groups were split into tasks after Phase 1, because the
-engine first needs structural work (effect storage, move execution stages,
-resumable turns, a residual scheduler) and several "long tail" mechanics are
-common in the pool (Substitute 28.6%, Encore 17.0%, Wish 13.7%, Sleep Talk
-13.4%). Stealth Rock, screens, Baton Pass and one-hit KO moves do not occur
-in the pool and are not implemented unless a dependency needs them.
+Work down this list. One group is one commit with its differential suite.
+Within a group, order by frequency in the coverage table.
 
-Work down this list. One task is one commit with its differential suite, the
-support registry and `COVERAGE.md` updated, and the benchmark change against
-the previous commit. A mechanic counts as supported only when everything it
-depends on is supported and its suite also passes on unchanged pool teams,
-not only on isolation teams.
+1. Major status and its effects: burn, poison, toxic, paralysis, sleep,
+   freeze, plus Sleep Clause.
+2. Stat boosts and drops, including accuracy and evasion.
+3. Declarative move effects: secondaries, drain, recoil, multi-hit, healing,
+   fixed damage, one-hit KO, high crit rate, self-destruct, flinch, confusion.
+4. Field: weather, entry hazards, screens, Rapid Spin, and their end-of-turn
+   handling. Get the end-of-turn order right here once.
+5. Protect family, two-turn moves, recharge, locked moves (Outrage), partial
+   trapping, pivoting moves (U-turn, Volt Switch), phazing (Roar, Dragon Tail).
+6. Items by hook: Choice items, Life Orb, Leftovers, Black Sludge, berries,
+   Focus Sash, gems, Eviolite, status orbs, Rocky Helmet, and the rest.
+7. Abilities by hook: stat and damage modifiers, immunities and absorption,
+   switch-in effects (Intimidate, weather setters), end-of-turn, contact,
+   on-faint, and the rest.
+8. Variable-power and conditional moves: Hidden Power, Return, Gyro Ball,
+   Eruption, weight moves, Facade, Acrobatics, Sucker Punch, Pursuit, Counter.
+9. Long tail, strictly by frequency: Substitute, Trick and Knock Off, Taunt,
+   Encore, Disable, Leech Seed, Wish, Baton Pass, Sleep Talk, Transform and
+   Imposter, Illusion, form changes, ability-changing moves, Magic Bounce.
 
-Infrastructure:
+After groups 4 and 7 and at the end, run the whole-battle statistics.
 
-1. Snapshot and replay contract: compare every Contract field, including
-   the legal actions against Showdown's request; extensible comparisons.
-2. Randomness instrumentation: outcomes at reset, repeated hooks, called
-   moves and per-hit addresses; unknown draw sites stay fatal.
-3. Team builder and support registry: isolation teams (modified) kept apart
-   from unchanged supported pool teams; dependency-aware support; rejection
-   sampling with explicit reasons.
-4. Performance comparison: baseline and candidate commits on identical
-   workloads in fresh processes.
-5. Whole-battle statistics harness: random-policy ensembles in both
-   simulators, with battle-level uncertainty; Phase 1 ensembles must agree.
-
-Engine structure:
-
-6. Effect-state storage: typed volatiles with counters and sources,
-   original and current attributes, switch cleanup.
-7. Move execution stages: prevention, PP deduction, targeting, hit
-   resolution, faint processing; Pressure.
-8. Resumable turns: queued actions stored in the state so step can stop
-   mid-turn; U-turn and Volt Switch.
-9. Residual scheduler: ordered handlers, expiration, ties, faints between
-   handlers; Leftovers and Black Sludge.
-10. Computed move inputs: Hidden Power, Return, alternate attack and defense
-    stats (Psyshock, Secret Sword, Foul Play).
-
-Mechanics, roughly by frequency and dependency:
-
-11. Burn, poison, toxic, paralysis: infliction, immunities, damage, speed.
-12. Sleep, freeze and status recovery: Rest, Sleep Clause, thawing, cures.
-    Then run the whole-battle statistics.
-13. Boosts and reactions: boosting moves, Haze, Clear Smog, Belly Drum,
-    Intimidate, boost-reactive abilities, White Herb.
-14. Action order and Choice locking: Choice items, Prankster, Trick Room.
-15. Stat-modifier tables: offensive and defensive ability modifiers,
-    Eviolite, species stat items.
-16. Hit immunity and absorption: Levitate, absorbing abilities, Wonder Guard,
-    Mold Breaker family.
-17. Status and accuracy defenses: status-preventing abilities, Early Bird,
-    Own Tempo, Inner Focus, accuracy modifiers, Synchronize.
-18. Secondaries, flinch and confusion, Serene Grace, Shield Dust.
-19. Damage items and Sheer Force: Life Orb, Expert Belt, type boosters and
-    plates, remaining damage modifiers.
-20. Protect family.
-21. Healing and HP arithmetic: Recover, Roost, drain, recoil, crash damage,
-    fixed damage, Super Fang, Pain Split.
-22. Consumable items: berries, Focus Sash, status orbs.
-23. Substitute.
-24. Per-hit execution: multi-hit, Skill Link, Sturdy.
-25. Contact and faint effects: contact abilities, Rocky Helmet, on-KO
-    abilities, Explosion, Memento, Destiny Bond.
-26. Weather core: move-set weather, duration, damage, accuracy, sand.
-27. Weather hooks: weather-setting abilities, speed abilities, suppression,
-    Damp Rock.
-28. Entry hazards (Spikes, Toxic Spikes) and Rapid Spin.
-    Then run the whole-battle statistics.
-29. Phazing: Roar, Whirlwind, Dragon Tail, Circle Throw.
-30. Rampage locking: Outrage, Petal Dance.
-31. Charge and recharge moves.
-32. Trapping abilities and partial trapping.
-33. Move restrictions: Taunt, Encore, Disable, Cursed Body.
-34. Switch-out abilities: Regenerator, Natural Cure.
-35. Item transfer and removal: Trick, Switcheroo, Knock Off, Sticky Hold,
-    berry-stealing moves.
-36. Gems, Acrobatics, Unburden.
-37. Remaining power formulas: HP, speed, weight, status and boost dependent
-    power, Fusion Flare and Fusion Bolt.
-38. Action-sensitive attacks: Sucker Punch, Pursuit, Focus Punch.
-39. Retaliation: Counter, Mirror Coat, Metal Burst, Retaliate.
-40. Delayed effects: Wish, Leech Seed, Yawn, Healing Wish.
-41. Called moves: Sleep Talk, Nature Power.
-42. Remaining residual abilities: Speed Boost, Shed Skin, Hydration, Poison
-    Heal, Harvest and the rest.
-43. Truant and Slow Start.
-44. Transform and Imposter.
-45. Trace, Mummy, Magic Bounce.
-46. Forms and species effects: Multitype and Judgment, Forecast, Flower
-    Gift, Relic Song, form changes.
-47. Illusion, and revealed-information tracking for the observation.
-48. Coverage closure: remaining unsupported mechanics by frequency, the
-    sampler, final statistics and gates.
-
-Exit: at least 99% of the teams in the pool are fully supported, measured as
-the exact set of excluded teams (not summed frequencies), statistics agree
+Exit: at least 99% of teams in the pool are fully supported, statistics agree
 with Showdown within sampling noise, gates still pass. Remaining unsupported
 teams are filtered out by the sampler and listed in `COVERAGE.md`.
 
@@ -337,14 +265,13 @@ damage rolls).
 ## Working rules
 
 - Finish a phase's exit checks before starting the next phase.
-- One commit per task or coherent piece of work, with a plain message.
+- One commit per group or coherent piece of work, with a plain message.
 - When something in this roadmap turns out wrong, change the roadmap in the
   same commit and say why in one or two sentences. Do not add other planning,
   status or handoff documents.
 - When Showdown's behaviour is unclear, read the pinned Showdown source and
   write a differential case. Do not guess from memory of the games.
 - If a mechanic would need a special code path and appears in under 0.5% of
-  teams, leave it unsupported and move on, as long as the union of all teams
-  excluded this way stays under 1% of the pool.
+  teams, leave it unsupported and move on.
 - Report honestly: a failing suite or a missed gate is stated in the commit
   message and the README, not worked around.
