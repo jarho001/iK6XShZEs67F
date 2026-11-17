@@ -116,10 +116,12 @@ These decisions are fixed. Changing one needs the owner's agreement.
 - **Fixtures are small and regenerable.** Commit the generator script and at
   most small fixture files. Never commit logs, profiles or run outputs.
 - **Gates, checked at the end of every phase from Phase 1 on:**
-  - Throughput on the 3060 Ti with a random policy at a batch of 4,096 or
-    more: start with a target of 200,000 steps per second and adjust it once
-    after the Phase 1 measurement. A group that costs more than 10% needs a
-    reason written into its commit message.
+  - Throughput on the 3060 Ti with a random legal policy at a batch of 4,096,
+    engine only: target 5,000,000 steps per second. Phase 1 measured a median
+    of 25,134,430 steps per second with status moves, abilities and items still
+    inactive. The target leaves room for roughly a 5x slowdown from Phase 2
+    mechanics while staying far above what PPO training consumes. A group that
+    costs more than 10% needs a reason written into its commit message.
   - Cold compile of the step function under 60 seconds on the GPU machine.
 
 For reference, Showdown itself ran about 4,900 decisions per second on one

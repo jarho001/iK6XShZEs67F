@@ -54,4 +54,32 @@ the GPU. Expect one CUDA device on the dev machine.
 
 ## Benchmarks
 
-Not measured yet (Phase 1).
+Run `python -m pokejax.bench --json` for the random legal policy, adding
+`--batch-size 16384` to change the batch or `--with-observation` to observe
+both sides. The cold first call includes compilation and one rollout.
+
+Measured 2026-11-17 on an NVIDIA GeForce RTX 3060 Ti, JAX 0.12.0.1,
+HEAD `93a1b26fbbbd8bc0dbc527647b7a2bbc3e7ce7dd`:
+
+| Batch | Mode | Cold first call (s) | Steps/s | Battles/s | Mean battle length (steps) |
+|---:|---|---:|---:|---:|---:|
+| 4,096 | Engine only | 4.65 | 25,134,430 | 355,907 | 70.70 |
+| 16,384 | Engine only | 5.00 | 49,587,788 | 701,426 | 70.75 |
+| 4,096 | Both observations | 5.05 | 12,374,399 | 175,471 | 70.70 |
+
+The first row is the median of three fresh processes: cold first calls ranged
+from 4.63 to 4.78 s, steps/s from 24,853,781 to 25,367,994, and battles/s
+from 351,933 to 359,215. Each process reports the median of three warmed
+rollouts. Cold compile under 60 s: pass. Engine throughput at batch 4,096
+against the 5,000,000 steps/s target: pass.
+
+In Phase 1, status moves, abilities and items do nothing, so later phases will
+be slower.
+
+### Phase 1 results
+
+The differential tests passed the 40-battle fixture and the 300-battle set
+(2 tests passed). The existing PPO smoke test won 3,883 of 4,096 battles
+against random (94.80%, 95% Wilson CI 94.08–95.44%); random against random
+won 50.95% (95% CI 49.42–52.48%). Training took 136.01 s and 9,830,400
+environment steps.
