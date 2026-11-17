@@ -25,6 +25,20 @@ class EngineTables(NamedTuple):
 	move_always_hits: jax.Array
 	move_priority: jax.Array
 	move_crit_ratio: jax.Array
+	move_crit_always: jax.Array
+	move_drain: jax.Array
+	move_recoil: jax.Array
+	move_recoil_basehp: jax.Array
+	move_heal: jax.Array
+	move_heal_weather: jax.Array
+	move_damage_kind: jax.Array
+	move_fixed_damage: jax.Array
+	move_hit_min: jax.Array
+	move_hit_max: jax.Array
+	move_self_faint: jax.Array
+	move_crash_damage: jax.Array
+	move_pain_split: jax.Array
+	move_roost: jax.Array
 	move_max_pp: jax.Array
 	move_flags: jax.Array
 	move_status: jax.Array
@@ -52,6 +66,8 @@ class EngineTables(NamedTuple):
 	struggle_id: jax.Array
 	multitype_id: jax.Array
 	fire_type: jax.Array
+	flying_type: jax.Array
+	normal_type: jax.Array
 
 
 def build_engine_tables(tables: Tables) -> EngineTables:
@@ -157,6 +173,20 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 				moves.always_hits,
 				moves.priority,
 				moves.crit_ratio,
+				moves.crit_always,
+				moves.drain,
+				moves.recoil,
+				moves.recoil_basehp,
+				moves.heal,
+				moves.heal_weather,
+				moves.damage_kind,
+				moves.fixed_damage,
+				moves.hit_min,
+				moves.hit_max,
+				moves.self_faint,
+				moves.crash_damage,
+				moves.pain_split,
+				moves.roost,
 				max_pp,
 				moves.flags,
 				status,
@@ -184,6 +214,8 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 				np.asarray(moves.index["struggle"], dtype=np.int32),
 				np.asarray(tables.abilities.index["multitype"], dtype=np.int32),
 				np.asarray(tables.types.index["fire"], dtype=np.int32),
+				np.asarray(tables.types.index["flying"], dtype=np.int32),
+				np.asarray(tables.types.index["normal"], dtype=np.int32),
 			),
 		)
 	)

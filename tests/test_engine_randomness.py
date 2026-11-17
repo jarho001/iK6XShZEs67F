@@ -20,6 +20,7 @@ from pokejax.engine.randomness import (
 	chance,
 	first_side,
 	forced_from_records,
+	hit_count,
 	integer,
 	random_bits,
 )
@@ -35,7 +36,11 @@ def test_forced_outcomes_exact():
 						"kind": name,
 						"side": side,
 						"occurrence": occ,
-						"value": (occ + side) % (16 if name == "damage_roll" else 2),
+						"value": (
+							2 + (occ + side) % 4
+							if name == "hit_count"
+							else (occ + side) % (16 if name == "damage_roll" else 2)
+						),
 					}
 				)
 	forced = forced_from_records(records)
@@ -95,6 +100,18 @@ def test_frequencies_and_address_independence():
 			assert abs(np.corrcoef(rolls[:, i], rolls[:, j])[0, 1]) < 0.03
 
 
+def test_gen5_multihit_count_distribution():
+	keys = jax.random.split(jax.random.key(902), 32768)
+
+	@jax.jit
+	@jax.vmap
+	def outcomes(key):
+		return hit_count(key, UNFORCED, 0, jnp.int32(2), jnp.int32(5))
+
+	counts = np.bincount(np.asarray(outcomes(keys)), minlength=6)[2:]
+	assert np.all(np.abs(counts / counts.sum() - [0.35, 0.35, 0.15, 0.15]) < 0.02)
+
+
 def test_address_is_stable_and_forcing_is_local():
 	key = jax.random.key(7)
 	a = integer(key, UNFORCED, DAMAGE_ROLL, 0, 0, 16)
@@ -141,7 +158,7 @@ def test_vmap_batched_forced_arrays():
 		{"side": 2},
 		{"side": True},
 		{"occurrence": -1},
-		{"occurrence": 8},
+		{"occurrence": 16},
 		{"occurrence": 0.0},
 		{"value": -1},
 		{"value": 16},

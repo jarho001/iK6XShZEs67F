@@ -142,6 +142,30 @@ def test_moves_round_trip(tables, data):
 	)
 
 
+def test_effect_move_metadata(tables):
+	moves = tables.moves
+	assert tuple(moves.drain[moves.index["gigadrain"]]) == (1, 2)
+	assert tuple(moves.recoil[moves.index["bravebird"]]) == (33, 100)
+	assert tuple(moves.heal[moves.index["recover"]]) == (1, 2)
+	assert moves.heal_weather[moves.index["synthesis"]]
+	assert moves.damage_kind[moves.index["seismictoss"]] == 1
+	assert moves.damage_kind[moves.index["superfang"]] == 2
+	assert (
+		moves.damage_kind[moves.index["sonicboom"]],
+		moves.fixed_damage[moves.index["sonicboom"]],
+	) == (3, 20)
+	assert (moves.hit_min[moves.index["doublekick"]], moves.hit_max[moves.index["doublekick"]]) == (
+		2,
+		2,
+	)
+	assert moves.crit_always[moves.index["frostbreath"]]
+	assert moves.crit_ratio[moves.index["crosschop"]] == 2
+	assert moves.crash_damage[moves.index["highjumpkick"]]
+	assert moves.self_faint[moves.index["explosion"]] == 1
+	assert moves.pain_split[moves.index["painsplit"]]
+	assert moves.roost[moves.index["roost"]]
+
+
 @pytest.mark.parametrize("move_id", ("tackle", "protect", "earthquake", "toxic"))
 def test_move_flags_match_json(tables, data, move_id):
 	source = next(move for move in data["moves"] if move["id"] == move_id)

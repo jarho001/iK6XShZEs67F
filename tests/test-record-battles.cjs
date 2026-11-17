@@ -279,6 +279,44 @@ test('secondary fixture independently replays every state and addressed outcome'
 	}
 });
 
+test('effects isolation fixture replays multihit outcomes and every decision snapshot', () => {
+	const file = path.join(root, 'tests/fixtures/diff-effects2.jsonl.gz');
+	const [taskHeader, ...records] = gunzipSync(fs.readFileSync(file)).toString().trim().split('\n').map(JSON.parse);
+	assert.equal(taskHeader.schemaVersion, 2);
+	assert.equal(taskHeader.seed, 4);
+	assert.equal(records.length, 40);
+	assert(fs.statSync(file).size < 1_000_000);
+	const kinds = new Set();
+	for (const record of records) {
+		const battle = createBattle(record);
+		try {
+			const fixed = battle.sides.map(s => [...s.pokemon]);
+			const guard = instrument(battle, newStats());
+			checkState(battle, fixed, record.initialState);
+			for (const step of record.steps) {
+				guard.begin();
+				const choices = step.actions.map((action, s) =>
+					legalChoices(battle.sides[s], fixed[s], battle.ended).find(c => c.action === action));
+				for (const [s, choice] of choices.entries()) {
+					assert(choice);
+					if (choice.choice !== null) assert(battle.choose(`p${s + 1}`, choice.choice));
+				}
+				assert.deepEqual(guard.end(), step.outcomes);
+				checkState(battle, fixed, step.state);
+				for (const outcome of step.outcomes) kinds.add(outcome.kind);
+			}
+		} finally { battle.destroy(); }
+	}
+	for (const kind of ['hit_count', 'crit', 'damage_roll', 'secondary']) {
+		assert(kinds.has(kind), `Missing outcome coverage: ${kind}`);
+	}
+	const pool = JSON.parse(fs.readFileSync(path.join(root, 'work/teams/gen5-teams.json')));
+	for (const index of [0, 1]) {
+		assert.deepEqual(playBattle(index, taskHeader.seed, pool, taskHeader.acceptedMoves,
+			[], [], taskHeader.allowed), records[index]);
+	}
+});
+
 test('secondary isolation data agrees with the pinned resolved moves', () => {
 	const allowed = JSON.parse(fs.readFileSync(path.join(root, 'tests/fixtures/diff-secondaries.allowed.json')));
 	const data = JSON.parse(fs.readFileSync(path.join(root, 'data/gen5-data-v1.json')));

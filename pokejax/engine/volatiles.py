@@ -15,7 +15,7 @@ from .randomness import (
 	chance,
 	integer,
 )
-from .state import ATK, BOOST_ATK, BOOST_DEF, CONFUSION, DEF, FLINCH
+from .state import ATK, BOOST_ATK, BOOST_DEF, CONFUSION, DEF, FLINCH, ROOST
 
 
 def confuse(state, side, enabled, key, forced):
@@ -66,10 +66,19 @@ def before_move(state, side, enabled, key, forced):
 	), enabled & ~self_hit
 
 
-def end_turn(state, enabled):
-	"""Flinch has duration 1 and expires in the residual event, even if unused."""
-	return state._replace(
-		volatiles=state.volatiles.at[:, FLINCH].set(
-			jnp.where(enabled, 0, state.volatiles[:, FLINCH])
+def end_turn(state, enabled, expire_roost=None):
+	"""Expire flinch and restore Roost's saved types after the turn."""
+	if expire_roost is None:
+		expire_roost = enabled
+	active = state.active
+	roost = (state.volatiles[:, ROOST] > 0) & expire_roost
+	types = state.types.at[jnp.arange(2), active].set(
+		jnp.where(
+			roost[:, None],
+			state.roost_types[jnp.arange(2), active],
+			state.types[jnp.arange(2), active],
 		)
 	)
+	volatiles = state.volatiles.at[:, FLINCH].set(jnp.where(enabled, 0, state.volatiles[:, FLINCH]))
+	volatiles = volatiles.at[:, ROOST].set(jnp.where(expire_roost, 0, volatiles[:, ROOST]))
+	return state._replace(types=types, volatiles=volatiles)

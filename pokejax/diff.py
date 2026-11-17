@@ -45,6 +45,7 @@ STEP_CHUNK = 32
 
 def comparable(state, tables):
 	"""Map engine state to numeric snapshot fields; supports batches."""
+	# Compare effective current types. The saved Roost restoration copy is internal state.
 	return {
 		"active": state.active,
 		"legalActions": jax.vmap(legal_actions, in_axes=(0, None))(state, tables),

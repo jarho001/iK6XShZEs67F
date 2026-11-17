@@ -13,8 +13,8 @@ NUM_SIDES = 2
 NUM_TYPES = 2
 NUM_STATS = 6
 NUM_BOOSTS = 7
-CONFUSION, FLINCH = range(2)
-VOLATILE_NAMES = ("confusion", "flinch")
+CONFUSION, FLINCH, ROOST = range(3)
+VOLATILE_NAMES = ("confusion", "flinch", "roost")
 NUM_VOLATILES = len(VOLATILE_NAMES)
 HP, ATK, DEF, SPA, SPD, SPE = range(NUM_STATS)
 BOOST_ATK, BOOST_DEF, BOOST_SPA, BOOST_SPD, BOOST_SPE, ACCURACY, EVASION = range(NUM_BOOSTS)
@@ -45,6 +45,7 @@ class BattleState(NamedTuple):
 	species: jax.Array
 	level: jax.Array
 	types: jax.Array
+	roost_types: jax.Array
 	stats: jax.Array
 	hp: jax.Array
 	moves: jax.Array

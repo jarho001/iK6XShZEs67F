@@ -11,6 +11,8 @@
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-boosts.allowed.json --out tests/fixtures/diff-boosts.jsonl.gz
  * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-secondaries.allowed.json --out work/diff/secondaries.jsonl.gz
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-secondaries.allowed.json --out tests/fixtures/diff-secondaries.jsonl.gz
+ * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-effects2.allowed.json --out work/diff/effects2.jsonl.gz
+ * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-effects2.allowed.json --out tests/fixtures/diff-effects2.jsonl.gz
  *
  * JSONL schema v2: header {type, schemaVersion, showdownCommit, seed, count,
  * acceptedMoves, ...}; battle {type, index, seed (four uint16 words), policySeed,
@@ -232,7 +234,8 @@ const OUTCOME_RULES = [
 	{ kind: 'secondary', method: 'random', matches: (scope, caller, args) =>
 		scope?.kind === 'secondaries' && caller === 'BattleActions.secondaries' &&
 		args.length === 1 && args[0] === 100,
-		address: scope => [scope.user.side.n, scope.occurrence],
+		address: scope => [scope.user.side.n,
+			(scope.hitIndex * 2) + scope.occurrence],
 		value: (value, scope) => {
 			const secondary = scope.moveData.secondaries[scope.occurrence++];
 			const chance = secondary.chance === undefined ? 100 :
@@ -242,8 +245,12 @@ const OUTCOME_RULES = [
 	{ kind: 'secondary_status', method: 'sample', matches: (scope, caller, args) =>
 		scope?.kind === 'secondaries' && scope.move.id === 'triattack' && caller === 'Battle.onHit' &&
 		JSON.stringify(args[0]) === JSON.stringify(['brn', 'par', 'frz']),
-		address: scope => [scope.user.side.n, scope.occurrence - 1],
+		address: scope => [scope.user.side.n, (scope.hitIndex * 2) + scope.occurrence - 1],
 		value: value => ['brn', 'par', 'frz'].indexOf(value) },
+	{ kind: 'hit_count', method: 'sample', matches: (scope, caller, args) =>
+		scope?.kind === 'hit_loop' && caller === 'BattleActions.hitStepMoveHitLoop' &&
+		Array.isArray(args[0]) && args[0].length === 20,
+		address: scope => [scope.user.side.n, 0], value: value => value },
 	{ kind: 'sleep_duration', method: 'random', matches: (scope, caller, args) =>
 		scope?.kind === 'status' && scope.status === 'slp' && caller === 'Battle.onStart' &&
 		args[0] === 2 && args[1] === 5,
@@ -262,10 +269,10 @@ const OUTCOME_RULES = [
 	{ kind: 'crit', method: 'chance', matches: (scope, caller, args) =>
 		scope?.kind === 'crit' && caller === 'BattleActions.getDamage' && args[0] === 1 &&
 		[16, 8, 4, 3, 2].includes(args[1]),
-		address: scope => [scope.user.side.n, 0], value: value => Number(value) },
+		address: scope => [scope.user.side.n, scope.occurrence], value: value => Number(value) },
 	{ kind: 'damage_roll', method: 'random', matches: (scope, caller, args) =>
 		scope?.kind === 'damage_roll' && caller === 'Battle.randomizer' && args.length === 1 && args[0] === 16,
-		address: scope => [scope.user.side.n, 0], value: value => value },
+		address: scope => [scope.user.side.n, scope.occurrence], value: value => value },
 	{ kind: 'order', method: 'shuffle', matches: scope => scope?.kind === 'queue',
 		address: (scope, tied) => [0, tied.every(a => a.choice === 'instaswitch') ? 1 : 0],
 		value: (value, list, start) => list[start].pokemon.side.n },
@@ -303,14 +310,19 @@ function instrument(battle, stats) {
 	}
 	wrap(battle.actions, 'hitStepAccuracy', (targets, user, move) => ({ kind: 'hit', user, move }));
 	wrap(battle.actions, 'selfDrops', (targets, user, move, moveData) => ({ kind: 'selfDrops', user, move, moveData }));
-	wrap(battle.actions, 'getDamage', (user, target, move) => ({ kind: 'crit', user, move }));
+	wrap(battle.actions, 'getDamage', (user, target, move) => ({
+		kind: 'crit', user, move, occurrence: Math.max(0, (move.hit || 1) - 1),
+	}));
 	wrap(battle.actions, 'secondaries', (targets, user, move, moveData) =>
-		({ kind: 'secondaries', user, move, moveData, occurrence: 0 }));
+		({ kind: 'secondaries', user, move, moveData, hitIndex: (move.hit || 1) - 1, occurrence: 0 }));
+	wrap(battle.actions, 'hitStepMoveHitLoop', (targets, user, move) =>
+		({ kind: 'hit_loop', user, move }));
 	wrap(battle.actions, 'getConfusionDamage', user => ({ kind: 'confusionDamage', user }));
 	wrap(battle, 'randomizer', () => ({
 		kind: scope?.kind === 'confusionDamage' ? 'confusion_damage_roll' : 'damage_roll',
 		user: scope?.kind === 'confusionDamage' ? scope.user : battle.activePokemon,
 		move: battle.activeMove,
+		occurrence: scope?.kind === 'confusionDamage' ? 0 : Math.max(0, (battle.activeMove?.hit || 1) - 1),
 	}));
 	wrap(battle.queue, 'sort', () => ({ kind: 'queue' }));
 	wrap(battle, 'eachEvent', event => ({ kind: 'eachEvent', event }));

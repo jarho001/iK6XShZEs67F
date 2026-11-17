@@ -1,13 +1,8 @@
-"""Plain Gen 5 move arithmetic; sim/battle-actions.ts:1658-1901.
-
-Status burn is applied here and other move effects are handled separately.
-Abilities and items remain for later groups. Struggle overrides its table type
-to ??? (data/moves.ts).
-"""
+"""Gen 5 damage calculation with shared move math and per-hit crit/rolls."""
 
 import jax.numpy as jnp
 
-from pokejax.mechanics.damage_composition import damage_from_preroll
+from pokejax.mechanics.damage_roll import apply_damage_roll
 from pokejax.mechanics.neutral_damage import neutral_damage_before_roll
 from pokejax.mechanics.stat_stage import scale_stat_stage
 
@@ -15,10 +10,28 @@ from .randomness import CRIT, DAMAGE_ROLL, HIT, chance, integer
 from .state import ACCURACY, BURN, EVASION
 
 CRIT_DENOMINATORS = jnp.asarray([1, 16, 8, 4, 3, 2], jnp.int32)
+LEVEL_DAMAGE, HALF_CURRENT_DAMAGE, CONSTANT_DAMAGE = 1, 2, 3
 
 
-def move_damage(state, side, move, key, forced, tables):
-	"""Return damage and successful hit; callers mask actions that cannot run."""
+def accuracy_hit(state, side, move, key, forced, tables):
+	"""Sample the single move accuracy check before a multi-hit sequence."""
+	boost = jnp.clip(
+		state.boosts[side, ACCURACY].astype(jnp.int32)
+		- state.boosts[1 - side, EVASION].astype(jnp.int32),
+		-6,
+		6,
+	)
+	accuracy = tables.move_accuracy[move].astype(jnp.int32)
+	accuracy = jnp.where(
+		boost >= 0, accuracy * (3 + boost) // 3, accuracy * 3 // jnp.maximum(3 - boost, 1)
+	)
+	return tables.move_always_hits[move] | chance(
+		key, forced, HIT, side, 0, jnp.clip(accuracy, 0, 100), 100
+	)
+
+
+def move_damage_bases(state, side, move, tables):
+	"""Compute the non-crit and crit pre-roll damage bases once per move."""
 	t = tables
 	foe = 1 - side
 	user, target = state.active[side], state.active[foe]
@@ -31,48 +44,84 @@ def move_damage(state, side, move, key, forced, tables):
 	exponent = jnp.where(
 		struggle, 0, jnp.sum(jnp.where(present, t.type_exponent[type_, safe_types], 0))
 	).astype(jnp.int32)
-	boost = jnp.clip(
-		state.boosts[side, ACCURACY].astype(jnp.int32)
-		- state.boosts[foe, EVASION].astype(jnp.int32),
-		-6,
-		6,
-	)
-	accuracy = t.move_accuracy[move].astype(jnp.int32)
-	accuracy = jnp.where(
-		boost >= 0, accuracy * (3 + boost) // 3, accuracy * 3 // jnp.maximum(3 - boost, 1)
-	)
-	hit = t.move_always_hits[move] | chance(
-		key, forced, HIT, side, 0, jnp.clip(accuracy, 0, 100), 100
-	)
-	ratio = jnp.clip(t.move_crit_ratio[move].astype(jnp.int32), 0, 5)
-	crit = (ratio > 0) & chance(key, forced, CRIT, side, 0, 1, CRIT_DENOMINATORS[ratio])
 	physical = t.move_category[move] == 0
 	attack_index = jnp.where(physical, 1, 3)
 	defense_index = jnp.where(physical, 2, 4)
 	atk_boost = state.boosts[side, attack_index - 1].astype(jnp.int32)
 	def_boost = state.boosts[foe, defense_index - 1].astype(jnp.int32)
-	atk_boost = jnp.where(crit & (atk_boost < 0), 0, atk_boost)
-	def_boost = jnp.where(crit & (def_boost > 0), 0, def_boost)
-	attack = scale_stat_stage(state.stats[side, user, attack_index].astype(jnp.int32), atk_boost)
-	defense = scale_stat_stage(state.stats[foe, target, defense_index].astype(jnp.int32), def_boost)
+	crit_atk_boost = jnp.where(atk_boost < 0, 0, atk_boost)
+	crit_def_boost = jnp.where(def_boost > 0, 0, def_boost)
+	attack = state.stats[side, user, attack_index].astype(jnp.int32)
+	defense = state.stats[foe, target, defense_index].astype(jnp.int32)
+	attack_stages = jnp.stack((atk_boost, crit_atk_boost))
+	defense_stages = jnp.stack((def_boost, crit_def_boost))
+	attack_effective = scale_stat_stage(attack, attack_stages)
+	defense_effective = scale_stat_stage(defense, defense_stages)
+	level = state.level[side, user].astype(jnp.int32)
 	power = t.move_base_power[move].astype(jnp.int32)
-	pre_roll = neutral_damage_before_roll(
-		state.level[side, user].astype(jnp.int32), jnp.maximum(power, 1), attack, defense
+	base_scenarios = neutral_damage_before_roll(
+		level, jnp.maximum(power, 1), attack_effective, defense_effective
 	)
-	pre_roll *= jnp.where(crit, 2, 1)
-	roll = integer(key, forced, DAMAGE_ROLL, side, 0, 16)
-	damage = damage_from_preroll(
-		pre_roll,
-		roll,
-		jnp.any(state.types[side, user] == type_),
-		False,
-		struggle,
+	base_normal = base_scenarios[0]
+	base_crit = base_scenarios[1] * 2
+	damage_kind = t.move_damage_kind[move]
+	fixed = jnp.where(
+		damage_kind == LEVEL_DAMAGE,
+		level,
+		jnp.where(
+			damage_kind == HALF_CURRENT_DAMAGE,
+			jnp.maximum(1, state.hp[foe, target].astype(jnp.int32) // 2),
+			t.move_fixed_damage[move].astype(jnp.int32),
+		),
+	)
+	has_power = (power > 0) | (damage_kind > 0)
+	can_damage = ~immune & has_power & (t.move_category[move] != 2)
+	can_effect = ~immune | ~t.move_checks_immunity[move]
+	return (
+		base_normal,
+		base_crit,
+		fixed,
+		damage_kind,
+		can_damage,
+		can_effect,
 		exponent,
-		state.status[side, user] == BURN,
+		struggle,
 		physical,
-		False,
-		4096,
 	)
-	success = hit & ~immune & (power > 0) & (t.move_category[move] != 2)
-	success &= state.hp[foe, target] > 0
-	return jnp.where(success, damage, 0), success, hit & (~immune | ~t.move_checks_immunity[move])
+
+
+def damage_for_hits(state, side, move, hit_indices, bases, key, forced, tables):
+	"""Apply each hit's crit and roll to the shared damage bases."""
+	(
+		base_normal,
+		base_crit,
+		fixed,
+		damage_kind,
+		can_damage,
+		_,
+		exponent,
+		struggle,
+		physical,
+	) = bases
+	ratio = jnp.clip(tables.move_crit_ratio[move].astype(jnp.int32), 0, 5)
+	denominator = CRIT_DENOMINATORS[ratio]
+	user, target = state.active[side], state.active[1 - side]
+	type_ = tables.move_type[move]
+	stab = jnp.any(state.types[side, user] == type_)
+	burned = state.status[side, user] == BURN
+
+	crit_roll = chance(key, forced, CRIT, side, hit_indices, 1, denominator)
+	critical = tables.move_crit_always[move] | ((ratio > 0) & crit_roll)
+	roll = integer(key, forced, DAMAGE_ROLL, side, hit_indices, 16)
+	pre_roll = jnp.where(critical, base_crit, base_normal)
+	damage = apply_damage_roll(pre_roll, roll)
+	damage = jnp.where(stab & ~struggle, damage + damage // 2, damage)
+	burn_reduction = (burned & physical).astype(jnp.int32)
+	shift = exponent - burn_reduction
+	boosted = jnp.left_shift(damage, jnp.maximum(shift, 0))
+	resisted = damage >> jnp.maximum(-shift, 0)
+	damage = jnp.where(shift > 0, boosted, resisted)
+	damage = jnp.where(damage == 0, 1, damage) & 65535
+	damage = jnp.where(damage_kind > 0, fixed, damage)
+	can_damage &= state.hp[1 - side, target] > 0
+	return damage, can_damage

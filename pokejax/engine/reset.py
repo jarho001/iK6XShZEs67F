@@ -106,14 +106,16 @@ def reset(key, teams: Teams, engine_tables: EngineTables) -> BattleState:
 		t.species_shedinja[teams.species],
 	).astype(jnp.int16)
 	max_pp = t.move_max_pp[teams.moves]
+	initial_types = jnp.where(
+		(teams.ability == t.multitype_id)[..., None],
+		t.species_types[teams.species],
+		t.species_plain_types[teams.species],
+	)
 	return BattleState(
 		species=teams.species.astype(jnp.int16),
 		level=teams.level.astype(jnp.uint8),
-		types=jnp.where(
-			(teams.ability == t.multitype_id)[..., None],
-			t.species_types[teams.species],
-			t.species_plain_types[teams.species],
-		),
+		types=initial_types,
+		roost_types=initial_types,
 		stats=stats,
 		hp=stats[..., 0],
 		moves=teams.moves.astype(jnp.int16),

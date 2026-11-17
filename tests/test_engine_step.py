@@ -1,4 +1,4 @@
-"""Phase 1 outcomes from the pinned Showdown formulas and decision boundaries."""
+"""Pinned Showdown damage arithmetic and decision boundaries."""
 
 import json
 from pathlib import Path
@@ -130,10 +130,10 @@ def test_exact_damage_roll_miss_crit_and_boosts(tables_and_state):
 		("ember", ["water"], ["fire", "water"], 8),
 		("aerialace", ["water"], ["water"], 52),
 		("protect", ["water"], ["water"], 0),
-		("seismictoss", ["water"], ["water"], 0),
+		("seismictoss", ["water"], ["water"], 100),
 	],
 )
-def test_types_stab_always_hit_and_inert_moves(
+def test_types_stab_always_hit_and_fixed_damage_moves(
 	tables_and_state, move, user_types, target_types, expected
 ):
 	tables, t, s = tables_and_state

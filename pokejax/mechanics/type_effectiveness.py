@@ -18,11 +18,9 @@ def apply_type_effectiveness(damage, exponent):
 	value = _as_int32(damage, "damage")
 	stage = jnp.clip(_as_int32(exponent, "exponent"), -6, 6)
 
-	positive_factor = jnp.left_shift(jnp.asarray(1, dtype=jnp.int32), jnp.maximum(stage, 0))
-	boosted = value * positive_factor
-
-	resisted = value
-	for step in range(1, 7):
-		resisted = jnp.where(stage <= -step, resisted // 2, resisted)
+	positive_shift = jnp.maximum(stage, 0)
+	negative_shift = jnp.maximum(-stage, 0)
+	boosted = jnp.left_shift(value, positive_shift)
+	resisted = value >> negative_shift
 
 	return jnp.where(stage > 0, boosted, resisted).astype(jnp.int32)

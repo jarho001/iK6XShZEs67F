@@ -25,6 +25,12 @@ def test_secondary_group_matches_allowed_file():
 	assert set(allowed["moves"]) <= support.SUPPORTED_MOVES
 
 
+def test_effects2_moves_match_allowed_file():
+	allowed = json.loads(Path("tests/fixtures/diff-effects2.allowed.json").read_text())
+	assert allowed["moves"] == sorted(allowed["moves"])
+	assert set(allowed["moves"]) <= support.SUPPORTED_MOVES
+
+
 @pytest.mark.parametrize(
 	"moves,abilities,items,expected",
 	[

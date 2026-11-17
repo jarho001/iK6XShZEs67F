@@ -10,7 +10,7 @@ contexts ACTION_ORDER=0, SWITCH_IN_ORDER=1, RESIDUAL_ORDER=2 (others reserved).
 hit: side is attacker, occurrence is hit index, value 1=hit, 0=miss. Consult
 only if the move checks accuracy. crit: same address axes, value 1=crit, 0=no.
 damage_roll: same axes, value 0..15 is Showdown random(16), multiplying damage
-by (100-value)/100. Occurrences are zero-based, at most 7.
+by (100-value)/100. Occurrences are zero-based.
 full_paralysis and thaw: side is the affected Pokemon, value 0/1. sleep_duration:
 side is the recipient, value 0..2, added to 2 for Showdown's initial timer.
 secondary: attacker side, occurrence is the secondary row (fangs use 0 and 1),
@@ -18,6 +18,8 @@ value 0/1 is whether its chance passed. secondary_status: same axes, value 0..2
 selects Tri Attack's burn/paralysis/freeze. confusion_duration: recipient side,
 occurrence 0, value 0..3 added to 2. confusion_hit: affected side, occurrence 0,
 value 1=self-hit, 0=acts. confusion_damage_roll: same axes, value 0..15.
+hit_count: attacker side, occurrence 0, value 2..5. Gen 5 uses 35% each for 2 and 3 hits,
+then 15% each for 4 and 5.
 
 The step draws a table of random bits once, addressed by kind, side and occurrence. integer
 requires n>0; chance requires 0<=numerator<=denominator and denominator>0.
@@ -42,17 +44,22 @@ OUTCOME_KINDS = (
 	("confusion_duration", 3),
 	("confusion_hit", 1),
 	("confusion_damage_roll", 15),
+	("hit_count", 5),
 )
 KIND_NAMES = tuple(name for name, _ in OUTCOME_KINDS)
 NUM_KINDS = len(KIND_NAMES)
 ORDER, HIT, CRIT, DAMAGE_ROLL = map(KIND_NAMES.index, ("order", "hit", "crit", "damage_roll"))
 FULL_PARALYSIS, THAW, SLEEP_DURATION = map(KIND_NAMES.index, KIND_NAMES[4:7])
 SECONDARY, SECONDARY_STATUS, CONFUSION_DURATION, CONFUSION_HIT, CONFUSION_DAMAGE_ROLL = map(
-	KIND_NAMES.index, KIND_NAMES[7:]
+	KIND_NAMES.index, KIND_NAMES[7:12]
 )
+HIT_COUNT = KIND_NAMES.index("hit_count")
 OUTCOME_MAXIMUM = tuple(maximum for _, maximum in OUTCOME_KINDS)
+OUTCOME_MINIMUM = tuple(2 if name == "hit_count" else 0 for name, _ in OUTCOME_KINDS)
 ACTION_ORDER, SWITCH_IN_ORDER, RESIDUAL_ORDER = range(3)
-MAX_OCCURRENCES = 8
+# Secondary outcomes address hit_index * SECONDARY_SLOTS + row; fifth-hit row
+# two is occurrence 9, so ten slots cover the largest table-defined sequence.
+MAX_OCCURRENCES = 10
 NUM_SIDES = 2
 NOT_FORCED = -1
 type Forced = jax.Array
@@ -76,8 +83,8 @@ def forced_from_records(records, *, host=False) -> Forced:
 			raise ValueError("Outcome address out of range")
 		if kind == ORDER and (side != 0 or occ > RESIDUAL_ORDER):
 			raise ValueError("Invalid order context")
-		maximum = OUTCOME_MAXIMUM[kind]
-		if not 0 <= value <= maximum:
+		minimum, maximum = OUTCOME_MINIMUM[kind], OUTCOME_MAXIMUM[kind]
+		if not minimum <= value <= maximum:
 			raise ValueError("Outcome value out of range")
 		if values[kind, side, occ] != NOT_FORCED:
 			raise ValueError("Duplicate outcome address")
@@ -101,6 +108,21 @@ def _sample_or_force(key, forced, kind, side, occ, n):
 def integer(key, forced, kind, side, occ, n):
 	"""Return a forced outcome or a uniform integer in [0, n)."""
 	return _sample_or_force(key, forced, kind, side, occ, n)
+
+
+def hit_count(key, forced, side, hit_min, hit_max):
+	"""Sample Gen 5's 2-5 distribution or force the resulting hit count."""
+	bits = random_bits(key) if key.ndim < 3 else key
+	selector = bits[HIT_COUNT, side, 0] % jnp.asarray(20, jnp.uint32)
+	gen5_count = jnp.where(
+		selector < 7, 2, jnp.where(selector < 14, 3, jnp.where(selector < 17, 4, 5))
+	)
+	low = hit_min.astype(jnp.uint32)
+	span = (hit_max - hit_min + 1).astype(jnp.uint32)
+	uniform = low + bits[HIT_COUNT, side, 0] % span
+	sample = jnp.where((hit_min == 2) & (hit_max == 5), gen5_count, uniform)
+	value = forced[HIT_COUNT, side, 0].astype(jnp.int32)
+	return jnp.where(value >= 0, value, sample.astype(jnp.int32))
 
 
 def chance(key, forced, kind, side, occ, numerator, denominator):

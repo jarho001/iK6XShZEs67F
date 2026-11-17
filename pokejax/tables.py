@@ -68,6 +68,20 @@ class MoveTable(RowTable):
 	pp: NDArray[np.uint8]
 	no_pp_boosts: NDArray[np.bool_]
 	crit_ratio: NDArray[np.uint8]
+	crit_always: NDArray[np.bool_]
+	drain: NDArray[np.uint8]
+	recoil: NDArray[np.uint8]
+	recoil_basehp: NDArray[np.bool_]
+	heal: NDArray[np.uint8]
+	heal_weather: NDArray[np.uint8]
+	damage_kind: NDArray[np.uint8]
+	fixed_damage: NDArray[np.int16]
+	hit_min: NDArray[np.uint8]
+	hit_max: NDArray[np.uint8]
+	self_faint: NDArray[np.uint8]
+	crash_damage: NDArray[np.bool_]
+	pain_split: NDArray[np.bool_]
+	roost: NDArray[np.bool_]
 	target: NDArray[np.uint8]
 	flags: NDArray[np.bool_]
 	boosts: NDArray[np.int8]
@@ -203,6 +217,20 @@ def _build_moves(rows, types, target_names, flag_names):
 		"pp": np.zeros(count, dtype=np.uint8),
 		"no_pp_boosts": np.zeros(count, dtype=np.bool_),
 		"crit_ratio": np.zeros(count, dtype=np.uint8),
+		"crit_always": np.zeros(count, dtype=np.bool_),
+		"drain": np.zeros((count, 2), dtype=np.uint8),
+		"recoil": np.zeros((count, 2), dtype=np.uint8),
+		"recoil_basehp": np.zeros(count, dtype=np.bool_),
+		"heal": np.zeros((count, 2), dtype=np.uint8),
+		"heal_weather": np.zeros(count, dtype=np.uint8),
+		"damage_kind": np.zeros(count, dtype=np.uint8),
+		"fixed_damage": np.zeros(count, dtype=np.int16),
+		"hit_min": np.zeros(count, dtype=np.uint8),
+		"hit_max": np.zeros(count, dtype=np.uint8),
+		"self_faint": np.zeros(count, dtype=np.uint8),
+		"crash_damage": np.zeros(count, dtype=np.bool_),
+		"pain_split": np.zeros(count, dtype=np.bool_),
+		"roost": np.zeros(count, dtype=np.bool_),
 		"target": np.zeros(count, dtype=np.uint8),
 		"flags": np.zeros((count, len(flag_names)), dtype=np.bool_),
 		"boosts": np.zeros((count, 7), dtype=np.int8),
@@ -217,6 +245,49 @@ def _build_moves(rows, types, target_names, flag_names):
 	}
 	for row, move in enumerate(rows, start=1):
 		columns["confusion"][row] = move.get("volatileStatus") == "confusion"
+		columns["crit_always"][row] = move.get("willCrit", False)
+		for column, key in (("drain", "drain"), ("recoil", "recoil"), ("heal", "heal")):
+			fraction = move.get(key)
+			if fraction:
+				columns[column][row] = fraction
+		columns["recoil_basehp"][row] = move.get("struggleRecoil", False)
+		if columns["recoil_basehp"][row]:
+			columns["recoil"][row] = [1, 4]
+		heal_callback = (move.get("onHit") or {}).get("$callback", "")
+		# The three Gen 5 weather heals store their clear-weather fraction here;
+		# Phase 6 supplies the weather-dependent override from this marker.
+		columns["heal_weather"][row] = int(
+			heal_callback
+			in {
+				"moves:moonlight:onHit",
+				"moves:morningsun:onHit",
+				"moves:synthesis:onHit",
+			}
+		)
+		if columns["heal_weather"][row]:
+			columns["heal"][row] = [1, 2]
+		callback = (move.get("damageCallback") or {}).get("$callback", "")
+		fixed_damage = move.get("damage")
+		columns["damage_kind"][row] = (
+			1
+			if fixed_damage == "level"
+			else 2
+			if callback == "moves:superfang:damageCallback"
+			else 3
+			if isinstance(fixed_damage, int)
+			else 0
+		)
+		if columns["damage_kind"][row] == 3:
+			columns["fixed_damage"][row] = fixed_damage
+		multihit = move.get("multihit", 1)
+		if isinstance(multihit, list):
+			columns["hit_min"][row], columns["hit_max"][row] = multihit
+		else:
+			columns["hit_min"][row] = columns["hit_max"][row] = multihit
+		columns["self_faint"][row] = {"always": 1, "ifHit": 2}.get(move.get("selfdestruct"), 0)
+		columns["crash_damage"][row] = move.get("hasCrashDamage", False)
+		columns["pain_split"][row] = heal_callback == "moves:painsplit:onHit"
+		columns["roost"][row] = move.get("self", {}).get("volatileStatus") == "roost"
 		for slot, secondary in enumerate(move.get("secondaries") or ()):
 			if slot >= SECONDARY_SLOTS:
 				raise ValueError("Increase SECONDARY_SLOTS for this export")
