@@ -36,7 +36,7 @@ type Forced = jax.Array
 UNFORCED = jnp.full((NUM_KINDS, NUM_SIDES, MAX_OCCURRENCES), NOT_FORCED, dtype=jnp.int8)
 
 
-def forced_from_records(records) -> Forced:
+def forced_from_records(records, *, host=False) -> Forced:
 	"""Validate host records; reject duplicates rather than silently overwriting."""
 	values = np.full(UNFORCED.shape, NOT_FORCED, dtype=np.int8)
 	for record in records:
@@ -59,7 +59,7 @@ def forced_from_records(records) -> Forced:
 		if values[kind, side, occ] != NOT_FORCED:
 			raise ValueError("Duplicate outcome address")
 		values[kind, side, occ] = value
-	return jnp.asarray(values)
+	return values if host else jnp.asarray(values)
 
 
 def _sample_or_force(key, forced, kind, side, occ, n):

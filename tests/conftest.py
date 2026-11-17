@@ -1,5 +1,14 @@
 """Small table-backed team pools that do not require Showdown."""
 
+import os
+from pathlib import Path
+
+os.environ.setdefault(
+	"JAX_COMPILATION_CACHE_DIR", str(Path(__file__).resolve().parents[1] / "work/jax-cache")
+)
+os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "0.5")
+os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES", "0")
+
 import numpy as np
 import pytest
 
@@ -26,7 +35,7 @@ def pytest_collection_modifyitems(config, items):
 			item.add_marker(skip)
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def tables():
 	return load_tables()
 

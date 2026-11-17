@@ -59,6 +59,22 @@ def test_corrupt_snapshot(field):
 	assert result.mismatches[0].step == -1
 
 
+def test_mismatch_after_chunk_boundaries():
+	header, battles = load_recording(FIXTURE)
+	header, battles = copy.deepcopy((header, battles))
+	battle = battles[32]
+	assert len(battle["steps"]) > 32
+	snapshot = battle["steps"][32]["state"]
+	snapshot["sides"][0]["members"][0]["hp"] += 1
+	result = replay_file(FIXTURE, recording=(header, battles))
+	assert len(result.mismatches) == 1
+	mismatch = result.mismatches[0]
+	assert (mismatch.battle, mismatch.step, mismatch.field) == (battle["index"], 32, "hp[0][0]")
+	assert mismatch.showdown == mismatch.engine + 1
+	assert mismatch.actions == battle["steps"][32]["actions"]
+	assert mismatch.outcomes == battle["steps"][32]["outcomes"]
+
+
 def test_fainted_active_nullable_fields_and_other_fields():
 	header, battles = load_recording(FIXTURE)
 	for original in battles:

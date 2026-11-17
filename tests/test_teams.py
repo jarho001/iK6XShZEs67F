@@ -34,30 +34,34 @@ def tables():
 	return load_tables()
 
 
-def generate(path, seed=1, count=50):
+@pytest.fixture(scope="module")
+def generated_files(tmp_path_factory):
+	directory = tmp_path_factory.mktemp("teams")
+	paths = [directory / f"{name}.json" for name in ("generated", "repeated", "other", "prefix")]
+	script = """
+		const { main } = require('./reference/generate-teams.cjs');
+		for (const [file, seed, count] of JSON.parse(process.argv[1])) {
+			main(['--out', file, '--seed', seed, '--count', count]);
+		}
+	"""
+	cases = [
+		[str(path), str(seed), str(count)]
+		for path, seed, count in zip(paths, (1, 1, 2, 1), (50, 50, 50, 2), strict=True)
+	]
 	result = subprocess.run(
-		[
-			"node",
-			str(ROOT / "reference/generate-teams.cjs"),
-			"--count",
-			str(count),
-			"--seed",
-			str(seed),
-			"--out",
-			str(path),
-		],
+		["node", "-e", script, json.dumps(cases)],
 		cwd=ROOT,
 		capture_output=True,
 		text=True,
 		check=True,
 	)
 	assert "Validation:" not in result.stderr
-	return path
+	return paths
 
 
 @pytest.fixture(scope="module")
-def generated(tmp_path_factory):
-	return generate(tmp_path_factory.mktemp("teams") / "teams.json")
+def generated(generated_files):
+	return generated_files[0]
 
 
 @pytest.fixture(scope="module")
@@ -70,13 +74,11 @@ def pool(generated, tables):
 	return load_team_pool(generated, tables)
 
 
-def test_determinism(generated, data, tmp_path):
-	repeated = generate(tmp_path / "repeated.json")
+def test_determinism(generated, data, generated_files):
+	_, repeated, other, prefix = generated_files
 	assert repeated.read_bytes() == generated.read_bytes()
-	other = generate(tmp_path / "other.json", seed=2)
 	assert json.loads(other.read_text())["teams"] != data["teams"]
 	# A team's seed is independent of the requested pool length.
-	prefix = generate(tmp_path / "prefix.json", count=2)
 	assert json.loads(prefix.read_text())["teams"] == data["teams"][:2]
 
 

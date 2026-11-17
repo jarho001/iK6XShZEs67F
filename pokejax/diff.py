@@ -1,7 +1,7 @@
 """Replay decision-point JSONL recordings against the Phase 1 engine.
 
-Run ``python -m pokejax.diff PATH`` (plain JSONL or gzip). One compiled scan
-replays the whole file; host comparison reports the first mismatch per battle.
+Run ``python -m pokejax.diff PATH`` (plain JSONL or gzip). A reusable compiled
+scan replays fixed-size chunks; host comparison reports the first mismatch per battle.
 Step numbers in reports are zero-based; ``initial`` precedes every action.
 """
 
@@ -29,6 +29,8 @@ KEY = jax.random.key(0)
 ROOT = Path(__file__).resolve().parents[1]
 REQUESTS = {"none": NONE, "move": MOVE, "switch": SWITCH}
 NULL_TYPE = -3
+BATTLE_CHUNK = 32
+STEP_CHUNK = 32
 
 
 def comparable(state, tables):
@@ -114,9 +116,13 @@ def recorded_state(snapshot, tables):
 
 
 @jax.jit
-def _replay(teams, actions, forced, valid, tables):
+def _initial(teams, tables):
 	states = jax.vmap(reset, in_axes=(None, 0, None))(KEY, teams, tables)
-	initial = comparable(states, tables)
+	return states, comparable(states, tables)
+
+
+@jax.jit
+def _replay(states, actions, forced, valid, offset, tables):
 
 	def advance(states, inputs):
 		actions, forced, valid, index = inputs
@@ -131,21 +137,17 @@ def _replay(teams, actions, forced, valid, tables):
 		)
 		return out, comparable(out, tables)
 
-	_, history = jax.lax.scan(
+	states, history = jax.lax.scan(
 		advance,
 		states,
 		(
 			jnp.swapaxes(actions, 0, 1),
 			jnp.swapaxes(forced, 0, 1),
 			jnp.swapaxes(valid, 0, 1),
-			jnp.arange(actions.shape[1]),
+			jnp.arange(actions.shape[1]) + offset,
 		),
 	)
-	return jax.tree.map(
-		lambda first, rest: jnp.concatenate((first[:, None], jnp.swapaxes(rest, 0, 1)), axis=1),
-		initial,
-		history,
-	)
+	return states, jax.tree.map(lambda rest: jnp.swapaxes(rest, 0, 1), history)
 
 
 @dataclass(frozen=True)
@@ -212,8 +214,8 @@ def load_recording(path):
 
 
 def replay_file(path, *, recording=None) -> ReplayResult:
-	"""Replay ALL battles with one jit/scan/vmap, then compare exactly on the host."""
-	start = perf_counter()
+	"""Replay ALL battles in fixed chunks, then compare exactly on the host."""
+	started = perf_counter()
 	header, battles = load_recording(path) if recording is None else recording
 	tables = load_tables()
 	pool = team_pool_from_data(
@@ -241,9 +243,39 @@ def replay_file(path, *, recording=None) -> ReplayResult:
 			):
 				raise ValueError(f"Battle {battle['index']} step {t}: invalid actions")
 			actions[b, t] = choice
-			forced[b, t] = forced_from_records(record["outcomes"])
+			forced[b, t] = forced_from_records(record["outcomes"], host=True)
 	valid = np.arange(shape[1])[None] < lengths[:, None]
-	actual = jax.device_get(_replay(teams, actions, forced, valid, build_engine_tables(tables)))
+	engine_tables = build_engine_tables(tables)
+	parts = []
+	for start in range(0, len(battles), BATTLE_CHUNK):
+		end = min(start + BATTLE_CHUNK, len(battles))
+		indices = np.minimum(np.arange(start, start + BATTLE_CHUNK), end - 1)
+		chunk_teams = jax.tree.map(lambda x, indices=indices: x[indices], teams)
+		states, initial = _initial(chunk_teams, engine_tables)
+		histories = [initial]
+		for offset in range(0, shape[1], STEP_CHUNK):
+			stop = min(offset + STEP_CHUNK, shape[1])
+			chunk_actions = np.zeros((BATTLE_CHUNK, STEP_CHUNK, 2), np.int32)
+			chunk_forced = np.full((BATTLE_CHUNK, STEP_CHUNK, *UNFORCED.shape), -1, np.int8)
+			chunk_valid = np.zeros((BATTLE_CHUNK, STEP_CHUNK), bool)
+			n = stop - offset
+			chunk_actions[:, :n] = actions[indices, offset:stop]
+			chunk_forced[:, :n] = forced[indices, offset:stop]
+			chunk_valid[: end - start, :n] = valid[indices[: end - start], offset:stop]
+			states, history = _replay(
+				states, chunk_actions, chunk_forced, chunk_valid, np.int32(offset), engine_tables
+			)
+			histories.append(history)
+		host_history = jax.device_get(histories)
+		parts.append(
+			jax.tree.map(
+				lambda first, *rest, count=end - start: np.concatenate(
+					[first[:, None], *rest], axis=1
+				)[:count, : shape[1] + 1],
+				*host_history,
+			)
+		)
+	actual = jax.tree.map(lambda *xs: np.concatenate(xs, axis=0), *parts)
 	mismatches = []
 	for b, battle in enumerate(battles):
 		snapshots = [battle["initialState"]] + [record["state"] for record in battle["steps"]]
@@ -297,7 +329,9 @@ def replay_file(path, *, recording=None) -> ReplayResult:
 					record["outcomes"] if record else None,
 				)
 			)
-	return ReplayResult(len(battles), int(lengths.sum()), tuple(mismatches), perf_counter() - start)
+	return ReplayResult(
+		len(battles), int(lengths.sum()), tuple(mismatches), perf_counter() - started
+	)
 
 
 def main():

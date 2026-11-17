@@ -73,7 +73,7 @@ def rollout(carry, pool, tables, steps, with_observation=False):
 	return carry, tuple(jnp.sum(x) for x in stats)
 
 
-def benchmark(
+def _benchmark(
 	pool_path=DEFAULT_POOL,
 	batch_size=DEFAULT_BATCH,
 	steps=DEFAULT_STEPS,
@@ -84,8 +84,6 @@ def benchmark(
 	"""Benchmark on the default device; use a fresh process for a cold compile."""
 	if min(batch_size, steps, repetitions) < 1:
 		raise ValueError("batch size, steps and repetitions must be positive")
-	# Disable both reading and writing the persistent cache, even if configured externally.
-	jax.config.update("jax_enable_compilation_cache", False)
 	host_pool = load_npz(pool_path)
 	if not len(host_pool.team_size) or np.any(host_pool.team_size != TEAM_SLOTS):
 		raise ValueError("The pool must contain only complete six-member teams")
@@ -100,9 +98,9 @@ def benchmark(
 	state = _new_states(init_key, pool, engine_tables, batch_size)
 	carry = (state, key, jnp.zeros(batch_size, dtype=jnp.int32))
 	jax.block_until_ready((carry, pool, engine_tables))
-	run = jax.jit(lambda carry, pool, tables: rollout(carry, pool, tables, steps, with_observation))
+	run = jax.jit(rollout, static_argnums=(3, 4))
 	start = time.perf_counter()
-	carry, _ = jax.block_until_ready(run(carry, pool, engine_tables))
+	carry, _ = jax.block_until_ready(run(carry, pool, engine_tables, steps, with_observation))
 	compile_seconds = time.perf_counter() - start
 	# The cold first call also warms up the executable.
 	durations = []
@@ -110,7 +108,9 @@ def benchmark(
 	completed_lengths = []
 	for _ in range(repetitions):
 		start = time.perf_counter()
-		carry, stats = jax.block_until_ready(run(carry, pool, engine_tables))
+		carry, stats = jax.block_until_ready(
+			run(carry, pool, engine_tables, steps, with_observation)
+		)
 		durations.append(time.perf_counter() - start)
 		counts.append(int(stats[0]))
 		completed_lengths.append(int(stats[1]))
@@ -134,6 +134,16 @@ def benchmark(
 		"completed_battles": sum(counts),
 		"mean_battle_length": sum(completed_lengths) / sum(counts) if sum(counts) else None,
 	}
+
+
+def benchmark(*args, **kwargs):
+	"""Run without the persistent cache and restore the caller's configuration."""
+	previous = jax.config.jax_enable_compilation_cache
+	jax.config.update("jax_enable_compilation_cache", False)
+	try:
+		return _benchmark(*args, **kwargs)
+	finally:
+		jax.config.update("jax_enable_compilation_cache", previous)
 
 
 def main():

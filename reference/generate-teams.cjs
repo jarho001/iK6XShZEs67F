@@ -10,8 +10,8 @@ const FORMAT = 'gen5randombattle';
 const root = path.resolve(__dirname, '..');
 const dist = path.join(__dirname, 'vendor', 'pokemon-showdown', 'dist');
 
-function main() {
-	const { values } = parseArgs({ options: {
+function main(args = process.argv.slice(2)) {
+	const { values } = parseArgs({ args, options: {
 		count: { type: 'string', default: '10000' },
 		seed: { type: 'string', default: '1' },
 		out: { type: 'string', default: 'work/teams/gen5-teams.json' },
@@ -74,9 +74,13 @@ function main() {
 	console.log(`Wrote ${count} teams to ${values.out}`);
 }
 
-try {
-	main();
-} catch (error) {
-	console.error(`Team generation failed: ${error.message}`);
-	process.exitCode = 1;
+if (require.main === module) {
+	try {
+		main();
+	} catch (error) {
+		console.error(`Team generation failed: ${error.message}`);
+		process.exitCode = 1;
+	}
 }
+
+module.exports = { main };

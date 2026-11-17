@@ -30,10 +30,10 @@ def test_benchmark_and_finished_battles(tmp_path, synthetic_pool, tables):
 		move_base_power=jnp.full_like(engine_tables.move_base_power, 100),
 		type_immune=jnp.zeros_like(engine_tables.type_immune),
 	)
-	carry, (count, total_length) = jax.jit(rollout, static_argnums=3)(
-		(state, key, jnp.full(8, 7, dtype=jnp.int32)), pool, engine_tables, 1
+	carry, (count, total_length) = jax.jit(rollout, static_argnums=(3, 4))(
+		(state, key, jnp.full(8, 7, dtype=jnp.int32)), pool, engine_tables, 4, False
 	)
 	assert int(count) == 8
 	assert int(total_length) == 64
 	assert np.all(np.asarray(carry[0].winner) == ONGOING)
-	assert np.all(np.asarray(carry[2]) == 0)
+	assert np.all(np.asarray(carry[2]) == 3)

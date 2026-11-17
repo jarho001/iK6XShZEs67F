@@ -51,6 +51,7 @@ def test_showdown_reset(tables, tmp_path):
 	state = jax.jit(jax.vmap(reset, in_axes=(0, 0, None)))(
 		jax.random.split(jax.random.key(0), len(pairs)), teams, build_engine_tables(tables)
 	)
+	state = jax.device_get(state)
 	for b, battle in enumerate(fixture["battles"]):
 		assert int(state.turn[b]) == battle["turn"] == FIRST_TURN
 		for side, members in enumerate(battle["sides"]):
@@ -177,10 +178,11 @@ def test_engine_tables_and_pp(tables):
 		("nature_multipliers", tables.natures.multipliers),
 	):
 		np.testing.assert_array_equal(getattr(t, name), expected)
+	max_pp = np.asarray(t.move_max_pp)
 	for row, id_ in enumerate(tables.moves.ids):
 		pp = int(tables.moves.pp[row])
 		expected = pp if tables.moves.no_pp_boosts[row] or id_ == "trumpcard" else pp * 8 // 5
-		assert int(t.move_max_pp[row]) == expected
+		assert int(max_pp[row]) == expected
 	assert int(t.move_max_pp[tables.moves.index["trumpcard"]]) == 5
 	assert int(t.move_max_pp[tables.moves.index["struggle"]]) == 1
 
