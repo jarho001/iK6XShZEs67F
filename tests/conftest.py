@@ -8,6 +8,8 @@ os.environ.setdefault(
 )
 os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "0.5")
 os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES", "0")
+# Parallel workers share the GPU; allocate on demand instead of 75% each.
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import numpy as np
 import pytest
