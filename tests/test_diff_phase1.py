@@ -29,7 +29,7 @@ def test_fixtures(fixture):
 
 # The 300-battle recordings in work/diff/ (git-ignored) run only with --large.
 @pytest.mark.large
-@pytest.mark.parametrize("name", ["phase1", "status", "boosts"])
+@pytest.mark.parametrize("name", ["phase1", "status", "boosts", "secondaries"])
 def test_large_recording(name):
 	path = ROOT / f"work/diff/{name}.jsonl.gz"
 	if not path.exists():
@@ -57,6 +57,38 @@ def test_corrupt_snapshot(field):
 	result = replay_file(FIXTURE, recording=(header, battles))
 	assert result.mismatches, result.report()
 	assert result.mismatches[0].step == -1
+
+
+@pytest.mark.parametrize("field", ["counter", "unknown_volatile", "unknown_counter"])
+def test_corrupt_secondary_snapshot(field):
+	path = ROOT / "tests/fixtures/diff-secondaries.jsonl.gz"
+	header, battles = load_recording(path)
+	battle = copy.deepcopy(
+		next(
+			battle
+			for battle in battles
+			if any(
+				side.get("volatileCounters", {}).get("confusion", 0)
+				for record in battle["steps"]
+				for side in record["state"]["sides"]
+			)
+		)
+	)
+	header = dict(header, count=1)
+	if field == "counter":
+		side = next(
+			side
+			for record in battle["steps"]
+			for side in record["state"]["sides"]
+			if side.get("volatileCounters", {}).get("confusion", 0)
+		)
+		side["volatileCounters"]["confusion"] += 1
+	elif field == "unknown_volatile":
+		battle["initialState"]["sides"][0]["volatiles"].append("substitute")
+	else:
+		battle["initialState"]["sides"][0]["volatileCounters"] = {"encore": 3}
+	result = replay_file(path, recording=(header, [battle]))
+	assert result.mismatches, result.report()
 
 
 def test_mismatch_after_chunk_boundaries():

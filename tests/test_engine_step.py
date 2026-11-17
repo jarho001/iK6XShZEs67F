@@ -21,7 +21,7 @@ from pokejax.engine.randomness import (
 	UNFORCED,
 )
 from pokejax.engine.reset import reset, teams_from_pool
-from pokejax.engine.state import MOVE, NONE, ONGOING, SWITCH
+from pokejax.engine.state import CONFUSION, FLINCH, MOVE, NONE, ONGOING, SWITCH
 from pokejax.engine.step import step
 from pokejax.tables import load_tables
 from pokejax.teams import load_npz, load_team_pool
@@ -72,6 +72,17 @@ def tables_and_state(battle_pool):
 
 def play(state, t, actions=(0, 0), forced=FORCED):
 	return RUN(state, jnp.asarray(actions, jnp.int32), KEY, forced, t)
+
+
+def test_switch_and_faint_clear_active_volatiles(tables_and_state):
+	_, t, state = tables_and_state
+	state = state._replace(volatiles=state.volatiles.at[0, CONFUSION].set(3).at[0, FLINCH].set(1))
+	out = play(state, t, actions=(4, 0))
+	assert np.all(np.asarray(out.volatiles[0]) == 0)
+	state = state._replace(hp=state.hp.at[0, 0].set(1), stats=state.stats.at[0, 0, 5].set(1))
+	out = play(state, t)
+	assert int(out.hp[0, 0]) == 0
+	assert np.all(np.asarray(out.volatiles[0]) == 0)
 
 
 def test_legal_requests(tables_and_state):

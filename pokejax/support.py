@@ -6,6 +6,75 @@ from numpy.typing import NDArray
 from pokejax.tables import NONE_ROW, Tables
 from pokejax.teams import TeamPool
 
+# A group of rows, not per-move execution branches. Other effects (Fake Out,
+# recoil and Relic Song's form change) remain in their roadmap groups.
+SECONDARY_MOVES = frozenset(
+	[
+		"airslash",
+		"ancientpower",
+		"bite",
+		"blazekick",
+		"blizzard",
+		"blueflare",
+		"bodyslam",
+		"boltstrike",
+		"bugbuzz",
+		"bulldoze",
+		"chargebeam",
+		"chatter",
+		"crunch",
+		"darkpulse",
+		"discharge",
+		"dynamicpunch",
+		"earthpower",
+		"energyball",
+		"fierydance",
+		"fireblast",
+		"firefang",
+		"firepunch",
+		"flamecharge",
+		"flamethrower",
+		"flamewheel",
+		"flashcannon",
+		"focusblast",
+		"gunkshot",
+		"headbutt",
+		"heatwave",
+		"hurricane",
+		"icebeam",
+		"icefang",
+		"icepunch",
+		"iciclecrash",
+		"ironhead",
+		"irontail",
+		"lavaplume",
+		"meteormash",
+		"ominouswind",
+		"poisonjab",
+		"psychic",
+		"rockslide",
+		"sacredfire",
+		"scald",
+		"seedflare",
+		"shadowball",
+		"signalbeam",
+		"silverwind",
+		"sludgebomb",
+		"sludgewave",
+		"thunder",
+		"thunderbolt",
+		"thunderfang",
+		"thunderpunch",
+		"triattack",
+		"waterfall",
+		"zenheadbutt",
+	]
+)
+CONFUSION_MOVES = frozenset(
+	["confuseray", "flatter", "supersonic", "swagger", "sweetkiss", "teeterdance"]
+)
+
+
 SUPPORTED_MOVES: frozenset[str] = frozenset(
 	[
 		"agility",
@@ -106,6 +175,8 @@ SUPPORTED_MOVES: frozenset[str] = frozenset(
 		"xscissor",
 	]
 )
+SUPPORTED_MOVES |= SECONDARY_MOVES | CONFUSION_MOVES
+
 SUPPORTED_ABILITIES: frozenset[str] = frozenset()
 SUPPORTED_ITEMS: frozenset[str] = frozenset()
 

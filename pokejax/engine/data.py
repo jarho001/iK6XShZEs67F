@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from pokejax.support import CONFUSION_MOVES, SECONDARY_MOVES
 from pokejax.tables import Tables
 
 from .state import BURN, FREEZE, PARALYSIS, POISON, SLEEP, TOXIC
@@ -36,6 +37,14 @@ class EngineTables(NamedTuple):
 	move_boost_when: jax.Array
 	move_boost_target: jax.Array
 	move_boost_effect: jax.Array
+	move_confusion: jax.Array
+	move_secondary_chance: jax.Array
+	move_secondary_self: jax.Array
+	move_secondary_status: jax.Array
+	move_secondary_status_choices: jax.Array
+	move_secondary_boosts: jax.Array
+	move_secondary_volatile: jax.Array
+	move_secondary_user_species: jax.Array
 	status_immune: jax.Array
 	type_exponent: jax.Array
 	type_immune: jax.Array
@@ -92,6 +101,8 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 		"swordsdance",
 		"tailglow",
 		"workup",
+		"swagger",
+		"flatter",
 	)
 	drop_moves = (
 		"closecombat",
@@ -127,6 +138,10 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 	defrost = moves.flags[:, moves.flag_names.index("defrost")]
 	# Gen 5 explicitly removes Scald's later-generation thawsTarget property.
 	thaws_target = np.zeros(len(moves.ids), np.bool_)
+	secondary_chance = moves.secondary_chance.copy()
+	secondary_chance[~np.isin(moves.ids, tuple(SECONDARY_MOVES))] = 0
+	user_species = np.zeros_like(moves.secondary_status, dtype=np.int16)
+	user_species[moves.index["chatter"]] = tables.species.index["chatot"]
 	return EngineTables(
 		*map(
 			jnp.asarray,
@@ -154,6 +169,14 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 				when,
 				boost_target,
 				boost_effect,
+				moves.confusion & np.isin(moves.ids, tuple(CONFUSION_MOVES)),
+				secondary_chance,
+				moves.secondary_self,
+				moves.secondary_status,
+				moves.secondary_status_choices,
+				moves.secondary_boosts,
+				moves.secondary_volatile,
+				user_species,
 				immune,
 				tables.types.exponent,
 				tables.types.immune,

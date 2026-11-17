@@ -13,6 +13,11 @@ damage_roll: same axes, value 0..15 is Showdown random(16), multiplying damage
 by (100-value)/100. Occurrences are zero-based, at most 7.
 full_paralysis and thaw: side is the affected Pokemon, value 0/1. sleep_duration:
 side is the recipient, value 0..2, added to 2 for Showdown's initial timer.
+secondary: attacker side, occurrence is the secondary row (fangs use 0 and 1),
+value 0/1 is whether its chance passed. secondary_status: same axes, value 0..2
+selects Tri Attack's burn/paralysis/freeze. confusion_duration: recipient side,
+occurrence 0, value 0..3 added to 2. confusion_hit: affected side, occurrence 0,
+value 1=self-hit, 0=acts. confusion_damage_roll: same axes, value 0..15.
 
 Each helper folds kind, then side, then occurrence into the step key. integer
 requires n>0; chance requires 0<=numerator<=denominator and denominator>0.
@@ -24,10 +29,28 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-KIND_NAMES = ("order", "hit", "crit", "damage_roll", "full_paralysis", "thaw", "sleep_duration")
+OUTCOME_KINDS = (
+	("order", 1),
+	("hit", 1),
+	("crit", 1),
+	("damage_roll", 15),
+	("full_paralysis", 1),
+	("thaw", 1),
+	("sleep_duration", 2),
+	("secondary", 1),
+	("secondary_status", 2),
+	("confusion_duration", 3),
+	("confusion_hit", 1),
+	("confusion_damage_roll", 15),
+)
+KIND_NAMES = tuple(name for name, _ in OUTCOME_KINDS)
 NUM_KINDS = len(KIND_NAMES)
 ORDER, HIT, CRIT, DAMAGE_ROLL = map(KIND_NAMES.index, ("order", "hit", "crit", "damage_roll"))
-FULL_PARALYSIS, THAW, SLEEP_DURATION = map(KIND_NAMES.index, KIND_NAMES[4:])
+FULL_PARALYSIS, THAW, SLEEP_DURATION = map(KIND_NAMES.index, KIND_NAMES[4:7])
+SECONDARY, SECONDARY_STATUS, CONFUSION_DURATION, CONFUSION_HIT, CONFUSION_DAMAGE_ROLL = map(
+	KIND_NAMES.index, KIND_NAMES[7:]
+)
+OUTCOME_MAXIMUM = tuple(maximum for _, maximum in OUTCOME_KINDS)
 ACTION_ORDER, SWITCH_IN_ORDER, RESIDUAL_ORDER = range(3)
 MAX_OCCURRENCES = 8
 NUM_SIDES = 2
@@ -53,7 +76,7 @@ def forced_from_records(records, *, host=False) -> Forced:
 			raise ValueError("Outcome address out of range")
 		if kind == ORDER and (side != 0 or occ > RESIDUAL_ORDER):
 			raise ValueError("Invalid order context")
-		maximum = 15 if kind == DAMAGE_ROLL else 2 if kind == SLEEP_DURATION else 1
+		maximum = OUTCOME_MAXIMUM[kind]
 		if not 0 <= value <= maximum:
 			raise ValueError("Outcome value out of range")
 		if values[kind, side, occ] != NOT_FORCED:

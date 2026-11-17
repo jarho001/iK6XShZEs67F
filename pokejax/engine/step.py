@@ -11,8 +11,10 @@ from .boosts import apply_boosts
 from .damage import move_damage
 from .order import action_order
 from .residual import residual
+from .secondaries import apply_secondaries
 from .state import MOVE, NONE, ONGOING, SWITCH
-from .status import apply_move, before_move, switch_in
+from .status import after_hit, apply_move, before_move, switch_in
+from .volatiles import confuse, end_turn
 
 
 def _switch(state, side, action, enabled):
@@ -23,11 +25,15 @@ def _switch(state, side, action, enabled):
 		jnp.where(enabled, target, state.active[side]).astype(state.active.dtype)
 	)
 	boosts = state.boosts.at[side].set(jnp.where(enabled, 0, state.boosts[side]))
+	volatiles = state.volatiles.at[side].set(jnp.where(enabled, 0, state.volatiles[side]))
 	order = state.seen_order[side, target]
 	order = jnp.where(enabled & (order == 0), jnp.max(state.seen_order[side]) + 1, order)
 	state = switch_in(state, side, target, enabled)
 	return state._replace(
-		active=active, boosts=boosts, seen_order=state.seen_order.at[side, target].set(order)
+		active=active,
+		boosts=boosts,
+		volatiles=volatiles,
+		seen_order=state.seen_order.at[side, target].set(order),
 	)
 
 
@@ -46,8 +52,9 @@ def _move(state, side, action, move, enabled, key, forced, tables):
 		revealed_moves=state.revealed_moves.at[side, user, slot].set(revealed),
 	)
 	damage, success, hit = move_damage(state, side, move, key, forced, tables)
-	state = apply_move(state, side, move, enabled, hit, success, damage, key, forced, tables)
+	state = apply_move(state, side, move, enabled, hit, key, forced, tables)
 	state = apply_boosts(state, side, move, enabled, hit, success, tables)
+	state = confuse(state, foe, enabled & hit & tables.move_confusion[move], key, forced)
 	damage = jnp.where(enabled, damage, 0)
 	hp = state.hp.astype(jnp.int32)
 	hp = hp.at[foe, target].set(jnp.maximum(hp[foe, target] - damage, 0))
@@ -55,13 +62,16 @@ def _move(state, side, action, move, enabled, key, forced, tables):
 	recoil = jnp.maximum((state.stats[side, user, 0].astype(jnp.int32) + 2) // 4, 1)
 	recoil = jnp.where(enabled & struggle & success & (damage > 0), recoil, 0)
 	hp = hp.at[side, user].set(jnp.maximum(hp[side, user] - recoil, 0))
+	state = state._replace(hp=hp.astype(state.hp.dtype))
+	state = apply_secondaries(state, side, move, enabled & success, key, forced, tables)
+	state = after_hit(state, side, move, enabled & success, tables)
 	alive = jnp.any(hp > 0, axis=1)
 	# resolveFaints drains the queue before checkWin. Struggle queues the target
 	# first, then its user; Gen 5 gives a simultaneous wipe to the last faint's side.
 	winner = jnp.where(~alive[0], 1, 0)
 	winner = jnp.where(~jnp.any(alive), side, winner)
 	winner = jnp.where(jnp.all(alive), ONGOING, winner).astype(state.winner.dtype)
-	winner = jnp.where(enabled, winner, state.winner)
+	winner = jnp.where(state.winner == ONGOING, winner, state.winner)
 	boosts = jnp.where((hp[SIDES, state.active] > 0)[:, None], state.boosts, 0)
 	return state._replace(hp=hp.astype(state.hp.dtype), boosts=boosts, winner=winner)
 
@@ -88,11 +98,13 @@ def step(state, actions, key, forced, engine_tables):
 		move = normal & (requests[side] == MOVE) & (action < 4)
 		state = _move(state, side, action, moves[side], move, key, forced, t)
 	state = residual(state, normal & (state.winner == ONGOING), key, forced)
+	state = end_turn(state, normal & (state.winner == ONGOING))
 	ended = state.winner != ONGOING
 	fainted = state.hp[SIDES, state.active] == 0
 	needs_switch = fainted & jnp.any(state.hp > 0, axis=1)
 	clear_fainted = needs_switch & ~ended
 	state = state._replace(
+		volatiles=jnp.where(fainted[:, None], 0, state.volatiles),
 		status=state.status.at[SIDES, state.active].set(
 			jnp.where(clear_fainted, 0, state.status[SIDES, state.active])
 		),

@@ -20,7 +20,17 @@ from pokejax.engine.actions import legal_actions
 from pokejax.engine.data import build_engine_tables
 from pokejax.engine.randomness import UNFORCED, forced_from_records
 from pokejax.engine.reset import check_teams, reset, teams_from_pool
-from pokejax.engine.state import HP, MOVE, NONE, ONGOING, STATUS_NAMES, SWITCH, TIE
+from pokejax.engine.state import (
+	CONFUSION,
+	HP,
+	MOVE,
+	NONE,
+	ONGOING,
+	STATUS_NAMES,
+	SWITCH,
+	TIE,
+	VOLATILE_NAMES,
+)
 from pokejax.engine.step import step
 from pokejax.tables import load_tables
 from pokejax.teams import FORMAT, MOVE_SLOTS, team_pool_from_data
@@ -49,6 +59,8 @@ def comparable(state, tables):
 		"ability": state.ability,
 		"ended": state.winner != ONGOING,
 		"boosts": state.boosts,
+		"volatiles": state.volatiles != 0,
+		"confusionCounter": state.volatiles[..., CONFUSION],
 		"request": state.request,
 		"hp": state.hp,
 		"maxhp": state.stats[..., HP],
@@ -99,6 +111,12 @@ def recorded_state(snapshot, tables):
 		),
 		"ended": np.asarray(snapshot["ended"]),
 		"boosts": np.asarray([side["boosts"] for side in sides]),
+		"volatiles": np.asarray(
+			[[name in (side["volatiles"] or []) for name in VOLATILE_NAMES] for side in sides]
+		),
+		"confusionCounter": np.asarray(
+			[side.get("volatileCounters", {}).get("confusion", 0) for side in sides]
+		),
 		"request": np.asarray([REQUESTS[side["request"]] for side in sides]),
 		**{
 			name: np.asarray([[member[name] for member in team] for team in members])
@@ -310,7 +328,18 @@ def replay_file(path, *, recording=None) -> ReplayResult:
 				for key in ("status", "item", "ability"):
 					extra[f"sides[{side_index}].{key}"] = (member[key], side[key])
 				if side["volatiles"] is not None:
-					extra[f"sides[{side_index}].volatiles"] = ([], side["volatiles"])
+					extra[f"sides[{side_index}].volatiles"] = (
+						[],
+						[name for name in side["volatiles"] if name not in VOLATILE_NAMES],
+					)
+				extra[f"sides[{side_index}].volatileCounters"] = (
+					{},
+					{
+						name: value
+						for name, value in side.get("volatileCounters", {}).items()
+						if name != "confusion"
+					},
+				)
 				extra[f"sides[{side_index}].sideConditions"] = ({}, side["sideConditions"])
 			for name, (engine, wanted) in extra.items():
 				if engine != wanted and (first is None or point < first[0]):

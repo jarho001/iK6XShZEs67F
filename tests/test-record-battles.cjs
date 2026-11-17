@@ -85,7 +85,7 @@ test('the guard rejects unclassified raw draws and chance/shuffle call sites', (
 		guard.begin();
 		assert.throws(() => battle.prng.random(16), /Unclassified PRNG/);
 		assert.throws(() => battle.prng.randomChance(1, 2), /Unclassified PRNG/);
-		assert.throws(() => battle.sample([1, 2]), /Unclassified PRNG/);
+		assert.throws(() => battle.sample([1, 2]), /Unclassified battle.sample/);
 		assert.throws(() => battle.random(16), /Unclassified battle.random/);
 		assert.throws(() => battle.randomChance(1, 16), /Unclassified randomChance/);
 		assert.throws(() => battle.prng.shuffle([1, 2]), /Unclassified shuffle/);
@@ -230,6 +230,80 @@ test('boost isolation fixture regenerates from its recorded seed', () => {
 	for (const index of [0, 1]) {
 		assert.deepEqual(playBattle(index, boostHeader.seed, pool, boostHeader.acceptedMoves,
 			[], [], boostHeader.allowed), records[index]);
+	}
+});
+
+test('secondary fixture independently replays every state and addressed outcome', () => {
+	const file = path.join(root, 'tests/fixtures/diff-secondaries.jsonl.gz');
+	const [taskHeader, ...records] = gunzipSync(fs.readFileSync(file)).toString().trim().split('\n').map(JSON.parse);
+	assert.equal(taskHeader.schemaVersion, 2);
+	assert.equal(records.length, 40);
+	assert(fs.statSync(file).size < 1_000_000);
+	const kinds = new Set();
+	let confusionSnapshots = 0;
+	for (const record of records) {
+		const battle = createBattle(record);
+		try {
+			const fixed = battle.sides.map(s => [...s.pokemon]);
+			const guard = instrument(battle, newStats());
+			checkState(battle, fixed, record.initialState);
+			for (const step of record.steps) {
+				guard.begin();
+				const choices = step.actions.map((action, s) =>
+					legalChoices(battle.sides[s], fixed[s], battle.ended).find(c => c.action === action));
+				for (const [s, choice] of choices.entries()) {
+					assert(choice);
+					if (choice.choice !== null) assert(battle.choose(`p${s + 1}`, choice.choice));
+				}
+				assert.deepEqual(guard.end(), step.outcomes);
+				checkState(battle, fixed, step.state);
+				for (const outcome of step.outcomes) kinds.add(outcome.kind);
+				for (const side of step.state.sides) {
+					assert(!side.volatiles?.includes('flinch'));
+					if (side.volatiles?.includes('confusion')) {
+						assert(side.volatileCounters.confusion > 0 && side.volatileCounters.confusion <= 5);
+						confusionSnapshots++;
+					}
+				}
+			}
+		} finally { battle.destroy(); }
+	}
+	assert(confusionSnapshots > 0);
+	for (const kind of ['secondary', 'secondary_status', 'confusion_duration', 'confusion_hit', 'confusion_damage_roll']) {
+		assert(kinds.has(kind), `Missing outcome coverage: ${kind}`);
+	}
+	const pool = JSON.parse(fs.readFileSync(path.join(root, 'work/teams/gen5-teams.json')));
+	for (const index of [0, 1]) {
+		assert.deepEqual(playBattle(index, taskHeader.seed, pool, taskHeader.acceptedMoves,
+			[], [], taskHeader.allowed), records[index]);
+	}
+});
+
+test('secondary isolation data agrees with the pinned resolved moves', () => {
+	const allowed = JSON.parse(fs.readFileSync(path.join(root, 'tests/fixtures/diff-secondaries.allowed.json')));
+	const data = JSON.parse(fs.readFileSync(path.join(root, 'data/gen5-data-v1.json')));
+	const weatherCallbacks = new Set(['blizzard', 'hurricane', 'thunder']);
+	for (const id of allowed.moves) {
+		const move = dex.moves.get(id);
+		const row = data.moves.find(m => m.id === id);
+		for (const field of ['basePower', 'accuracy', 'pp', 'type', 'category', 'target', 'priority', 'critRatio']) {
+			assert.deepEqual(row[field], move[field], `${id}.${field}`);
+		}
+		for (const field of ['volatileStatus', 'boosts']) assert.deepEqual(row[field], move[field], `${id}.${field}`);
+		const declarative = effects => (effects || []).map(effect =>
+			Object.fromEntries(Object.entries(effect).filter(([key]) => key !== 'onHit')));
+		assert.deepEqual(declarative(row.secondaries), declarative(move.secondaries), `${id}.secondaries`);
+		const callbacks = Object.entries(dex.data.Moves[id]).filter(([, v]) => typeof v === 'function');
+		for (const [key] of callbacks) {
+			assert.equal(key, 'onModifyMove', `Unexpected primary callback: ${id}.${key}`);
+			assert(weatherCallbacks.has(id) || id === 'chatter', id);
+		}
+		for (const secondary of move.secondaries || []) {
+			for (const [key, value] of Object.entries(secondary)) {
+				if (typeof value === 'function') assert(id === 'triattack' && key === 'onHit');
+				else assert(['chance', 'status', 'boosts', 'self', 'volatileStatus'].includes(key), `${id}.${key}`);
+			}
+		}
 	}
 });
 

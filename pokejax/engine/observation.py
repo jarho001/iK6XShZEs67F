@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 
 from .actions import legal_actions
-from .state import NONE, ONGOING, TEAM_SLOTS
+from .state import CONFUSION, NONE, ONGOING, TEAM_SLOTS
 
 
 class OwnObservation(NamedTuple):
@@ -38,6 +38,7 @@ class OwnObservation(NamedTuple):
 	is_active: jax.Array  # float32 [6]
 	stats: jax.Array  # float32 [6, 6], hp/atk/def/spa/spd/spe
 	boosts: jax.Array  # float32 [7], atk/def/spa/spd/spe/accuracy/evasion
+	confused: jax.Array  # float32 scalar; duration is private
 
 
 class OpponentObservation(NamedTuple):
@@ -51,6 +52,7 @@ class OpponentObservation(NamedTuple):
 	is_active: jax.Array  # float32 [6]
 	unseen: jax.Array  # float32 [6]
 	boosts: jax.Array  # float32 [7], active only
+	confused: jax.Array  # float32 scalar; duration is private
 
 
 class Observation(NamedTuple):
@@ -80,6 +82,7 @@ def observe(state, side, engine_tables) -> Observation:
 		f(jnp.arange(TEAM_SLOTS) == state.active[side]),
 		f(state.stats[side]) / 1000,
 		f(state.boosts[side]) / 6,
+		f(state.volatiles[side, CONFUSION] > 0),
 	)
 	# A public rank selects one private slot without exposing the slot itself.
 	ranks = jnp.arange(1, TEAM_SLOTS + 1)
@@ -105,6 +108,7 @@ def observe(state, side, engine_tables) -> Observation:
 		f(seen & (slots == state.active[foe])),
 		f(~seen),
 		f(state.boosts[foe]) / 6,
+		f(state.volatiles[foe, CONFUSION] > 0),
 	)
 	request = jnp.where(state.winner == ONGOING, state.request[side], NONE)
 	return Observation(

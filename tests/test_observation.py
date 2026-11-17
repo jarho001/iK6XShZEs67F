@@ -281,6 +281,7 @@ def test_shapes_dtypes_jit_vmap(battles):
 				"pp": (6, 4),
 				"stats": (6, 6),
 				"boosts": (7,),
+				"confused": (),
 			}.get(name, (6,))
 	assert o.turn.shape == () and o.turn.dtype == jnp.float32
 	assert o.request.shape == (3,) and o.request.dtype == jnp.float32
@@ -290,6 +291,6 @@ def test_shapes_dtypes_jit_vmap(battles):
 		assert x.shape[:2] == (192, 2)
 		assert np.all(np.isfinite(x))
 	for name, x in zip(o.opponent._fields, o.opponent):
-		if name not in ("unseen", "boosts"):
+		if name not in ("unseen", "boosts", "confused"):
 			assert np.all(np.asarray(x)[1:] == 0)
 	np.testing.assert_array_equal(o.opponent.unseen, [0, 1, 1, 1, 1, 1])

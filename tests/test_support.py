@@ -1,5 +1,8 @@
 """Support filtering uses all mechanics and permits empty move/item slots."""
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -14,6 +17,12 @@ def test_initial_support(synthetic_pool, tables):
 	assert result.shape == (3,)
 	assert result.dtype == np.bool_
 	np.testing.assert_array_equal(result, [False, False, False])
+
+
+def test_secondary_group_matches_allowed_file():
+	allowed = json.loads(Path("tests/fixtures/diff-secondaries.allowed.json").read_text())
+	assert allowed["moves"] == sorted(support.SECONDARY_MOVES | support.CONFUSION_MOVES)
+	assert set(allowed["moves"]) <= support.SUPPORTED_MOVES
 
 
 @pytest.mark.parametrize(

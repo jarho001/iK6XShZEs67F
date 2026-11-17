@@ -19,6 +19,10 @@ SPECIES_TYPE_SLOTS = 2
 NO_SECOND_TYPE = -1
 NONE_ID = ""
 NONE_ROW = 0
+SECONDARY_SLOTS = 2
+BOOST_NAMES = ("atk", "def", "spa", "spd", "spe", "accuracy", "evasion")
+STATUS_NAMES = ("", "brn", "psn", "tox", "par", "slp", "frz")
+VOLATILE_NAMES = ("", "confusion", "flinch")
 CATEGORY_INDEX = {"Physical": 0, "Special": 1, "Status": 2}
 NATURE_NEUTRAL = 10
 NATURE_PLUS = 11
@@ -68,6 +72,13 @@ class MoveTable(RowTable):
 	flags: NDArray[np.bool_]
 	boosts: NDArray[np.int8]
 	self_boosts: NDArray[np.int8]
+	secondary_chance: NDArray[np.uint8]
+	secondary_self: NDArray[np.bool_]
+	secondary_status: NDArray[np.int8]
+	secondary_status_choices: NDArray[np.int8]
+	secondary_boosts: NDArray[np.int8]
+	secondary_volatile: NDArray[np.int8]
+	confusion: NDArray[np.bool_]
 	target_names: tuple[str, ...]
 	flag_names: tuple[str, ...]
 
@@ -196,8 +207,32 @@ def _build_moves(rows, types, target_names, flag_names):
 		"flags": np.zeros((count, len(flag_names)), dtype=np.bool_),
 		"boosts": np.zeros((count, 7), dtype=np.int8),
 		"self_boosts": np.zeros((count, 7), dtype=np.int8),
+		"secondary_chance": np.zeros((count, SECONDARY_SLOTS), dtype=np.uint8),
+		"secondary_self": np.zeros((count, SECONDARY_SLOTS), dtype=np.bool_),
+		"secondary_status": np.zeros((count, SECONDARY_SLOTS), dtype=np.int8),
+		"secondary_status_choices": np.zeros((count, SECONDARY_SLOTS, 3), dtype=np.int8),
+		"secondary_boosts": np.zeros((count, SECONDARY_SLOTS, 7), dtype=np.int8),
+		"secondary_volatile": np.zeros((count, SECONDARY_SLOTS), dtype=np.int8),
+		"confusion": np.zeros(count, dtype=np.bool_),
 	}
 	for row, move in enumerate(rows, start=1):
+		columns["confusion"][row] = move.get("volatileStatus") == "confusion"
+		for slot, secondary in enumerate(move.get("secondaries") or ()):
+			if slot >= SECONDARY_SLOTS:
+				raise ValueError("Increase SECONDARY_SLOTS for this export")
+			columns["secondary_chance"][row, slot] = secondary.get("chance", 100)
+			columns["secondary_self"][row, slot] = "self" in secondary
+			effect = secondary.get("self", secondary)
+			columns["secondary_status"][row, slot] = STATUS_NAMES.index(effect.get("status", ""))
+			# Tri Attack's sole callback samples these three statuses uniformly
+			# (data/moves.ts). Keep the choice itself in the move table.
+			if move["id"] == "triattack":
+				columns["secondary_status_choices"][row, slot] = [1, 4, 6]
+			volatile = effect.get("volatileStatus", "")
+			if volatile in VOLATILE_NAMES:
+				columns["secondary_volatile"][row, slot] = VOLATILE_NAMES.index(volatile)
+			for stat, amount in effect.get("boosts", {}).items():
+				columns["secondary_boosts"][row, slot, BOOST_NAMES.index(stat)] = amount
 		for column, key in (
 			("num", "num"),
 			("base_power", "basePower"),

@@ -9,6 +9,8 @@
  *
  * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-boosts.allowed.json --out work/diff/boosts.jsonl.gz
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-boosts.allowed.json --out tests/fixtures/diff-boosts.jsonl.gz
+ * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-secondaries.allowed.json --out work/diff/secondaries.jsonl.gz
+ * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-secondaries.allowed.json --out tests/fixtures/diff-secondaries.jsonl.gz
  *
  * JSONL schema v2: header {type, schemaVersion, showdownCommit, seed, count,
  * acceptedMoves, ...}; battle {type, index, seed (four uint16 words), policySeed,
@@ -24,6 +26,8 @@
  * members: [{hp,maxhp,pp:[four slots],fainted,status,item,ability}]}],
  * weather, weatherTurns, pseudoWeather}. Conditions map ids to {layers, turns}.
  * Types and volatiles are null for fainted actives; all other fields are compared.
+ * Active confusion also adds volatileCounters: {confusion: time}; absent counters
+ * default to zero, keeping existing schema v2 recordings readable.
  * Default profile is isolation: --allowed path/to/task.json adds moves, abilities,
  * and items arrays to the supported registry. --profile phase1 uses the original
  * all-replaced plain-move and Ghost-lead exhaustion profiles.
@@ -165,6 +169,9 @@ function snapshot(battle, fixed) {
 			types: side.active[0].fainted ? null : side.active[0].getTypes().map(type => dex.toID(type)),
 			item: side.active[0].item, ability: side.active[0].ability,
 			volatiles: side.active[0].fainted ? null : Object.keys(side.active[0].volatiles).sort(),
+			...(!side.active[0].fainted && side.active[0].volatiles.confusion ? {
+				volatileCounters: { confusion: side.active[0].volatiles.confusion.time },
+			} : {}),
 			sideConditions: conditions(side.sideConditions),
 			legalActions: Array.from({ length: 9 }, (_, action) =>
 				Number(legalChoices(side, fixed[s], battle.ended).some(choice => choice.action === action))),
@@ -210,6 +217,33 @@ function directCaller() {
 
 // Each rule identifies a draw site and translates its result to an addressed outcome.
 const OUTCOME_RULES = [
+	{ kind: 'confusion_duration', method: 'random', matches: (scope, caller, args) =>
+		scope?.kind === 'status' && scope.status === 'confusion' && caller === 'Battle.onStart' &&
+		args[0] === 2 && args[1] === 6,
+		address: scope => [scope.target.side.n, 0], value: value => value - 2 },
+	{ kind: 'confusion_hit', method: 'chance', matches: (scope, caller, args) =>
+		scope?.kind === 'status' && scope.status === 'confusion' && caller === 'Battle.onBeforeMove' &&
+		args[0] === 1 && args[1] === 2,
+		address: scope => [scope.target.side.n, 0], value: value => Number(!value) },
+	{ kind: 'confusion_damage_roll', method: 'random', matches: (scope, caller, args) =>
+		scope?.kind === 'confusion_damage_roll' && caller === 'Battle.randomizer' &&
+		args.length === 1 && args[0] === 16,
+		address: scope => [scope.user.side.n, 0], value: value => value },
+	{ kind: 'secondary', method: 'random', matches: (scope, caller, args) =>
+		scope?.kind === 'secondaries' && caller === 'BattleActions.secondaries' &&
+		args.length === 1 && args[0] === 100,
+		address: scope => [scope.user.side.n, scope.occurrence],
+		value: (value, scope) => {
+			const secondary = scope.moveData.secondaries[scope.occurrence++];
+			const chance = secondary.chance === undefined ? 100 :
+				(secondary.boosts || secondary.self) ? secondary.chance % 256 : secondary.chance;
+			return Number(value < chance);
+		} },
+	{ kind: 'secondary_status', method: 'sample', matches: (scope, caller, args) =>
+		scope?.kind === 'secondaries' && scope.move.id === 'triattack' && caller === 'Battle.onHit' &&
+		JSON.stringify(args[0]) === JSON.stringify(['brn', 'par', 'frz']),
+		address: scope => [scope.user.side.n, scope.occurrence - 1],
+		value: value => ['brn', 'par', 'frz'].indexOf(value) },
 	{ kind: 'sleep_duration', method: 'random', matches: (scope, caller, args) =>
 		scope?.kind === 'status' && scope.status === 'slp' && caller === 'Battle.onStart' &&
 		args[0] === 2 && args[1] === 5,
@@ -270,7 +304,14 @@ function instrument(battle, stats) {
 	wrap(battle.actions, 'hitStepAccuracy', (targets, user, move) => ({ kind: 'hit', user, move }));
 	wrap(battle.actions, 'selfDrops', (targets, user, move, moveData) => ({ kind: 'selfDrops', user, move, moveData }));
 	wrap(battle.actions, 'getDamage', (user, target, move) => ({ kind: 'crit', user, move }));
-	wrap(battle, 'randomizer', () => ({ kind: 'damage_roll', user: battle.activePokemon, move: battle.activeMove }));
+	wrap(battle.actions, 'secondaries', (targets, user, move, moveData) =>
+		({ kind: 'secondaries', user, move, moveData, occurrence: 0 }));
+	wrap(battle.actions, 'getConfusionDamage', user => ({ kind: 'confusionDamage', user }));
+	wrap(battle, 'randomizer', () => ({
+		kind: scope?.kind === 'confusionDamage' ? 'confusion_damage_roll' : 'damage_roll',
+		user: scope?.kind === 'confusionDamage' ? scope.user : battle.activePokemon,
+		move: battle.activeMove,
+	}));
 	wrap(battle.queue, 'sort', () => ({ kind: 'queue' }));
 	wrap(battle, 'eachEvent', event => ({ kind: 'eachEvent', event }));
 	wrap(battle.actions, 'runSwitch', () => ({ kind: 'runSwitch' }));
@@ -287,7 +328,7 @@ function instrument(battle, stats) {
 	const chance = battle.randomChance;
 	battle.randomChance = function (numerator, denominator) {
 		const caller = directCaller();
-		const statusScope = this.effect?.effectType === 'Status' ?
+		const statusScope = this.effect?.effectType === 'Status' || this.effect?.id === 'confusion' ?
 			{ kind: 'status', status: this.effect.id, target: this.effectState.target } : scope;
 		const rule = OUTCOME_RULES.find(rule => rule.method === 'chance' &&
 			rule.matches(statusScope, caller, [numerator, denominator]));
@@ -299,7 +340,8 @@ function instrument(battle, stats) {
 	const battleRandom = battle.random;
 	battle.random = function (...args) {
 		const caller = directCaller();
-		const statusScope = this.effect?.effectType === 'Status' ?
+		const statusScope = caller === 'Battle.onStart' &&
+			(this.effect?.effectType === 'Status' || this.effect?.id === 'confusion') ?
 			{ kind: 'status', status: this.effect.id, target: this.effectState.target } : scope;
 		if (scope?.kind === 'selfDrops' && caller === 'BattleActions.selfDrops' && args[0] === 100 &&
 			scope.moveData.self?.boosts && scope.moveData.self.chance === undefined) {
@@ -308,7 +350,16 @@ function instrument(battle, stats) {
 		const rule = OUTCOME_RULES.find(rule => rule.method === 'random' && rule.matches(statusScope, caller, args));
 		assert(rule, `Unclassified battle.random at ${caller}: ${args}`);
 		const value = allow(rule.kind, () => battleRandom.apply(this, args));
-		record(rule.kind, ...rule.address(statusScope), rule.value(value));
+		record(rule.kind, ...rule.address(statusScope), rule.value(value, statusScope));
+		return value;
+	};
+	const sample = battle.sample;
+	battle.sample = function (items) {
+		const caller = directCaller();
+		const rule = OUTCOME_RULES.find(rule => rule.method === 'sample' && rule.matches(scope, caller, [items]));
+		assert(rule, `Unclassified battle.sample at ${caller}`);
+		const value = allow(rule.kind, () => sample.call(this, items));
+		record(rule.kind, ...rule.address(scope), rule.value(value, scope));
 		return value;
 	};
 	const shuffle = battle.prng.shuffle;
