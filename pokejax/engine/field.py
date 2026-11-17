@@ -16,6 +16,7 @@ from .state import (
 	SAND,
 	SPE,
 	SPIKES,
+	TEAM_SLOTS,
 	TOXIC,
 	TOXIC_SPIKES,
 )
@@ -74,78 +75,90 @@ def apply_move_field_effects(state, side, move, enabled, field_hit, hit, key, fo
 	)
 
 
-def _resolve_entry_faint(state, side, enabled):
+def _resolve_entry_faint(state, enabled_sides):
 	alive = jnp.any(state.hp > 0, axis=1)
-	ended = enabled & ~alive[side] & (state.winner == ONGOING)
-	winner = jnp.where(alive[1 - side], 1 - side, side)
-	return state._replace(winner=jnp.where(ended, winner, state.winner).astype(state.winner.dtype))
+	ended = enabled_sides & ~alive & (state.winner == ONGOING)
+	winners = jnp.where(alive[1 - SIDES], 1 - SIDES, SIDES)
+	winner = jnp.where(ended[0], winners[0], winners[1])
+	return state._replace(
+		winner=jnp.where(jnp.any(ended), winner, state.winner).astype(state.winner.dtype)
+	)
 
 
-def _apply_spikes_handler(state, side, slot, enabled, tables):
-	types = state.types[side, slot]
-	grounded = ~jnp.any(types == tables.flying_type)
-	hp = state.hp[side, slot].astype(jnp.int32)
-	maximum = state.stats[side, slot, 0].astype(jnp.int32)
-	spikes = state.hazards[side, SPIKES].astype(jnp.int32)
+def _active_member_mask(slots):
+	return jnp.arange(TEAM_SLOTS)[None, :] == slots[:, None]
+
+
+def _apply_spikes_handler(state, slots, enabled, tables):
+	types = state.types[SIDES, slots]
+	grounded = ~jnp.any(types == tables.flying_type, axis=1)
+	hp_before = state.hp[SIDES, slots].astype(jnp.int32)
+	maximum = state.stats[SIDES, slots, 0].astype(jnp.int32)
+	spikes = state.hazards[:, SPIKES].astype(jnp.int32)
 	damage_numerator = jnp.where(spikes == 1, 3, jnp.where(spikes == 2, 4, 6))
 	spike_damage = jnp.maximum(maximum * damage_numerator // 24, 1)
-	take_spikes = enabled & grounded & (spikes > 0) & (hp > 0)
-	hp = jnp.maximum(hp - jnp.where(take_spikes, spike_damage, 0), 0)
-	state = state._replace(hp=state.hp.at[side, slot].set(hp.astype(state.hp.dtype)))
-	return _resolve_entry_faint(state, side, take_spikes & (hp == 0))
+	take_spikes = enabled & grounded & (spikes > 0) & (hp_before > 0)
+	hp_after = jnp.maximum(hp_before - jnp.where(take_spikes, spike_damage, 0), 0)
+	member_mask = _active_member_mask(slots) & take_spikes[:, None]
+	hp = jnp.where(member_mask, hp_after[:, None].astype(state.hp.dtype), state.hp)
+	state = state._replace(hp=hp)
+	return _resolve_entry_faint(state, take_spikes & (hp_after == 0))
 
 
-def _apply_toxic_spikes_handler(state, side, slot, enabled, tables):
-	types = state.types[side, slot]
-	grounded = ~jnp.any(types == tables.flying_type)
-	hp = state.hp[side, slot].astype(jnp.int32)
-	toxic_layers = state.hazards[side, TOXIC_SPIKES].astype(jnp.int32)
-	poison_type = jnp.any(types == tables.poison_type)
+def _apply_toxic_spikes_handler(state, slots, enabled, tables):
+	types = state.types[SIDES, slots]
+	grounded = ~jnp.any(types == tables.flying_type, axis=1)
+	hp = state.hp[SIDES, slots]
+	toxic_layers = state.hazards[:, TOXIC_SPIKES].astype(jnp.int32)
+	poison_type = jnp.any(types == tables.poison_type, axis=1)
 	absorb = enabled & grounded & poison_type & (toxic_layers > 0) & (hp > 0)
-	toxic_spikes = state.hazards.at[side, TOXIC_SPIKES].set(
+	hazards = state.hazards.at[:, TOXIC_SPIKES].set(
 		jnp.where(absorb, 0, toxic_layers).astype(state.hazards.dtype)
 	)
-	status = state.status[side, slot]
+	status = state.status[SIDES, slots]
 	inflicted = jnp.where(toxic_layers >= 2, TOXIC, POISON)
 	present = types >= 0
-	immune = jnp.any(present & tables.status_immune[inflicted, jnp.maximum(types, 0)])
+	immune = jnp.any(
+		present & tables.status_immune[inflicted[:, None], jnp.maximum(types, 0)], axis=1
+	)
 	poison = enabled & grounded & (toxic_layers > 0) & ~poison_type & (hp > 0)
 	poison &= (status == HEALTHY) & ~immune
-	status = jnp.where(poison, inflicted, status)
-	counter = state.status_counter[side, slot]
-	counter = jnp.where(poison, 0, counter)
-	hazard_order = state.hazard_order.at[side, TOXIC_SPIKES].set(
-		jnp.where(absorb, 0, state.hazard_order[side, TOXIC_SPIKES])
+	member_mask = _active_member_mask(slots) & poison[:, None]
+	status_array = jnp.where(member_mask, inflicted[:, None], state.status)
+	counter_array = jnp.where(member_mask, 0, state.status_counter)
+	hazard_order = state.hazard_order.at[:, TOXIC_SPIKES].set(
+		jnp.where(absorb, 0, state.hazard_order[:, TOXIC_SPIKES])
 	)
-	state = state._replace(
-		hazards=toxic_spikes,
+	return state._replace(
+		hazards=hazards,
 		hazard_order=hazard_order,
-		status=state.status.at[side, slot].set(status),
-		status_counter=state.status_counter.at[side, slot].set(counter),
+		status=status_array,
+		status_counter=counter_array,
 	)
-	return _resolve_entry_faint(state, side, False)
 
 
-def apply_switch_hazards(state, side, slot, enabled, tables):
-	"""Apply a side's ordered Spikes and Toxic Spikes handlers on switch-in."""
-	spikes_order = state.hazard_order[side, SPIKES]
-	toxic_order = state.hazard_order[side, TOXIC_SPIKES]
+def _apply_switch_hazards_sides(state, slots, enabled_sides, tables):
+	spikes_order = state.hazard_order[:, SPIKES]
+	toxic_order = state.hazard_order[:, TOXIC_SPIKES]
 	first_kind = jnp.where(
-		(state.hazards[side, SPIKES] > 0)
-		& ((state.hazards[side, TOXIC_SPIKES] == 0) | (spikes_order < toxic_order)),
+		(state.hazards[:, SPIKES] > 0)
+		& ((state.hazards[:, TOXIC_SPIKES] == 0) | (spikes_order < toxic_order)),
 		SPIKES,
 		TOXIC_SPIKES,
 	)
-	for index in (0, 1):
-		kind = jnp.where(index == 0, first_kind, 1 - first_kind)
-		alive = state.hp[side, slot] > 0
-		active = enabled & alive & (state.winner == ONGOING)
-		state = _apply_spikes_handler(state, side, slot, active & (kind == SPIKES), tables)
-		active = active & (state.hp[side, slot] > 0) & (state.winner == ONGOING)
-		state = _apply_toxic_spikes_handler(
-			state, side, slot, active & (kind == TOXIC_SPIKES), tables
-		)
-	return state
+	active = enabled_sides & (state.hp[SIDES, slots] > 0) & (state.winner == ONGOING)
+	state = _apply_spikes_handler(state, slots, active & (first_kind == SPIKES), tables)
+	state = _apply_toxic_spikes_handler(state, slots, active & (first_kind == TOXIC_SPIKES), tables)
+	active &= (state.hp[SIDES, slots] > 0) & (state.winner == ONGOING)
+	state = _apply_spikes_handler(state, slots, active & (first_kind != SPIKES), tables)
+	return _apply_toxic_spikes_handler(state, slots, active & (first_kind != TOXIC_SPIKES), tables)
+
+
+def apply_switch_hazards(state, side, slot, enabled, tables):
+	"""Apply one incoming Pokemon's Spikes and Toxic Spikes callbacks."""
+	slots = jnp.where(SIDES == side, slot, state.active)
+	enabled_sides = (SIDES == side) & enabled
+	return _apply_switch_hazards_sides(state, slots, enabled_sides, tables)
 
 
 def apply_switch_hazards_ordered(state, switchers, enabled, key, forced, tables):
@@ -158,9 +171,11 @@ def apply_switch_hazards_ordered(state, switchers, enabled, key, forced, tables)
 	speed = jnp.where(state.status[sides, state.active] == PARALYSIS, speed // 4, speed)
 	tie_first = first_side(key, forced, SWITCH_HANDLER_ORDER)
 	first = jnp.where(speed[0] == speed[1], tie_first, jnp.where(speed[0] > speed[1], 0, 1))
-	for side in (first, 1 - first):
-		active = enabled & switchers[side] & (state.winner == ONGOING)
-		state = apply_switch_hazards(state, side, state.active[side], active, tables)
+	first_sides = SIDES == first
+	first_enabled = enabled & switchers & first_sides
+	second_enabled = enabled & switchers & ~first_sides
+	state = _apply_switch_hazards_sides(state, state.active, first_enabled, tables)
+	state = _apply_switch_hazards_sides(state, state.active, second_enabled, tables)
 	return state
 
 

@@ -2,9 +2,10 @@
 
 import jax.numpy as jnp
 
+from .actions import SIDES
 from .field import effective_move_type
 from .randomness import FULL_PARALYSIS, SLEEP_DURATION, THAW, chance, integer
-from .state import FREEZE, HEALTHY, PARALYSIS, SLEEP, TOXIC
+from .state import FREEZE, HEALTHY, PARALYSIS, SLEEP, TEAM_SLOTS, TOXIC
 from .volatiles import before_move as volatile_before_move
 
 REST, PARTY_CURE, TRANSFER, REFRESH = range(1, 5)
@@ -74,53 +75,68 @@ def inflict_status(state, side, inflicted, enabled, key, forced, tables):
 
 
 def apply_move(state, side, move, enabled, hit, key, forced, tables):
+	"""Apply move status effects with dense team masks and one field write."""
 	foe = 1 - side
 	user, target = state.active[side], state.active[foe]
 	effect = tables.move_effect[move]
 	user_status = state.status[side, user]
 	target_status = state.status[foe, target]
+	team_slots = jnp.arange(TEAM_SLOTS)
+	user_mask = (SIDES == side)[:, None] & (team_slots == user)[None, :]
+	target_mask = (SIDES == foe)[:, None] & (team_slots == target)[None, :]
 	# ModifyMove cures a defrost move's user; DamagingHit thaws its target later,
 	# AFTER secondaries (BattleActions.spreadMoveHit, Gen 5+ event order).
 	self_thaw = enabled & (user_status == FREEZE) & tables.move_defrost[move]
-	state = state._replace(
-		status=state.status.at[side, user].set(jnp.where(self_thaw, HEALTHY, user_status))
-	)
-	user_status = state.status[side, user]
-	target_status = state.status[foe, target]
+	status = jnp.where(user_mask & self_thaw, HEALTHY, state.status)
+	user_status = jnp.where(self_thaw, HEALTHY, user_status)
 	transfer = effect == TRANSFER
 	inflicted = jnp.where(transfer, user_status, tables.move_status[move])
-	state = inflict_status(
-		state, foe, inflicted, enabled & hit & ~tables.move_status_self[move], key, forced, tables
+	types = state.types[foe, target]
+	immune = jnp.any((types >= 0) & tables.status_immune[inflicted, jnp.maximum(types, 0)])
+	immune |= tables.weather_status_immune[state.weather, inflicted]
+	clause = jnp.any(
+		(state.status[foe] == SLEEP) & (state.sleep_from_foe[foe] != 0) & (state.hp[foe] > 0)
 	)
-	clear_transfer = transfer & (target_status == HEALTHY) & (state.status[foe, target] != HEALTHY)
-	status, counter = state.status, state.status_counter
-	start, source = state.sleep_start, state.sleep_from_foe
+	inflict = enabled & hit & ~tables.move_status_self[move]
+	inflict &= (state.hp[foe, target] > 0) & (inflicted != HEALTHY)
+	inflict &= (target_status == HEALTHY) & ~immune & ~((inflicted == SLEEP) & clause)
+	duration = (integer(key, forced, SLEEP_DURATION, foe, 0, 3) + 2).astype(jnp.int8)
+	target_status_after = jnp.where(inflict, inflicted, target_status)
+	status = jnp.where(target_mask & inflict, inflicted, status)
+	counter = jnp.where(
+		target_mask & inflict,
+		jnp.where(inflicted == SLEEP, duration, 0),
+		state.status_counter,
+	)
+	start = jnp.where(target_mask & inflict & (inflicted == SLEEP), duration, state.sleep_start)
+	source = jnp.where(target_mask & inflict, inflicted == SLEEP, state.sleep_from_foe)
+	clear_transfer = transfer & (target_status == HEALTHY) & (target_status_after != HEALTHY)
 	refresh = enabled & (effect == REFRESH) & (user_status != SLEEP) & (user_status != FREEZE)
 	party = enabled & (effect == PARTY_CURE)
 	clear_team = party & (state.hp[side] > 0)
-	status = status.at[side].set(jnp.where(clear_team, HEALTHY, status[side]))
-	status = status.at[side, user].set(
-		jnp.where(clear_transfer | refresh, HEALTHY, status[side, user])
-	)
-	counter = counter.at[side].set(jnp.where(clear_team, 0, counter[side]))
-	counter = counter.at[side, user].set(
-		jnp.where(clear_transfer | refresh, 0, counter[side, user])
-	)
+	clear_team_mask = (SIDES == side)[:, None] & clear_team[None, :]
+	status = jnp.where(clear_team_mask, HEALTHY, status)
+	counter = jnp.where(clear_team_mask, 0, counter)
+	clear_user = clear_transfer | refresh
+	status = jnp.where(user_mask & clear_user, HEALTHY, status)
+	counter = jnp.where(user_mask & clear_user, 0, counter)
 	rest = (
 		enabled
 		& (effect == REST)
 		& (user_status != SLEEP)
 		& (state.hp[side, user] < state.stats[side, user, 0])
 	)
-	status = status.at[side, user].set(jnp.where(rest, SLEEP, status[side, user]))
-	counter = counter.at[side, user].set(jnp.where(rest, 3, counter[side, user]))
-	start = start.at[side, user].set(jnp.where(rest, 3, start[side, user]))
-	source = source.at[side, user].set(jnp.where(rest, False, source[side, user]))
-	hp = state.hp.at[side, user].set(
-		jnp.where(rest, state.stats[side, user, 0], state.hp[side, user])
-	)
+	status = jnp.where(user_mask & rest, SLEEP, status)
+	counter = jnp.where(user_mask & rest, 3, counter)
+	start = jnp.where(user_mask & rest, 3, start)
+	source = jnp.where(user_mask & rest, False, source)
+	hp = jnp.where(user_mask & rest, state.stats[..., 0], state.hp)
 	return state._replace(
-		status=status, status_counter=counter, sleep_start=start, sleep_from_foe=source, hp=hp
+		status=status,
+		status_counter=counter,
+		sleep_start=start,
+		sleep_from_foe=source,
+		hp=hp,
 	)
 
 

@@ -17,37 +17,49 @@ from .order import action_order
 from .randomness import random_bits
 from .residual import residual
 from .secondaries import apply_secondaries
-from .state import MOVE, NONE, ONGOING, ROOST, SWITCH
-from .status import after_hit, apply_move, before_move, switch_in
+from .state import MOVE, NONE, ONGOING, ROOST, SLEEP, SWITCH, TEAM_SLOTS, TOXIC
+from .status import after_hit, apply_move, before_move
 from .volatiles import confuse, end_turn
 
 
-def _switch(state, side, action, enabled, tables):
-	"""Switch and clear boosts (Pokemon.clearVolatile), keeping fixed slots."""
-	choice = jnp.clip(action - 4, 0, 4)
-	target = bench_slots(state.active)[side, choice]
-	outgoing = state.active[side]
-	active = state.active.at[side].set(
-		jnp.where(enabled, target, state.active[side]).astype(state.active.dtype)
+def _switch_both(state, actions, enabled):
+	"""Switch both sides with one set of fixed-team writes."""
+	choices = jnp.clip(actions - 4, 0, 4)
+	targets = bench_slots(state.active)[SIDES, choices]
+	outgoing = state.active
+	active = jnp.where(enabled, targets, outgoing).astype(state.active.dtype)
+	boosts = jnp.where(enabled[:, None], 0, state.boosts)
+	volatiles = jnp.where(enabled[:, None], 0, state.volatiles)
+
+	team_slots = jnp.arange(TEAM_SLOTS)
+	outgoing_mask = team_slots[None, :] == outgoing[:, None]
+	restore_roost = enabled & (state.volatiles[:, ROOST] > 0)
+	types = jnp.where(
+		(restore_roost[:, None] & outgoing_mask)[:, :, None], state.roost_types, state.types
 	)
-	boosts = state.boosts.at[side].set(jnp.where(enabled, 0, state.boosts[side]))
-	volatiles = state.volatiles.at[side].set(jnp.where(enabled, 0, state.volatiles[side]))
-	old_types = state.types[side, outgoing]
-	restore_roost = enabled & (state.volatiles[side, ROOST] > 0)
-	types = state.types.at[side, outgoing].set(
-		jnp.where(restore_roost, state.roost_types[side, outgoing], old_types)
+
+	target_order = state.seen_order[SIDES, targets]
+	next_order = jnp.max(state.seen_order, axis=1) + 1
+	seen_order = jnp.where(
+		(enabled & (target_order == 0))[:, None] & (team_slots[None, :] == targets[:, None]),
+		next_order[:, None],
+		state.seen_order,
 	)
-	order = state.seen_order[side, target]
-	order = jnp.where(enabled & (order == 0), jnp.max(state.seen_order[side]) + 1, order)
-	state = switch_in(state, side, target, enabled)
-	state = state._replace(
+
+	status = state.status[SIDES, targets]
+	counter = state.status_counter[SIDES, targets]
+	counter = jnp.where(status == TOXIC, 0, counter)
+	counter = jnp.where(status == SLEEP, state.sleep_start[SIDES, targets], counter)
+	target_mask = enabled[:, None] & (team_slots[None, :] == targets[:, None])
+	status_counter = jnp.where(target_mask, counter[:, None], state.status_counter)
+	return state._replace(
 		active=active,
 		boosts=boosts,
 		volatiles=volatiles,
 		types=types,
-		seen_order=state.seen_order.at[side, target].set(order),
+		seen_order=seen_order,
+		status_counter=status_counter,
 	)
-	return state
 
 
 def _move(state, side, action, move, enabled, key, forced, tables):
@@ -101,10 +113,7 @@ def step(state, actions, key, forced, engine_tables):
 	# Switches have higher queue priority than every move in this pool. Showdown
 	# resolves the grouped SwitchIn handlers after the switch actions and before
 	# the first move, so compute their shared speed order once here.
-	for side in (first, 1 - first):
-		action = actions[side]
-		switch = will_switch[side]
-		state = _switch(state, side, action, switch, t)
+	state = _switch_both(state, actions, will_switch)
 	alive_after = jnp.any(state.hp > 0, axis=1)
 	newly_dead = alive & ~alive_after
 	last_faint = jnp.where(
