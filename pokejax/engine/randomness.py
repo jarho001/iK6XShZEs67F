@@ -6,7 +6,9 @@ use exactly kind/side/occurrence/value keys. Kind names and row order are in
 KIND_NAMES; append a name to add a kind without changing existing addresses.
 
 order: side must be 0; value is the first side (0/1). Occurrences are tie
-contexts ACTION_ORDER=0, SWITCH_IN_ORDER=1, RESIDUAL_ORDER=2 (others reserved).
+contexts ACTION_ORDER=0, SWITCH_IN_ORDER=1, RESIDUAL_ORDER=2,
+WEATHER_ORDER=3, WEATHER_CHANGE_ORDER=4 (others reserved).
+SWITCH_HANDLER_ORDER=5 (the pre-sorted Pokemon order for grouped SwitchIn handlers).
 hit: side is attacker, occurrence is hit index, value 1=hit, 0=miss. Consult
 only if the move checks accuracy. crit: same address axes, value 1=crit, 0=no.
 damage_roll: same axes, value 0..15 is Showdown random(16), multiplying damage
@@ -56,7 +58,14 @@ SECONDARY, SECONDARY_STATUS, CONFUSION_DURATION, CONFUSION_HIT, CONFUSION_DAMAGE
 HIT_COUNT = KIND_NAMES.index("hit_count")
 OUTCOME_MAXIMUM = tuple(maximum for _, maximum in OUTCOME_KINDS)
 OUTCOME_MINIMUM = tuple(2 if name == "hit_count" else 0 for name, _ in OUTCOME_KINDS)
-ACTION_ORDER, SWITCH_IN_ORDER, RESIDUAL_ORDER = range(3)
+(
+	ACTION_ORDER,
+	SWITCH_IN_ORDER,
+	RESIDUAL_ORDER,
+	WEATHER_ORDER,
+	WEATHER_CHANGE_ORDER,
+	SWITCH_HANDLER_ORDER,
+) = range(6)
 # Secondary outcomes address hit_index * SECONDARY_SLOTS + row; fifth-hit row
 # two is occurrence 9, so ten slots cover the largest table-defined sequence.
 MAX_OCCURRENCES = 10
@@ -81,7 +90,7 @@ def forced_from_records(records, *, host=False) -> Forced:
 			raise ValueError("Outcome axes and value must be integers")
 		if not 0 <= side < NUM_SIDES or not 0 <= occ < MAX_OCCURRENCES:
 			raise ValueError("Outcome address out of range")
-		if kind == ORDER and (side != 0 or occ > RESIDUAL_ORDER):
+		if kind == ORDER and (side != 0 or occ > SWITCH_HANDLER_ORDER):
 			raise ValueError("Invalid order context")
 		minimum, maximum = OUTCOME_MINIMUM[kind], OUTCOME_MAXIMUM[kind]
 		if not minimum <= value <= maximum:

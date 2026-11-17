@@ -11,7 +11,7 @@ def _heal_fraction(value, numerator, denominator, callback):
 	denominator = jnp.maximum(denominator.astype(jnp.int32), 1)
 	doubled = 2 * value * numerator.astype(jnp.int32)
 	math_round = (doubled + denominator) // (2 * denominator)
-	modify_round = (doubled + denominator - 1) // (2 * denominator)
+	modify_round = (value * numerator.astype(jnp.int32) + denominator // 2 - 1) // denominator
 	return jnp.where(callback, modify_round, math_round)
 
 
@@ -22,7 +22,7 @@ def apply_healing_active(state, side, move, enabled, hit, active_hp, tables):
 	user, target = state.active[side], state.active[foe]
 	maximum = state.stats[side, user, HP].astype(jnp.int32)
 	hp = active_hp[side]
-	numerator, denominator = t.move_heal[move]
+	numerator, denominator = t.move_weather_heal[move, state.weather]
 	can_heal = enabled & hit & (numerator > 0) & (hp > 0) & (hp < maximum)
 	amount = jnp.maximum(
 		1,

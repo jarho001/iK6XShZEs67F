@@ -2,6 +2,7 @@
 
 import jax.numpy as jnp
 
+from .field import effective_move_type
 from .randomness import FULL_PARALYSIS, SLEEP_DURATION, THAW, chance, integer
 from .state import FREEZE, HEALTHY, PARALYSIS, SLEEP, TOXIC
 from .volatiles import before_move as volatile_before_move
@@ -47,6 +48,7 @@ def inflict_status(state, side, inflicted, enabled, key, forced, tables):
 	slot = state.active[side]
 	types = state.types[side, slot]
 	immune = jnp.any((types >= 0) & tables.status_immune[inflicted, jnp.maximum(types, 0)])
+	immune |= tables.weather_status_immune[state.weather, inflicted]
 	clause = jnp.any(
 		(state.status[side] == SLEEP) & (state.sleep_from_foe[side] != 0) & (state.hp[side] > 0)
 	)
@@ -127,5 +129,7 @@ def after_hit(state, side, move, enabled, tables):
 	slot = state.active[foe]
 	status = state.status[foe, slot]
 	thaw = enabled & (state.hp[foe, slot] > 0) & (status == FREEZE)
-	thaw &= (tables.move_type[move] == tables.fire_type) | tables.move_thaws_target[move]
+	thaw &= (
+		effective_move_type(state, move, tables) == tables.fire_type
+	) | tables.move_thaws_target[move]
 	return state._replace(status=state.status.at[foe, slot].set(jnp.where(thaw, HEALTHY, status)))

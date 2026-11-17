@@ -8,7 +8,7 @@ Showdown commit: `1242c1e2d9763ba5b85d33f13aecb89bae19ae3d`
 
 | Kind | Distinct | Supported | Supported occurrences |
 | --- | ---: | ---: | ---: |
-| Moves | 223 | 151 | 73.5% |
+| Moves | 223 | 157 | 75.8% |
 | Abilities | 126 | 0 | 0.0% |
 | Items | 44 | 0 | 0.0% |
 
@@ -49,7 +49,7 @@ Fully supported teams: 0.0%
 | voltswitch | Volt Switch | 2000 | 18.9% | no |
 | psyshock | Psyshock | 1882 | 17.9% | no |
 | icepunch | Ice Punch | 1898 | 17.7% | yes |
-| spikes | Spikes | 1893 | 17.7% | no |
+| spikes | Spikes | 1893 | 17.7% | yes |
 | sludgebomb | Sludge Bomb | 1830 | 17.2% | yes |
 | encore | Encore | 1811 | 17.0% | no |
 | xscissor | X-Scissor | 1766 | 16.8% | yes |
@@ -62,7 +62,7 @@ Fully supported teams: 0.0%
 | willowisp | Will-O-Wisp | 1616 | 15.1% | yes |
 | ironhead | Iron Head | 1459 | 14.1% | yes |
 | airslash | Air Slash | 1455 | 14.0% | yes |
-| toxicspikes | Toxic Spikes | 1388 | 13.8% | no |
+| toxicspikes | Toxic Spikes | 1388 | 13.8% | yes |
 | dragondance | Dragon Dance | 1450 | 13.8% | yes |
 | wish | Wish | 1438 | 13.7% | no |
 | drainpunch | Drain Punch | 1417 | 13.6% | yes |
@@ -74,7 +74,7 @@ Fully supported teams: 0.0%
 | taunt | Taunt | 1287 | 12.3% | no |
 | sleeppowder | Sleep Powder | 1281 | 12.2% | yes |
 | seismictoss | Seismic Toss | 1278 | 12.2% | yes |
-| rapidspin | Rapid Spin | 1208 | 12.0% | no |
+| rapidspin | Rapid Spin | 1208 | 12.0% | yes |
 | quiverdance | Quiver Dance | 1227 | 11.9% | yes |
 | darkpulse | Dark Pulse | 1223 | 11.8% | yes |
 | synthesis | Synthesis | 1206 | 11.7% | yes |
@@ -113,7 +113,7 @@ Fully supported teams: 0.0%
 | honeclaws | Hone Claws | 636 | 6.2% | yes |
 | machpunch | Mach Punch | 631 | 6.2% | yes |
 | firepunch | Fire Punch | 624 | 6.1% | yes |
-| raindance | Rain Dance | 618 | 6.1% | no |
+| raindance | Rain Dance | 618 | 6.1% | yes |
 | highjumpkick | High Jump Kick | 604 | 6.0% | yes |
 | haze | Haze | 593 | 5.8% | yes |
 | iceshard | Ice Shard | 592 | 5.8% | yes |
@@ -200,7 +200,7 @@ Fully supported teams: 0.0%
 | trickroom | Trick Room | 172 | 1.7% | no |
 | stunspore | Stun Spore | 170 | 1.7% | yes |
 | meteormash | Meteor Mash | 164 | 1.6% | yes |
-| sunnyday | Sunny Day | 164 | 1.6% | no |
+| sunnyday | Sunny Day | 164 | 1.6% | yes |
 | blueflare | Blue Flare | 163 | 1.6% | yes |
 | sacredfire | Sacred Fire | 163 | 1.6% | yes |
 | geargrind | Gear Grind | 161 | 1.6% | yes |
@@ -226,7 +226,7 @@ Fully supported teams: 0.0%
 | clearsmog | Clear Smog | 85 | 0.8% | yes |
 | petaldance | Petal Dance | 82 | 0.8% | no |
 | relicsong | Relic Song | 82 | 0.8% | no |
-| weatherball | Weather Ball | 82 | 0.8% | no |
+| weatherball | Weather Ball | 82 | 0.8% | yes |
 | flamewheel | Flame Wheel | 81 | 0.8% | yes |
 | irontail | Iron Tail | 81 | 0.8% | yes |
 | gyroball | Gyro Ball | 78 | 0.8% | no |

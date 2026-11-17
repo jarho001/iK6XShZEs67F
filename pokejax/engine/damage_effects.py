@@ -88,4 +88,4 @@ def apply_damage_effects(state, side, move, enabled, key, forced, tables):
 	)
 	hp = state.hp.at[SIDES, state.active].set(active_hp.astype(state.hp.dtype))
 	state = state._replace(hp=hp)
-	return state, success, effect_hit, hit_landed
+	return state, success, effect_hit, hit_landed, enabled & checked_hit

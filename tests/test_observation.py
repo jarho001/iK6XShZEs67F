@@ -211,6 +211,20 @@ def test_public_status_uses_seen_order(battles):
 	np.testing.assert_array_equal(o.opponent.status, [1, 6, 3, 0, 0, 0])
 
 
+def test_weather_and_hazards_are_public_and_perspective_ordered(battles):
+	_, t, s, _ = battles
+	s = s._replace(
+		weather=jnp.int8(3),
+		weather_turns=jnp.int8(2),
+		hazards=jnp.asarray([[2, 1], [3, 0]], jnp.int8),
+	)
+	for side, expected in ((0, [[2, 1], [3, 0]]), (1, [[3, 0], [2, 1]])):
+		o = OBSERVE(s, side, t)
+		assert int(o.weather) == 3
+		assert float(o.weather_turns) == 2
+		np.testing.assert_array_equal(o.hazards, expected)
+
+
 def test_hp_against_pinned_protocol(battles):
 	root = Path(__file__).resolve().parents[1]
 	if not (root / "reference/vendor/pokemon-showdown/dist").is_dir():
@@ -286,6 +300,9 @@ def test_shapes_dtypes_jit_vmap(battles):
 	assert o.turn.shape == () and o.turn.dtype == jnp.float32
 	assert o.request.shape == (3,) and o.request.dtype == jnp.float32
 	assert o.legal_actions.shape == (9,) and o.legal_actions.dtype == jnp.bool_
+	assert o.weather.shape == () and o.weather.dtype == jnp.int16
+	assert o.weather_turns.shape == () and o.weather_turns.dtype == jnp.float32
+	assert o.hazards.shape == (2, 2) and o.hazards.dtype == jnp.float32
 	np.testing.assert_array_equal(o.legal_actions, legal_actions(s, t)[0])
 	for x in jax.tree.leaves(observations):
 		assert x.shape[:2] == (192, 2)

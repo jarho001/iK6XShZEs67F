@@ -6,6 +6,7 @@ from pokejax.mechanics.damage_roll import apply_damage_roll
 from pokejax.mechanics.neutral_damage import neutral_damage_before_roll
 from pokejax.mechanics.stat_stage import scale_stat_stage
 
+from .field import WEATHER_ACCURACY_ALWAYS, effective_move_type, weather_modify
 from .randomness import CRIT, DAMAGE_ROLL, HIT, chance, integer
 from .state import ACCURACY, BURN, EVASION
 
@@ -22,11 +23,15 @@ def accuracy_hit(state, side, move, key, forced, tables):
 		6,
 	)
 	accuracy = tables.move_accuracy[move].astype(jnp.int32)
+	weather_accuracy = tables.move_weather_accuracy[move, state.weather].astype(jnp.int32)
+	accuracy = jnp.where(weather_accuracy >= 0, weather_accuracy, accuracy)
 	accuracy = jnp.where(
 		boost >= 0, accuracy * (3 + boost) // 3, accuracy * 3 // jnp.maximum(3 - boost, 1)
 	)
-	return tables.move_always_hits[move] | chance(
-		key, forced, HIT, side, 0, jnp.clip(accuracy, 0, 100), 100
+	return (
+		tables.move_always_hits[move]
+		| (weather_accuracy == WEATHER_ACCURACY_ALWAYS)
+		| chance(key, forced, HIT, side, 0, jnp.clip(accuracy, 0, 100), 100)
 	)
 
 
@@ -36,7 +41,7 @@ def move_damage_bases(state, side, move, tables):
 	foe = 1 - side
 	user, target = state.active[side], state.active[foe]
 	struggle = move == t.struggle_id
-	type_ = t.move_type[move]
+	type_ = effective_move_type(state, move, t)
 	target_types = state.types[foe, target]
 	present = target_types >= 0
 	safe_types = jnp.maximum(target_types, 0)
@@ -57,13 +62,18 @@ def move_damage_bases(state, side, move, tables):
 	defense_stages = jnp.stack((def_boost, crit_def_boost))
 	attack_effective = scale_stat_stage(attack, attack_stages)
 	defense_effective = scale_stat_stage(defense, defense_stages)
+	weather_spdef = jnp.any(present & t.weather_spdef_boost[state.weather, safe_types])
+	defense_modifier = jnp.where((~physical) & weather_spdef, 6144, 4096)
+	defense_effective = weather_modify(defense_effective, defense_modifier)
 	level = state.level[side, user].astype(jnp.int32)
 	power = t.move_base_power[move].astype(jnp.int32)
+	power *= t.move_weather_power[move, state.weather].astype(jnp.int32)
 	base_scenarios = neutral_damage_before_roll(
 		level, jnp.maximum(power, 1), attack_effective, defense_effective
 	)
-	base_normal = base_scenarios[0]
-	base_crit = base_scenarios[1] * 2
+	weather_modifier = t.weather_damage_by_type[state.weather, type_]
+	base_normal = weather_modify(base_scenarios[0], weather_modifier)
+	base_crit = weather_modify(base_scenarios[1], weather_modifier) * 2
 	damage_kind = t.move_damage_kind[move]
 	fixed = jnp.where(
 		damage_kind == LEVEL_DAMAGE,
@@ -106,7 +116,7 @@ def damage_for_hits(state, side, move, hit_indices, bases, key, forced, tables):
 	ratio = jnp.clip(tables.move_crit_ratio[move].astype(jnp.int32), 0, 5)
 	denominator = CRIT_DENOMINATORS[ratio]
 	user, target = state.active[side], state.active[1 - side]
-	type_ = tables.move_type[move]
+	type_ = effective_move_type(state, move, tables)
 	stab = jnp.any(state.types[side, user] == type_)
 	burned = state.status[side, user] == BURN
 

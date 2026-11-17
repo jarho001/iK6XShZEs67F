@@ -13,8 +13,8 @@ NUM_SIDES = 2
 NUM_TYPES = 2
 NUM_STATS = 6
 NUM_BOOSTS = 7
-CONFUSION, FLINCH, ROOST = range(3)
-VOLATILE_NAMES = ("confusion", "flinch", "roost")
+CONFUSION, FLINCH, ROOST, LEECH_SEED, PARTIALLY_TRAPPED = range(5)
+VOLATILE_NAMES = ("confusion", "flinch", "roost", "leechseed", "partiallytrapped")
 NUM_VOLATILES = len(VOLATILE_NAMES)
 HP, ATK, DEF, SPA, SPD, SPE = range(NUM_STATS)
 BOOST_ATK, BOOST_DEF, BOOST_SPA, BOOST_SPD, BOOST_SPE, ACCURACY, EVASION = range(NUM_BOOSTS)
@@ -25,6 +25,10 @@ NO_TYPE = -1
 NONE, MOVE, SWITCH = range(3)
 ONGOING, SIDE0, SIDE1, TIE = -1, 0, 1, 2
 FIRST_TURN = 1
+NO_WEATHER, RAIN, SUN, SAND, HAIL = range(5)
+WEATHER_NAMES = ("", "raindance", "sunnyday", "sandstorm", "hail")
+NUM_WEATHERS = len(WEATHER_NAMES)
+SPIKES, TOXIC_SPIKES = range(2)
 
 
 class BattleState(NamedTuple):
@@ -38,8 +42,12 @@ class BattleState(NamedTuple):
 	sleep_start and sleep_from_foe are [2, 6] bytes for the Gen 5 switch reset
 	and Sleep Clause, respectively; status and status_counter are [2, 6] int8.
 	volatiles is int16 [2, NUM_VOLATILES], active only: zero is absent;
-	confusion stores the private BeforeMove timer (2..5 initially), flinch is 1.
-	The wider dtype also fits future volatile HP (Substitute) in another column.
+	confusion stores the private BeforeMove timer (2..5 initially), flinch and
+	roost are 1. Leech Seed and partial trapping have reserved columns. The wider
+	dtype also fits future volatile HP (Substitute) in another column. Weather is
+	an int8 enum (0 clear, 1 rain, 2 sun, 3 sand, 4 hail); zero turns means
+	permanent weather or no weather. Hazards and their private switch-in creation
+	order are int8 [side, spikes/toxic spikes].
 	"""
 
 	species: jax.Array
@@ -67,6 +75,10 @@ class BattleState(NamedTuple):
 	active: jax.Array
 	boosts: jax.Array
 	volatiles: jax.Array  # int16 [2, NUM_VOLATILES], active Pokemon only
+	weather: jax.Array  # int8 scalar; NO_WEATHER, RAIN, SUN, SAND, HAIL
+	weather_turns: jax.Array  # int8 scalar; zero means permanent or no weather
+	hazards: jax.Array  # int8 [2, 2]: Spikes, Toxic Spikes layers on each side
+	hazard_order: jax.Array  # int8 [2, 2]: relative creation order for switch-in handlers
 	request: jax.Array
 	turn: jax.Array
 	winner: jax.Array

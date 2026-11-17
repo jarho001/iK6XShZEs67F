@@ -317,6 +317,43 @@ test('effects isolation fixture replays multihit outcomes and every decision sna
 	}
 });
 
+test('weather and grouped SwitchIn ties use separate order addresses', () => {
+	{
+		const battle = createBattle(battles[0]);
+		try {
+			for (const side of battle.sides) side.active[0].speed = 100;
+			const guard = instrument(battle, newStats());
+			guard.begin();
+			assert(battle.field.setWeather('raindance', battle.sides[0].active[0]));
+			battle.eachEvent('Weather');
+			const outcomes = guard.end();
+			assert.deepEqual(outcomes.map(({ kind, side, occurrence }) => ({ kind, side, occurrence })), [
+				{ kind: 'order', side: 0, occurrence: 4 },
+				{ kind: 'order', side: 0, occurrence: 3 },
+			]);
+			for (const outcome of outcomes) assert([0, 1].includes(outcome.value));
+		} finally { battle.destroy(); }
+	}
+	{
+		const battle = createBattle(battles[0]);
+		try {
+			for (const side of battle.sides) {
+				side.active[0].speed = 100;
+				assert(side.addSideCondition('spikes', side.active[0]));
+			}
+			const guard = instrument(battle, newStats());
+			guard.begin();
+			battle.actions.runSwitch(battle.sides[0].active[0]);
+			const outcomes = guard.end();
+			assert.equal(outcomes.length, 1);
+			assert.deepEqual(outcomes.map(({ kind, side, occurrence }) => ({ kind, side, occurrence })), [
+				{ kind: 'order', side: 0, occurrence: 5 },
+			]);
+			assert([0, 1].includes(outcomes[0].value));
+		} finally { battle.destroy(); }
+	}
+});
+
 test('secondary isolation data agrees with the pinned resolved moves', () => {
 	const allowed = JSON.parse(fs.readFileSync(path.join(root, 'tests/fixtures/diff-secondaries.allowed.json')));
 	const data = JSON.parse(fs.readFileSync(path.join(root, 'data/gen5-data-v1.json')));

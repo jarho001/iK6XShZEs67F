@@ -61,6 +61,9 @@ class Observation(NamedTuple):
 	turn: jax.Array  # float32 scalar
 	request: jax.Array  # float32 [3], NONE/MOVE/SWITCH
 	legal_actions: jax.Array  # bool [9], actions.py encoding
+	weather: jax.Array  # int16 scalar; public WEATHER_NAMES ID
+	weather_turns: jax.Array  # float32 scalar; zero for permanent/clear
+	hazards: jax.Array  # float32 [own/opponent, Spikes/Toxic Spikes] layer counts
 
 
 def observe(state, side, engine_tables) -> Observation:
@@ -117,4 +120,7 @@ def observe(state, side, engine_tables) -> Observation:
 		f(state.turn) / 1000,
 		f(jnp.arange(3) == request),
 		legal_actions(state, engine_tables)[side],
+		state.weather.astype(jnp.int16),
+		f(state.weather_turns),
+		f(state.hazards[jnp.stack((side, foe))]),
 	)

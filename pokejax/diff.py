@@ -30,6 +30,7 @@ from pokejax.engine.state import (
 	SWITCH,
 	TIE,
 	VOLATILE_NAMES,
+	WEATHER_NAMES,
 )
 from pokejax.engine.step import step
 from pokejax.tables import load_tables
@@ -69,6 +70,9 @@ def comparable(state, tables):
 		"fainted": state.hp == 0,
 		"turn": state.turn,
 		"winner": state.winner,
+		"weather": state.weather,
+		"weatherTurns": state.weather_turns,
+		"hazards": state.hazards,
 	}
 
 
@@ -131,6 +135,17 @@ def recorded_state(snapshot, tables):
 		),
 		"turn": np.asarray(snapshot["turn"]),
 		"winner": np.asarray(ONGOING if winner is None else TIE if winner == "tie" else winner),
+		"weather": np.asarray(WEATHER_NAMES.index(snapshot["weather"])),
+		"weatherTurns": np.asarray(snapshot["weatherTurns"]),
+		"hazards": np.asarray(
+			[
+				[
+					side["sideConditions"].get(name, {}).get("layers", 0)
+					for name in ("spikes", "toxicspikes")
+				]
+				for side in sides
+			]
+		),
 	}
 
 
@@ -313,12 +328,11 @@ def replay_file(path, *, recording=None) -> ReplayResult:
 				point, *axes = address
 				if first is None or point < first[0]:
 					first = (point, name, address, axes)
-		# Fields without a state representation have explicit fixed defaults here.
+		# Unmodeled fields retain explicit defaults; hazards are represented by layers,
+		# while all other side conditions stay required to be absent.
 		# Active aliases are checked independently so no snapshot field is ignored.
 		for point, snapshot in enumerate(snapshots):
 			extra = {
-				"weather": ("", snapshot["weather"]),
-				"weatherTurns": (0, snapshot["weatherTurns"]),
 				"pseudoWeather": (
 					{"sleepclausemod": {"layers": 0, "turns": 0}},
 					snapshot["pseudoWeather"],
@@ -341,7 +355,14 @@ def replay_file(path, *, recording=None) -> ReplayResult:
 						if name != "confusion"
 					},
 				)
-				extra[f"sides[{side_index}].sideConditions"] = ({}, side["sideConditions"])
+				extra[f"sides[{side_index}].sideConditions"] = (
+					{},
+					{
+						name: condition
+						for name, condition in side["sideConditions"].items()
+						if name not in ("spikes", "toxicspikes")
+					},
+				)
 			for name, (engine, wanted) in extra.items():
 				if engine != wanted and (first is None or point < first[0]):
 					first = (point, name, None, (engine, wanted))

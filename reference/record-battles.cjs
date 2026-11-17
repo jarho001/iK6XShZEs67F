@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-/* Phase 1 differential oracle. Run:
+/* Differential oracle. Run:
  * node reference/record-battles.cjs --profile phase1 --count 300 --seed 1 --out work/diff/phase1.jsonl.gz
  * node reference/record-battles.cjs --profile phase1 --count 40 --seed 4 --out tests/fixtures/diff-phase1.jsonl.gz
  * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-status.allowed.json --out work/diff/status.jsonl.gz
@@ -13,6 +13,8 @@
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-secondaries.allowed.json --out tests/fixtures/diff-secondaries.jsonl.gz
  * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-effects2.allowed.json --out work/diff/effects2.jsonl.gz
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-effects2.allowed.json --out tests/fixtures/diff-effects2.jsonl.gz
+ * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-field.allowed.json --out work/diff/field.jsonl.gz
+ * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-field.allowed.json --out tests/fixtures/diff-field.jsonl.gz
  *
  * JSONL schema v2: header {type, schemaVersion, showdownCommit, seed, count,
  * acceptedMoves, ...}; battle {type, index, seed (four uint16 words), policySeed,
@@ -40,7 +42,10 @@
  * to the next turn. Ended snapshots have two "none" requests.
  * Order occurrence 1 means a tie between queued instaswitch actions. The pinned
  * getActionSpeed uses the outgoing Pokemon's speed for switches/replacements;
- * the later runSwitch speedOrder shuffle has no observable effect in this suite.
+ * grouped SwitchIn handlers use new active speeds and context 5 when hazards are
+ * present; context 1 still records replacement queue ties.
+ * Order occurrence 3 means a Speed tie during the weather's eachEvent('Weather').
+ * Order occurrence 4 means a Speed tie during WeatherChange.
  *
  * Every 20th battle uses a pool team with a Ghost lead on both sides. Moves are
  * drawn without replacement from accepted <=10 PP moves whose types cannot hit
@@ -89,7 +94,11 @@ const { PRNG } = require('./vendor/pokemon-showdown/dist/sim/prng');
 const dex = Dex.forFormat('gen5randombattle');
 const BOOSTS = ['atk', 'def', 'spa', 'spd', 'spe', 'accuracy', 'evasion'];
 const TURN_LIMIT = 1000; // Showdown's own Endless Battle Clause also caps at 1000.
-const EXCEPTIONS = ['empty-eachEvent-Update', 'empty-eachEvent-BeforeTurn', 'empty-switchIn-order'];
+const EXCEPTIONS = [
+	'empty-eachEvent-Update',
+	'empty-eachEvent-BeforeTurn',
+	'empty-switchIn-order',
+];
 
 // Fail closed on unfamiliar meaningful move properties. maxMove/zMove and contest
 // data cannot execute in Gen 5. Sources: sim/pokemon.ts getMoveTargets and
@@ -278,6 +287,14 @@ const OUTCOME_RULES = [
 		value: (value, list, start) => list[start].pokemon.side.n },
 	{ kind: 'order', method: 'shuffle', matches: scope => scope?.kind === 'residual',
 		address: () => [0, 2], value: (value, list, start) => list[start].effectHolder.side.n },
+	{ kind: 'order', method: 'shuffle', matches: scope =>
+		scope?.kind === 'eachEvent' && scope.event === 'Weather',
+		address: () => [0, 3], value: (value, list, start) => list[start].side.n },
+	{ kind: 'order', method: 'shuffle', matches: scope =>
+		scope?.kind === 'eachEvent' && scope.event === 'WeatherChange',
+		address: () => [0, 4], value: (value, list, start) => list[start].side.n },
+	{ kind: 'order', method: 'shuffle', matches: scope => scope?.kind === 'runSwitch',
+		address: () => [0, 5], value: (value, list, start) => list[start].side.n },
 ];
 
 function instrument(battle, stats) {
@@ -392,6 +409,14 @@ function instrument(battle, stats) {
 			assert(tied.every(h => ['brn', 'psn', 'tox'].includes(h.effect.id)) &&
 				tied[0].effectHolder.side !== tied[1].effectHolder.side);
 			rule = OUTCOME_RULES.find(row => row.method === 'shuffle' && row.matches(scope));
+		} else if (scope?.kind === 'eachEvent' && scope.event === 'Weather') {
+			assert(tied.every(pokemon => pokemon.side.active.includes(pokemon)) &&
+				tied[0].side !== tied[1].side, 'Unexpected weather event tie');
+			rule = OUTCOME_RULES.find(row => row.method === 'shuffle' && row.matches(scope));
+		} else if (scope?.kind === 'eachEvent' && scope.event === 'WeatherChange') {
+			assert(tied.every(pokemon => battle.findEventHandlers(pokemon, 'WeatherChange').length === 0),
+				'Nonempty WeatherChange handlers: cannot ignore order');
+			rule = OUTCOME_RULES.find(row => row.method === 'shuffle' && row.matches(scope));
 		} else if (scope?.kind === 'eachEvent' && ['Update', 'BeforeTurn'].includes(scope.event)) {
 			assert(tied.every(p => battle.findEventHandlers(p, scope.event).length === 0),
 				`Nonempty ${scope.event} handlers: cannot ignore order`);
@@ -401,12 +426,19 @@ function instrument(battle, stats) {
 				battle.findPokemonEventHandlers(p, 'onSwitchIn').every(h => ['slp', 'tox'].includes(h.effect.id)) &&
 				battle.findPokemonEventHandlers(p, 'onAnySwitchIn').length === 0 &&
 				battle.findSideEventHandlers(p.side, 'onSideSwitchIn', undefined, p).length === 0 &&
-				battle.findSideEventHandlers(p.side, 'onSwitchIn', undefined, p).length === 0 &&
+				battle.findSideEventHandlers(p.side, 'onSwitchIn', undefined, p)
+					.every(h => ['spikes', 'toxicspikes'].includes(h.effect.id)) &&
 				battle.findFieldEventHandlers(battle.field, 'onFieldSwitchIn', undefined, p).length === 0 &&
 				battle.findFieldEventHandlers(battle.field, 'onSwitchIn', undefined, p).length === 0 &&
 				battle.findBattleEventHandlers('onSwitchIn', undefined, p).length === 0),
 				'Nonempty SwitchIn handlers: cannot ignore speedOrder');
-			exception = 'empty-switchIn-order';
+			const hasHazards = tied.some(p =>
+				battle.findSideEventHandlers(p.side, 'onSwitchIn', undefined, p).length > 0);
+			if (hasHazards) {
+				rule = OUTCOME_RULES.find(row => row.method === 'shuffle' && row.matches(scope));
+			} else {
+				exception = 'empty-switchIn-order';
+			}
 		} else {
 			const entries = tied.map(entry => entry.choice || entry.effect?.id || entry.species?.id || typeof entry);
 			throw new Error(`Unclassified shuffle: scope=${scope?.kind}, event=${scope?.event}, entries=${entries}\n${new Error().stack}`);

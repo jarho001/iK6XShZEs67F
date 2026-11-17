@@ -86,14 +86,14 @@ def test_fire_hit_thaws_target(setup):
 
 
 def test_residual_faints_both_and_stops_on_battle_end(setup):
-	_, _, s = setup
+	_, t, s = setup
 	s = s._replace(hp=s.hp.at[:, 0].set(1), status=s.status.at[:, 0].set(BURN))
-	out = jax.jit(residual)(s, True, KEY, UNFORCED.at[ORDER, 0, 2].set(0))
+	out = jax.jit(residual)(s, True, KEY, UNFORCED.at[ORDER, 0, 2].set(0), t)
 	np.testing.assert_array_equal(out.hp[:, 0], [0, 0])
 	assert int(out.winner) == ONGOING
 	# Once the first side's last member faints, fieldEvent ends immediately.
 	s = s._replace(hp=s.hp.at[:, 1:].set(0))
-	out = jax.jit(residual)(s, True, KEY, UNFORCED.at[ORDER, 0, 2].set(0))
+	out = jax.jit(residual)(s, True, KEY, UNFORCED.at[ORDER, 0, 2].set(0), t)
 	np.testing.assert_array_equal(out.hp[:, 0], [0, 1])
 	assert int(out.winner) == 1
 
