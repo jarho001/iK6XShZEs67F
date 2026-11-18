@@ -8,7 +8,9 @@ as a no-op. Finished battles behave as NONE for both sides.
 
 import jax.numpy as jnp
 
+from .items import CHOICE
 from .state import (
+	CHOICE_MOVE,
 	LOCKED_MOVE,
 	MOVE,
 	MUST_RECHARGE,
@@ -32,12 +34,19 @@ def bench_slots(active):
 
 def legal_actions(state, engine_tables):
 	"""Match Pokemon.getMoveRequestData and Side.chooseSwitch without effects."""
-	del engine_tables
 	request = jnp.where(state.winner == ONGOING, state.request, NONE)
 	moves = state.moves[SIDES, state.active]
 	pp = state.pp[SIDES, state.active]
 	usable = (moves != 0) & (pp > 0)
 	usable = usable.at[:, 0].set(usable[:, 0] | ~jnp.any(usable, axis=1))
+	choice_move = state.volatiles[:, CHOICE_MOVE]
+	item = state.item[SIDES, state.active].astype(jnp.int32)
+	choice_item = engine_tables.item_hooks.rows[item, CHOICE] != 0
+	choice_active = choice_item & (choice_move > 0)
+	choice_active &= jnp.any(moves == choice_move[:, None], axis=1)
+	choice_usable = (moves == choice_move[:, None]) & (pp > 0)
+	choice_has_pp = jnp.any(choice_usable, axis=1)
+	choice_mask = jnp.where(choice_has_pp[:, None], choice_usable, jnp.arange(4)[None, :] == 0)
 	forced = (
 		(state.volatiles[:, TWO_TURN_MOVE] > 0)
 		| (state.volatiles[:, LOCKED_MOVE] > 0)
@@ -45,6 +54,11 @@ def legal_actions(state, engine_tables):
 	)
 	only_first = jnp.arange(4)[None, :] == 0
 	move_mask = (request[:, None] == MOVE) & jnp.where(forced[:, None], only_first, usable)
+	move_mask = jnp.where(
+		(request[:, None] == MOVE) & choice_active[:, None] & ~forced[:, None],
+		choice_mask,
+		move_mask,
+	)
 	move_mask = move_mask.at[:, 0].set(move_mask[:, 0] | (request == NONE))
 	bench_alive = state.hp[SIDES[:, None], bench_slots(state.active)] > 0
 	can_switch = (request == SWITCH) | ((request == MOVE) & ~forced)

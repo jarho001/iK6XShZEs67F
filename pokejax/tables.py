@@ -54,6 +54,7 @@ class SpeciesTable(RowTable):
 	abilities: NDArray[np.int16]
 	weight_hg: NDArray[np.int16]
 	num: NDArray[np.int16]
+	nfe: NDArray[np.bool_]
 
 
 @dataclass(frozen=True)
@@ -189,6 +190,8 @@ def _build_species(rows, types, abilities):
 	ability_rows = np.zeros((count, len(ABILITY_SLOTS)), dtype=np.int16)
 	weight_hg = np.zeros(count, dtype=np.int16)
 	num = np.zeros(count, dtype=np.int16)
+	nfe = np.zeros(count, dtype=np.bool_)
+	by_id = {species["id"]: species for species in rows}
 	for row, species in enumerate(rows, start=1):
 		base_stats[row] = [species["baseStats"][stat] for stat in STAT_NAMES]
 		type_rows[row] = NO_SECOND_TYPE
@@ -201,8 +204,20 @@ def _build_species(rows, types, abilities):
 			ability_rows[row, slot] = abilities.index.get(ability, NONE_ROW)
 		weight_hg[row] = species["weighthg"]
 		num[row] = species["num"]
+		base_id = _showdown_id(species.get("baseSpecies", species["name"]))
+		base_species = by_id.get(base_id, species)
+		nfe[row] = base_species.get("nfe", False)
 	return SpeciesTable(
-		ids, index, names, cosmetic_aliases, base_stats, type_rows, ability_rows, weight_hg, num
+		ids,
+		index,
+		names,
+		cosmetic_aliases,
+		base_stats,
+		type_rows,
+		ability_rows,
+		weight_hg,
+		num,
+		nfe,
 	)
 
 

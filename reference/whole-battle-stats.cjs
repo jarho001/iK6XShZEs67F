@@ -63,6 +63,8 @@ function playBattle(index, masterSeed, teamPair, policySeedWords) {
 				fainted: fixed.flatMap(members => members.map(pokemon => pokemon.fainted)),
 				confusion: battle.sides.map(side => !side.active[0].fainted &&
 					Boolean(side.active[0].volatiles.confusion)),
+				itemConsumed: fixed.map(members => members.map(pokemon =>
+					!pokemon.item && Boolean(pokemon.lastItem) && !pokemon.itemKnockedOff)),
 			});
 			decisionCount++;
 		}
@@ -112,7 +114,7 @@ async function main() {
 	const options = {
 		taskMoves: (extra.moves || []).map(id => dex.toID(id)),
 		abilities: [...supported.abilities, ...(extra.abilities || []).map(id => dex.toID(id))],
-		items: [...supported.items, ...(extra.items || []).map(id => dex.toID(id))],
+		items: [...new Set([...supported.items, ...(extra.items || []).map(id => dex.toID(id))])].sort(),
 	};
 	assert(moves.length >= 4);
 	const { teamPairs, policySeeds } = makeBattleInputs(count, seed, pool, moves, options);

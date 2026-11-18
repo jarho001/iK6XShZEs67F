@@ -7,6 +7,12 @@ from pokejax.mechanics.neutral_damage import neutral_damage_before_roll
 from pokejax.mechanics.stat_stage import scale_stat_stage
 
 from .field import WEATHER_ACCURACY_ALWAYS, effective_move_type, weather_modify
+from .items import (
+	DAMAGE_EXPERT_BELT,
+	DAMAGE_LIFE_ORB,
+	apply_stat_modifier,
+	item_base_power_modifier,
+)
 from .randomness import CRIT, DAMAGE_ROLL, HIT, MAGNITUDE, chance, integer
 from .state import ACCURACY, BURN, EVASION, SMACKDOWN, TWO_TURN_MOVE
 
@@ -35,13 +41,14 @@ def accuracy_hit(state, side, move, key, forced, tables):
 	)
 
 
-def move_damage_bases(state, side, move, key, forced, tables):
+def move_damage_bases(state, side, move, key, forced, tables, item_rows, gem_trigger):
 	"""Compute the non-crit and crit pre-roll damage bases once per move."""
 	t = tables
 	foe = 1 - side
 	user, target = state.active[side], state.active[foe]
 	struggle = move == t.struggle_id
 	type_ = effective_move_type(state, move, t)
+	item_type = jnp.where(struggle, -1, type_)
 	target_types = state.types[foe, target]
 	present = target_types >= 0
 	safe_types = jnp.maximum(target_types, 0)
@@ -66,6 +73,8 @@ def move_damage_bases(state, side, move, key, forced, tables):
 	defense_stages = jnp.stack((def_boost, crit_def_boost))
 	attack_effective = scale_stat_stage(attack, attack_stages)
 	defense_effective = scale_stat_stage(defense, defense_stages)
+	attack_effective = apply_stat_modifier(attack_effective, side, attack_index, item_rows)
+	defense_effective = apply_stat_modifier(defense_effective, foe, defense_index, item_rows)
 	weather_spdef = jnp.any(present & t.weather_spdef_boost[state.weather, safe_types])
 	defense_modifier = jnp.where((~physical) & weather_spdef, 6144, 4096)
 	defense_effective = weather_modify(defense_effective, defense_modifier)
@@ -92,6 +101,10 @@ def move_damage_bases(state, side, move, key, forced, tables):
 	power = jnp.where(t.move_magnitude[move], magnitude_power, power)
 	power *= t.move_weather_power[move, state.weather].astype(jnp.int32)
 	power = weather_modify(power, t.move_weather_power_scale[move, state.weather])
+	item_modifier = item_base_power_modifier(
+		side, item_type, gem_trigger, t.move_damage_kind[move], item_rows
+	)
+	power = weather_modify(power, item_modifier)
 	base_scenarios = neutral_damage_before_roll(
 		level, jnp.maximum(power, 1), attack_effective, defense_effective
 	)
@@ -124,7 +137,7 @@ def move_damage_bases(state, side, move, key, forced, tables):
 	)
 
 
-def damage_for_hits(state, side, move, hit_indices, bases, key, forced, tables):
+def damage_for_hits(state, side, move, hit_indices, bases, key, forced, tables, item_rows):
 	"""Apply each hit's crit and roll to the shared damage bases."""
 	(
 		base_normal,
@@ -137,7 +150,8 @@ def damage_for_hits(state, side, move, hit_indices, bases, key, forced, tables):
 		struggle,
 		physical,
 	) = bases
-	ratio = jnp.clip(tables.move_crit_ratio[move].astype(jnp.int32), 0, 5)
+	stick_bonus = jnp.where(item_rows.stat_species[side], item_rows.crit_bonus[side], 0)
+	ratio = jnp.clip(tables.move_crit_ratio[move].astype(jnp.int32) + stick_bonus, 0, 5)
 	denominator = CRIT_DENOMINATORS[ratio]
 	user, target = state.active[side], state.active[1 - side]
 	type_ = effective_move_type(state, move, tables)
@@ -160,6 +174,16 @@ def damage_for_hits(state, side, move, hit_indices, bases, key, forced, tables):
 	semi_power = tables.move_semi_power[move, target_semi]
 	damage *= jnp.where(semi_power, 2, 1).astype(jnp.int32)
 	damage = jnp.where(damage == 0, 1, damage) & 65535
+	modifier = jnp.where(
+		item_rows.damage_kind[side] == DAMAGE_LIFE_ORB,
+		5324,
+		jnp.where(
+			(item_rows.damage_kind[side] == DAMAGE_EXPERT_BELT) & (exponent > 0),
+			4915,
+			4096,
+		),
+	).astype(jnp.int32)
+	damage = weather_modify(damage, modifier)
 	damage = jnp.where(damage_kind > 0, fixed, damage)
 	can_damage &= state.hp[1 - side, target] > 0
 	return damage, can_damage

@@ -284,7 +284,54 @@ MOVE_EFFECT_MOVES = frozenset(
 SUPPORTED_MOVES |= MOVE_EFFECT_MOVES
 
 SUPPORTED_ABILITIES: frozenset[str] = frozenset()
-SUPPORTED_ITEMS: frozenset[str] = frozenset()
+SUPPORTED_ITEMS: frozenset[str] = frozenset(
+	{
+		"leftovers",
+		"lifeorb",
+		"choiceband",
+		"choicespecs",
+		"blacksludge",
+		"choicescarf",
+		"eviolite",
+		"toxicorb",
+		"flyinggem",
+		"whiteherb",
+		"rockyhelmet",
+		"lumberry",
+		"expertbelt",
+		"focussash",
+		"sitrusberry",
+		"silkscarf",
+		"souldew",
+		"chestoberry",
+		"blackglasses",
+		"custapberry",
+		"lightball",
+		"thickclub",
+		"damprock",
+		"stick",
+		"fightinggem",
+		"lustrousorb",
+		"griseousorb",
+		"flameorb",
+		"ironplate",
+		"spookyplate",
+		"skyplate",
+		"mindplate",
+		"dracoplate",
+		"splashplate",
+		"stoneplate",
+		"dreadplate",
+		"earthplate",
+		"fistplate",
+		"meadowplate",
+		"insectplate",
+		"icicleplate",
+		"toxicplate",
+		"flameplate",
+		"zapplate",
+	}
+)
 
 
 def support_masks(tables: Tables) -> tuple[NDArray[np.bool_], ...]:

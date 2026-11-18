@@ -71,16 +71,22 @@ def count_battle_summary(battle):
 		"switches": [0, 0],
 		"struggle": 0,
 		"confusion": 0,
+		"itemsConsumed": {},
 	}
 	previous_status = np.full((2, 6), "", dtype=object)
 	previous_fainted = np.zeros((2, 6), dtype=np.bool_)
 	previous_confusion = np.zeros(2, dtype=np.bool_)
+	previous_item_consumed = np.zeros((2, 6), dtype=np.bool_)
+	team_pair = battle.get("teamPair", [[], []])
 	for event in battle["decisions"]:
 		moves = event["moves"]
 		switches = np.asarray(event["switches"], dtype=np.bool_)
 		statuses = np.asarray(event["statuses"], dtype=object).reshape(2, 6)
 		fainted = np.asarray(event["fainted"], dtype=np.bool_).reshape(2, 6)
 		confusion = np.asarray(event["confusion"], dtype=np.bool_)
+		item_consumed = np.asarray(
+			event.get("itemConsumed", np.zeros((2, 6), dtype=np.bool_)), dtype=np.bool_
+		).reshape(2, 6)
 		for move in moves:
 			if move is not None:
 				counts["moves"][move] = counts["moves"].get(move, 0) + 1
@@ -95,10 +101,22 @@ def count_battle_summary(battle):
 			counts["statuses"][name] += int(
 				np.count_nonzero((statuses == name) & (previous_status != name))
 			)
+		newly_consumed = item_consumed & ~previous_item_consumed
+		for side, slot in zip(*np.nonzero(newly_consumed), strict=True):
+			if side < len(team_pair) and slot < len(team_pair[side]):
+				item = _item_id(team_pair[side][slot].get("item", ""))
+				if item:
+					counts["itemsConsumed"][item] = counts["itemsConsumed"].get(item, 0) + 1
 		previous_status = statuses
 		previous_fainted = fainted
 		previous_confusion = confusion
+		previous_item_consumed = item_consumed
 	return counts
+
+
+def _item_id(value):
+	"""Normalize a Showdown display item name to its engine table ID."""
+	return "".join(character.lower() for character in value if character.isalnum())
 
 
 def _rollout_batch(teams, policy_keys, engine_tables):
@@ -110,6 +128,7 @@ def _rollout_batch(teams, policy_keys, engine_tables):
 	trace_statuses = jnp.zeros((MAX_DECISIONS, batch_size, 2, 6), dtype=jnp.int8)
 	trace_fainted = jnp.zeros((MAX_DECISIONS, batch_size, 2, 6), dtype=jnp.bool_)
 	trace_confusion = jnp.zeros((MAX_DECISIONS, batch_size, 2), dtype=jnp.bool_)
+	trace_item_consumed = jnp.zeros((MAX_DECISIONS, batch_size, 2, 6), dtype=jnp.bool_)
 	lengths = jnp.zeros((batch_size,), dtype=jnp.int32)
 	indices = jnp.arange(batch_size)
 	sides = jnp.arange(2)[None, :]
@@ -129,6 +148,7 @@ def _rollout_batch(teams, policy_keys, engine_tables):
 			statuses_trace,
 			fainted_trace,
 			confusion_trace,
+			item_consumed_trace,
 		) = carry
 		was_ongoing = state.winner == ONGOING
 		mask = jax.vmap(legal_actions, in_axes=(0, None))(state, engine_tables)
@@ -174,6 +194,7 @@ def _rollout_batch(teams, policy_keys, engine_tables):
 		statuses_trace = statuses_trace.at[decision].set(statuses)
 		fainted_trace = fainted_trace.at[decision].set(fainted)
 		confusion_trace = confusion_trace.at[decision].set(confusion)
+		item_consumed_trace = item_consumed_trace.at[decision].set(new_state.item_consumed)
 		return (
 			new_state,
 			next_keys,
@@ -184,6 +205,7 @@ def _rollout_batch(teams, policy_keys, engine_tables):
 			statuses_trace,
 			fainted_trace,
 			confusion_trace,
+			item_consumed_trace,
 		)
 
 	initial = (
@@ -196,9 +218,12 @@ def _rollout_batch(teams, policy_keys, engine_tables):
 		trace_statuses,
 		trace_fainted,
 		trace_confusion,
+		trace_item_consumed,
 	)
 	final = jax.lax.while_loop(condition, advance, initial)
-	state, _, _decisions, lengths, moves, switches, statuses, fainted, confusion = final
+	state, _, _decisions, lengths, moves, switches, statuses, fainted, confusion, item_consumed = (
+		final
+	)
 	return (
 		state.winner,
 		state.turn,
@@ -208,6 +233,7 @@ def _rollout_batch(teams, policy_keys, engine_tables):
 		statuses,
 		fainted,
 		confusion,
+		item_consumed,
 	)
 
 
@@ -261,7 +287,7 @@ def engine_summaries(showdown, *, seed, tables=None):
 			jnp.arange(start, start + batch_size, dtype=jnp.uint32)
 		)
 		result = jax.block_until_ready(_rollout_batch(chunk, keys, engine_tables))
-		winner, turns, lengths, moves, switches, statuses, fainted, confusion = map(
+		winner, turns, lengths, moves, switches, statuses, fainted, confusion, item_consumed = map(
 			jax.device_get, result
 		)
 		if np.any(np.asarray(winner[:actual_size]) == ONGOING):
@@ -270,6 +296,7 @@ def engine_summaries(showdown, *, seed, tables=None):
 			trace = {
 				"winner": int(winner[local]),
 				"turns": int(turns[local]),
+				"teamPair": team_pairs[start + local],
 				"decisions": [],
 			}
 			for decision in range(int(lengths[local])):
@@ -290,6 +317,7 @@ def engine_summaries(showdown, *, seed, tables=None):
 						],
 						"fainted": fainted[decision, local].reshape(-1).tolist(),
 						"confusion": confusion[decision, local].tolist(),
+						"itemConsumed": item_consumed[decision, local].tolist(),
 					}
 				)
 			all_battles.append(count_battle_summary(trace))
@@ -501,6 +529,18 @@ def compare_summaries(showdown, engine, move_ids=None):
 			[battle["statuses"][status] for battle in showdown],
 			[battle["statuses"][status] for battle in engine],
 		)
+	item_ids = sorted(
+		set().union(
+			*(battle["itemsConsumed"].keys() for battle in showdown),
+			*(battle["itemsConsumed"].keys() for battle in engine),
+		)
+	)
+	for item in item_ids:
+		add_counts(
+			f"itemConsumed.{item}",
+			[battle["itemsConsumed"].get(item, 0) for battle in showdown],
+			[battle["itemsConsumed"].get(item, 0) for battle in engine],
+		)
 	add_counts(
 		"faints", [battle["faints"] for battle in showdown], [battle["faints"] for battle in engine]
 	)
@@ -622,7 +662,10 @@ def run(args):
 		subprocess.run(command, cwd=ROOT, check=True)
 		showdown = _read_json(showdown_path)
 	_validate_showdown(showdown, args.battles, args.seed)
-	showdown_counts = [count_battle_summary(battle) for battle in showdown["battles"]]
+	showdown_counts = [
+		count_battle_summary({**battle, "teamPair": showdown["teamPairs"][index]})
+		for index, battle in enumerate(showdown["battles"])
+	]
 	team_hash = _team_pairs_hash(showdown["teamPairs"])
 	if args.reuse_engine:
 		engine_summary = _read_json(engine_path)
@@ -658,6 +701,7 @@ def run(args):
 			"status": "first visible status at a decision boundary; per member",
 			"faint": "first visible transition from alive to fainted; per member",
 			"confusion": "first visible transition into active confusion",
+			"itemConsumption": "first visible transition to consumed item, by initial held item",
 		},
 		"results": rows,
 	}

@@ -8,6 +8,7 @@ import test_status
 
 from pokejax.engine.damage import accuracy_hit, move_damage_bases
 from pokejax.engine.field import apply_move_field_effects, apply_switch_hazards, effective_move_type
+from pokejax.engine.items import gather_active_items
 from pokejax.engine.move_effects import apply_healing
 from pokejax.engine.randomness import (
 	CRIT,
@@ -99,19 +100,23 @@ def test_weather_modifier_accuracy_weather_ball_and_rock_special_defense(setup):
 	)
 	surf = tables.moves.index["surf"]
 
-	clear = move_damage_bases(state, 0, surf, KEY, FORCED, t)[0]
+	item_rows = gather_active_items(state, t)
+	clear = move_damage_bases(state, 0, surf, KEY, FORCED, t, item_rows, False)[0]
 	rain = state._replace(weather=jnp.int8(RAIN))
 	sun = state._replace(weather=jnp.int8(SUN))
 	assert int(clear) == 81
-	assert int(move_damage_bases(rain, 0, surf, KEY, FORCED, t)[0]) == 121
-	assert int(move_damage_bases(sun, 0, surf, KEY, FORCED, t)[0]) == 40
+	assert int(move_damage_bases(rain, 0, surf, KEY, FORCED, t, item_rows, False)[0]) == 121
+	assert int(move_damage_bases(sun, 0, surf, KEY, FORCED, t, item_rows, False)[0]) == 40
 	assert int(t.weather_damage_by_type[RAIN, water]) == 6144
 	assert int(t.weather_damage_by_type[RAIN, fire]) == 2048
 
 	weather_ball = tables.moves.index["weatherball"]
 	ball_sun = sun._replace(moves=sun.moves.at[0, 0, 0].set(weather_ball))
 	assert int(effective_move_type(ball_sun, weather_ball, t)) == fire
-	assert int(move_damage_bases(ball_sun, 0, weather_ball, KEY, FORCED, t)[0]) == 129
+	assert (
+		int(move_damage_bases(ball_sun, 0, weather_ball, KEY, FORCED, t, item_rows, False)[0])
+		== 129
+	)
 
 	thunder = tables.moves.index["thunder"]
 	hurricane = tables.moves.index["hurricane"]
@@ -129,9 +134,9 @@ def test_weather_modifier_accuracy_weather_ball_and_rock_special_defense(setup):
 		weather=jnp.int8(SAND),
 	)
 	flamethrower = tables.moves.index["flamethrower"]
-	assert int(move_damage_bases(rock_target, 0, flamethrower, KEY, FORCED, t)[0]) < int(
-		move_damage_bases(state, 0, flamethrower, KEY, FORCED, t)[0]
-	)
+	assert int(
+		move_damage_bases(rock_target, 0, flamethrower, KEY, FORCED, t, item_rows, False)[0]
+	) < int(move_damage_bases(state, 0, flamethrower, KEY, FORCED, t, item_rows, False)[0])
 
 
 def test_weather_residual_immunities_and_expiration_order(setup):
@@ -198,7 +203,9 @@ def test_spikes_layers_damage_and_toxic_spikes_switch_rules(setup):
 	tables, t, state = setup
 	spikes_move = tables.moves.index["spikes"]
 	for expected in (1, 2, 3, 3):
-		state = apply_move_field_effects(state, 0, spikes_move, True, True, True, KEY, FORCED, t)
+		state = apply_move_field_effects(
+			state, 0, spikes_move, True, True, True, KEY, FORCED, t, gather_active_items(state, t)
+		)
 		assert int(state.hazards[1, SPIKES]) == expected
 
 	for layers, expected_hp in ((1, 140), (2, 134), (3, 120)):
@@ -211,7 +218,9 @@ def test_spikes_layers_damage_and_toxic_spikes_switch_rules(setup):
 
 	toxic_move = tables.moves.index["toxicspikes"]
 	state = state._replace(hazards=state.hazards.at[1, TOXIC_SPIKES].set(2))
-	state = apply_move_field_effects(state, 0, toxic_move, True, True, True, KEY, FORCED, t)
+	state = apply_move_field_effects(
+		state, 0, toxic_move, True, True, True, KEY, FORCED, t, gather_active_items(state, t)
+	)
 	assert int(state.hazards[1, TOXIC_SPIKES]) == 2
 	poison = tables.types.index["poison"]
 	poison_switch = state._replace(

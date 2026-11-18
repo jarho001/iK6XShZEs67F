@@ -31,7 +31,17 @@ def test_fixtures(fixture):
 @pytest.mark.large
 @pytest.mark.parametrize(
 	"name",
-	["phase1", "status", "boosts", "secondaries", "effects2", "field", "turns", "resumable"],
+	[
+		"phase1",
+		"status",
+		"boosts",
+		"secondaries",
+		"effects2",
+		"field",
+		"turns",
+		"resumable",
+		"items",
+	],
 )
 def test_large_recording(name):
 	path = ROOT / f"work/diff/{name}.jsonl.gz"

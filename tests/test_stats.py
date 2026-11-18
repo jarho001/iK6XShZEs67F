@@ -1,5 +1,8 @@
 import json
 
+import jax.numpy as jnp
+
+from pokejax import stats
 from pokejax.stats import (
 	DEFAULT_POOL,
 	count_battle_summary,
@@ -9,6 +12,7 @@ from pokejax.stats import (
 	two_proportion_test,
 	welch_mean_test,
 )
+from pokejax.tables import load_tables
 
 
 def event(
@@ -60,7 +64,43 @@ def test_decision_trace_counting_rules():
 		"switches": [0, 1],
 		"struggle": 1,
 		"confusion": 2,
+		"itemsConsumed": {},
 	}
+
+
+def test_engine_item_counts_keep_team_pair_offsets_across_batches(monkeypatch):
+	team_pairs = [
+		[[{"item": "whiteherb"}], [{"item": ""}]],
+		[[{"item": "sitrusberry"}], [{"item": ""}]],
+	]
+	monkeypatch.setattr(stats, "BATTLE_BATCH", 1)
+	monkeypatch.setattr(
+		stats,
+		"_teams_for_pairs",
+		lambda pairs, _tables: {"species": jnp.zeros((len(pairs), 2, 6), jnp.int16)},
+	)
+
+	def rollout(chunk, _keys, _engine_tables):
+		batch = chunk["species"].shape[0]
+		consumed = jnp.zeros((1, batch, 2, 6), jnp.bool_).at[0, :, 0, 0].set(True)
+		return (
+			jnp.zeros((batch,), jnp.int8),
+			jnp.ones((batch,), jnp.int32),
+			jnp.ones((batch,), jnp.int32),
+			jnp.full((1, batch, 2), -1, jnp.int16),
+			jnp.zeros((1, batch, 2), jnp.bool_),
+			jnp.zeros((1, batch, 2, 6), jnp.int8),
+			jnp.zeros((1, batch, 2, 6), jnp.bool_),
+			jnp.zeros((1, batch, 2), jnp.bool_),
+			consumed,
+		)
+
+	monkeypatch.setattr(stats, "_rollout_batch", rollout)
+	result = stats.engine_summaries(
+		{"teamPairs": team_pairs, "count": 2}, seed=1, tables=load_tables()
+	)
+	assert result["battles"][0]["itemsConsumed"] == {"whiteherb": 1}
+	assert result["battles"][1]["itemsConsumed"] == {"sitrusberry": 1}
 
 
 def test_statistical_functions_on_known_samples():

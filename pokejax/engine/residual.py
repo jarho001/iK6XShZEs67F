@@ -8,6 +8,12 @@ from pokejax.mechanics.stat_stage import scale_stat_stage
 
 from .actions import SIDES
 from .field import weather_residual
+from .items import (
+	apply_active_stat_modifiers,
+	gather_active_items,
+	residual_item_hook,
+	update_active_items,
+)
 from .randomness import ORDER, RESIDUAL_ORDER, integer
 from .state import (
 	BOOST_SPE,
@@ -166,6 +172,10 @@ def _end_roost(state, enabled, key, forced, tables):
 	return state._replace(types=types, volatiles=volatiles)
 
 
+def _item_residual(state, enabled, key, forced, tables, item_rows, order):
+	return residual_item_hook(state, enabled, key, forced, tables, item_rows, order)
+
+
 # Rows are (Showdown order, suborder, name, scope, handler), sorted as the
 # pinned Gen 5 event dispatcher sorts them. Empty handlers are reserved for
 # pool mechanics added by later tasks; their rows establish the complete order.
@@ -180,7 +190,7 @@ RESIDUAL_TABLE = (
 	ResidualRow(5, 1, "Pledge field effects", "field", None),
 	ResidualRow(5, 2, "Grassy Terrain", "field", None),
 	ResidualRow(5, 3, "Hydration, Shed Skin and other abilities", "pokemon", None),
-	ResidualRow(5, 4, "Leftovers and Black Sludge", "pokemon", None),
+	ResidualRow(5, 4, "Leftovers and Black Sludge", "pokemon", _item_residual),
 	ResidualRow(6, 2, "Aqua Ring", "pokemon", None),
 	ResidualRow(7, 2, "Ingrain", "pokemon", None),
 	ResidualRow(8, 2, "Leech Seed", "pokemon", None),
@@ -203,8 +213,8 @@ RESIDUAL_TABLE = (
 	ResidualRow(26, 1, "Side condition timers", "side", None),
 	ResidualRow(27, 1, "Field condition timers", "field", None),
 	ResidualRow(28, 2, "Residual abilities", "pokemon", None),
-	ResidualRow(28, 3, "Residual item effects", "pokemon", None),
-	ResidualRow(29, 0, "Ability and item end-of-turn hooks", "pokemon", None),
+	ResidualRow(28, 3, "Toxic Orb and Flame Orb", "pokemon", _item_residual),
+	ResidualRow(29, 0, "Ability and item end-of-turn hooks", "pokemon", _item_residual),
 )
 
 
@@ -228,10 +238,12 @@ def _resolve_handler_faint(state, damage, enabled):
 def residual(state, enabled, key, forced, tables):
 	"""Run the full residual event, then resolve its queued faint messages."""
 	residual_enabled = enabled & (state.winner == ONGOING)
+	item_rows = gather_active_items(state, tables)
 	speed = scale_stat_stage(
 		state.stats[SIDES, state.active, SPE].astype(jnp.int32),
 		state.boosts[:, BOOST_SPE].astype(jnp.int32),
 	)
+	speed = apply_active_stat_modifiers(speed, SPE, item_rows)
 	speed = jnp.where(state.status[SIDES, state.active] == PARALYSIS, speed // 4, speed)
 	for row in RESIDUAL_TABLE:
 		active = residual_enabled & (state.winner == ONGOING)
@@ -240,13 +252,19 @@ def residual(state, enabled, key, forced, tables):
 		if row.scope in ("field", "global"):
 			state = row.handler(state, active, key, forced, tables)
 		elif row.scope == "pokemon":
-			context = {0: 2, 9: 6, 10: 7, 13: 8}[row.order]
+			context = {0: 2, 5: 2, 9: 6, 10: 7, 13: 8, 28: 2, 29: 2}[row.order]
 			tie_first = _residual_tie_first(key, forced, context)
 			first = jnp.where(speed[0] == speed[1], tie_first, jnp.where(speed[0] > speed[1], 0, 1))
 			for side in (first, 1 - first):
 				handler_enabled = residual_enabled & (state.winner == ONGOING) & (SIDES == side)
-				state, damage = row.handler(state, handler_enabled, key, forced, tables)
+				if row.handler is _item_residual:
+					state, damage = row.handler(
+						state, handler_enabled, key, forced, tables, item_rows, row.order
+					)
+				else:
+					state, damage = row.handler(state, handler_enabled, key, forced, tables)
 				state = _resolve_handler_faint(state, damage, handler_enabled)
+	state = update_active_items(state, residual_enabled, item_rows)
 	return state._replace(
 		boosts=jnp.where((state.hp[SIDES, state.active] > 0)[:, None], state.boosts, 0),
 	)

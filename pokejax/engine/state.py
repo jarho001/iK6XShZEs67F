@@ -34,6 +34,7 @@ NUM_BOOSTS = 7
 	LOCKED_TRUE_DURATION,
 ) = range(18)
 SMACKDOWN = 18
+CHOICE_MOVE = 19
 VOLATILE_NAMES = (
 	"confusion",
 	"flinch",
@@ -58,8 +59,9 @@ VOLATILE_NAMES = (
 	"freezeshock",
 	"iceburn",
 	"smackdown",
+	"choicelock",
 )
-NUM_VOLATILES = 19
+NUM_VOLATILES = 20
 HP, ATK, DEF, SPA, SPD, SPE = range(NUM_STATS)
 BOOST_ATK, BOOST_DEF, BOOST_SPA, BOOST_SPD, BOOST_SPE, ACCURACY, EVASION = range(NUM_BOOSTS)
 EMPTY = 0
@@ -109,7 +111,11 @@ class BattleState(NamedTuple):
 	pp: jax.Array
 	max_pp: jax.Array
 	ability: jax.Array
-	item: jax.Array
+	item: jax.Array  # int16 [2, 6], current held item ID; zero means none
+	item_consumed: jax.Array  # bool [2, 6], removed by a consumable effect
+	item_knocked_off: jax.Array  # bool [2, 6], removed by Knock Off or another takeItem
+	item_revealed: jax.Array  # bool [2, 6], protocol has publicly named the item
+	item_public: jax.Array  # int16 [2, 6], last item ID named in the public protocol
 	nature: jax.Array
 	gender: jax.Array
 	evs: jax.Array

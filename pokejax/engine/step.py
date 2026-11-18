@@ -10,11 +10,19 @@ from .actions import SIDES
 from .boosts import apply_boosts
 from .damage_effects import SELF_FAINT_ALWAYS, apply_damage_effects
 from .field import apply_move_field_effects, apply_switch_hazards_ordered
+from .items import (
+	apply_after_move_items,
+	clear_broken_choice_locks,
+	gather_active_items,
+	gather_active_update_hooks,
+	update_active_items,
+)
 from .order import action_order
 from .randomness import random_bits
 from .residual import residual
 from .secondaries import apply_secondaries
 from .state import (
+	CHOICE_MOVE,
 	FAKE_OUT_USED,
 	LOCKED_MOVE,
 	LOCKED_REMAINING,
@@ -62,6 +70,7 @@ def _move(
 	tables,
 ):
 	user, foe = state.active[side], 1 - side
+	item_rows = gather_active_items(state, tables)
 	enabled &= (state.hp[side, user] > 0) & jnp.any(state.hp[foe] > 0) & (state.winner == ONGOING)
 	charge_canceled = charged_at_start & (state.volatiles[side, TWO_TURN_MOVE] == 0)
 	enabled &= ~charge_canceled
@@ -79,6 +88,16 @@ def _move(
 	)
 	state, enabled = before_move(state, side, move, enabled, key, forced, tables, recharge=recharge)
 	move_enabled = enabled
+	choice_start = move_enabled & item_rows.choice[side]
+	choice_start &= state.volatiles[side, CHOICE_MOVE] == 0
+	choice_start &= ~continuation & ~recharge
+	choice_start &= move != 0
+	state = set_active_volatile(
+		state,
+		side,
+		CHOICE_MOVE,
+		jnp.where(choice_start, move, state.volatiles[side, CHOICE_MOVE]),
+	)
 	struggle = move == tables.struggle_id
 	slot = jnp.minimum(action, 3)
 	pp = state.pp[side, user, slot].astype(jnp.int32)
@@ -127,7 +146,7 @@ def _move(
 	state = clear_broken_guards(state, side, breaks_guard)
 	blocked = target_is_blocked(state, side, move, tables)
 	state, success, hit, hit_landed, field_hit = apply_damage_effects(
-		state, side, move, attack_allowed, blocked, key, forced, tables
+		state, side, move, attack_allowed, blocked, key, forced, tables, item_rows
 	)
 	state = apply_move(state, side, move, attack_allowed, hit, key, forced, tables)
 	state = apply_boosts(state, side, move, attack_allowed, hit, success, tables)
@@ -135,9 +154,11 @@ def _move(
 	state = apply_secondaries(state, side, move, hit_landed[0], hit_landed[1:], key, forced, tables)
 	state = after_hit(state, side, move, attack_allowed & success, tables)
 	state = apply_move_field_effects(
-		state, side, move, attack_allowed, field_hit, hit, key, forced, tables
+		state, side, move, attack_allowed, field_hit, hit, key, forced, tables, item_rows
 	)
 	state = apply_move_volatiles(state, side, move, attack_allowed & field_hit, key, forced, tables)
+	user_alive_before_after_move_item = state.hp[side, user] > 0
+	state = apply_after_move_items(state, side, move, move_enabled, hit, item_rows, tables)
 	lock_continuation = locked & move_enabled
 	lock_remaining = state.volatiles[side, LOCKED_REMAINING]
 	lock_ends = lock_continuation & (lock_remaining == 1)
@@ -161,13 +182,21 @@ def _move(
 		jnp.where(lock_ends, 0, state.volatiles[side, LOCKED_TRUE_DURATION]),
 	)
 	state = confuse(state, side, confusion, key, forced)
+	state = clear_broken_choice_locks(state, tables)
 	user_alive = state.hp[side, user] > 0
 	target_alive = state.hp[foe, state.active[foe]] > 0
 	bench_alive = (state.hp[side] > 0) & (jnp.arange(TEAM_SLOTS) != state.active[side])
 	pivot = enabled & tables.move_self_switch[move] & hit & user_alive
 	pivot &= jnp.any(bench_alive)
-	drag = enabled & tables.move_force_switch[move] & hit & user_alive & target_alive
+	drag = (
+		enabled
+		& tables.move_force_switch[move]
+		& hit
+		& user_alive_before_after_move_item
+		& target_alive
+	)
 	state, dragged = drag_in(state, foe, drag, key, forced, tables)
+	state = update_active_items(state, started, gather_active_update_hooks(state, tables))
 	hp = state.hp.astype(jnp.int32)
 	boosts = jnp.where((hp[SIDES, state.active] > 0)[:, None], state.boosts, 0)
 	return state._replace(boosts=boosts), pivot, dragged
@@ -220,8 +249,20 @@ def step(state, actions, key, forced, engine_tables):
 	moves = jnp.where(locked > 0, locked, moves)
 	moves = jnp.where(recharge, 0, moves)
 	usable = (state.moves[SIDES, state.active] != 0) & (state.pp[SIDES, state.active] > 0)
+	choice_move = state.volatiles[:, CHOICE_MOVE]
+	item_rows = gather_active_items(state, t)
+	choice_item = item_rows.choice
+	choice_active = choice_item & (choice_move > 0)
+	choice_active &= jnp.any(state.moves[SIDES, state.active] == choice_move[:, None], axis=1)
+	choice_has_pp = jnp.any(
+		(state.moves[SIDES, state.active] == choice_move[:, None])
+		& (state.pp[SIDES, state.active] > 0),
+		axis=1,
+	)
+	choice_struggle = choice_active & ~choice_has_pp & ~forced_move
 	moves = jnp.where(jnp.any(usable, axis=1) | forced_move, moves, t.struggle_id)
-	first = action_order(state, actions, moves, False, key, forced, t)
+	moves = jnp.where(choice_struggle, t.struggle_id, moves)
+	state, first = action_order(state, actions, moves, False, key, forced, item_rows, t)
 	pending = (requests == MOVE) & (actions < 4) & ongoing
 	state = state._replace(
 		turn_stage=jnp.where(start_turn, TURN_MOVES, state.turn_stage).astype(
@@ -239,7 +280,11 @@ def step(state, actions, key, forced, engine_tables):
 	# switch-in paths. Switches happen before the saved moves, as in Showdown.
 	switch_mask = (actions >= 4) & (requests != NONE) & ongoing
 	state = switch_actions(state, actions, switch_mask)
-	state = apply_switch_hazards_ordered(state, switch_mask, jnp.any(switch_mask), key, forced, t)
+	item_rows = gather_active_items(state, t)
+	state = apply_switch_hazards_ordered(
+		state, switch_mask, jnp.any(switch_mask), key, forced, item_rows, t
+	)
+	state = update_active_items(state, jnp.any(switch_mask), item_rows)
 
 	# The two statically traced move slots are always present. A pause masks the
 	# second slot when the first move asks its user to switch; its queue remains in

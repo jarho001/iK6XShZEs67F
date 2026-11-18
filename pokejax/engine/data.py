@@ -9,6 +9,7 @@ import numpy as np
 from pokejax.support import CONFUSION_MOVES, SECONDARY_MOVES
 from pokejax.tables import Tables
 
+from .items import build_item_hook_table
 from .state import (
 	BURN,
 	FREEZE,
@@ -113,6 +114,10 @@ class EngineTables(NamedTuple):
 	move_magnitude: jax.Array
 	move_self_switch: jax.Array
 	move_force_switch: jax.Array
+	move_contact: jax.Array
+	species_nfe: jax.Array
+	species_num: jax.Array
+	item_hooks: object
 
 
 def build_engine_tables(tables: Tables) -> EngineTables:
@@ -405,6 +410,10 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 					np.asarray(moves.ids),
 					("roar", "whirlwind", "dragontail", "circlethrow"),
 				),
+				moves.flags[:, moves.flag_names.index("contact")],
+				tables.species.nfe,
+				tables.species.num,
 			),
-		)
+		),
+		item_hooks=build_item_hook_table(tables),
 	)

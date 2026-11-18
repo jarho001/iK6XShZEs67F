@@ -5,6 +5,7 @@ import jax.numpy as jnp
 from pokejax.mechanics.stat_stage import scale_stat_stage
 
 from .actions import SIDES
+from .items import apply_active_stat_modifiers
 from .randomness import SWITCH_HANDLER_ORDER, WEATHER_CHANGE_ORDER, WEATHER_ORDER, first_side
 from .state import (
 	BOOST_SPE,
@@ -41,7 +42,9 @@ def weather_modify(value, modifier):
 	return (value * modifier + 2047) // 4096
 
 
-def apply_move_field_effects(state, side, move, enabled, field_hit, hit, key, forced, tables):
+def apply_move_field_effects(
+	state, side, move, enabled, field_hit, hit, key, forced, tables, item_rows
+):
 	"""Apply weather, hazards, and Rapid Spin through per-move table columns."""
 	apply = enabled & field_hit
 	weather = tables.move_weather[move].astype(state.weather.dtype)
@@ -49,7 +52,13 @@ def apply_move_field_effects(state, side, move, enabled, field_hit, hit, key, fo
 	# Field.setWeather emits WeatherChange even when the weather field was clear.
 	_ = first_side(key, forced, WEATHER_CHANGE_ORDER)
 	weather_state = jnp.where(weather_change, weather, state.weather)
-	weather_turns = jnp.where(weather_change, WEATHER_DURATION, state.weather_turns)
+	weather_rock = item_rows.weather_kind[side] == weather
+	duration = jnp.where(
+		weather_rock, item_rows.weather_duration[side].astype(jnp.int32), WEATHER_DURATION
+	)
+	weather_turns = jnp.where(weather_change, duration, state.weather_turns).astype(
+		state.weather_turns.dtype
+	)
 	state = state._replace(weather=weather_state, weather_turns=weather_turns)
 
 	foe = 1 - side
@@ -168,13 +177,14 @@ def apply_switch_hazards(state, side, slot, enabled, tables):
 	return _apply_switch_hazards_sides(state, slots, enabled_sides, tables)
 
 
-def apply_switch_hazards_ordered(state, switchers, enabled, key, forced, tables):
+def apply_switch_hazards_ordered(state, switchers, enabled, key, forced, item_rows, tables):
 	"""Run grouped SwitchIn handlers in Showdown Speed and tie order."""
 	sides = SIDES
 	speed = scale_stat_stage(
 		state.stats[sides, state.active, SPE].astype(jnp.int32),
 		state.boosts[:, BOOST_SPE].astype(jnp.int32),
 	)
+	speed = apply_active_stat_modifiers(speed, SPE, item_rows)
 	speed = jnp.where(state.status[sides, state.active] == PARALYSIS, speed // 4, speed)
 	tie_first = first_side(key, forced, SWITCH_HANDLER_ORDER)
 	first = jnp.where(speed[0] == speed[1], tie_first, jnp.where(speed[0] > speed[1], 0, 1))

@@ -21,6 +21,7 @@ from pokejax.engine.data import build_engine_tables
 from pokejax.engine.randomness import UNFORCED, forced_from_records
 from pokejax.engine.reset import check_teams, reset, teams_from_pool
 from pokejax.engine.state import (
+	CHOICE_MOVE,
 	CONFUSION,
 	ENDURE,
 	FLINCH,
@@ -79,6 +80,7 @@ def comparable(state, tables):
 	)
 	charge_volatiles = state.volatiles[..., TWO_TURN_MOVE, None] == tables.move_turn_volatile_ids
 	smackdown = state.volatiles[..., SMACKDOWN] > 0
+	choice_lock = state.volatiles[..., CHOICE_MOVE] > 0
 	return {
 		"active": state.active,
 		"legalActions": jax.vmap(legal_actions, in_axes=(0, None))(state, tables),
@@ -90,11 +92,14 @@ def comparable(state, tables):
 			jnp.arange(state.active.shape[0])[:, None], jnp.arange(2), state.active
 		],
 		"item": state.item,
+		"itemConsumed": state.item_consumed,
+		"itemKnockedOff": state.item_knocked_off,
 		"ability": state.ability,
 		"ended": state.winner != ONGOING,
 		"boosts": state.boosts,
 		"volatiles": jnp.concatenate(
-			(base_volatiles, charge_volatiles, smackdown[..., None]), axis=-1
+			(base_volatiles, charge_volatiles, smackdown[..., None], choice_lock[..., None]),
+			axis=-1,
 		),
 		"sideConditions": jnp.stack(
 			(
@@ -152,6 +157,12 @@ def recorded_state(snapshot, tables):
 				[tables.items.index.get(m["item"], -1) if m["item"] else 0 for m in team]
 				for team in members
 			]
+		),
+		"itemConsumed": np.asarray(
+			[[member.get("itemConsumed", False) for member in team] for team in members]
+		),
+		"itemKnockedOff": np.asarray(
+			[[member.get("itemKnockedOff", False) for member in team] for team in members]
 		),
 		"ability": np.asarray(
 			[[tables.abilities.index.get(m["ability"], -1) for m in team] for team in members]

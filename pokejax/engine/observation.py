@@ -54,6 +54,9 @@ class OwnObservation(NamedTuple):
 	recharging: jax.Array  # float32 scalar
 	locked: jax.Array  # float32 scalar; public locked-move state
 	trapped: jax.Array  # float32 scalar; source must still be active
+	item: jax.Array  # int16 [6], current held item IDs
+	item_consumed: jax.Array  # bool [6]
+	item_knocked_off: jax.Array  # bool [6]
 
 
 class OpponentObservation(NamedTuple):
@@ -72,6 +75,10 @@ class OpponentObservation(NamedTuple):
 	recharging: jax.Array  # float32 scalar
 	locked: jax.Array  # float32 scalar; public locked-move state
 	trapped: jax.Array  # float32 scalar; source must still be active
+	item: jax.Array  # int16 [6], revealed opponent item IDs; zero while hidden
+	item_revealed: jax.Array  # float32 [6], protocol has named the item
+	item_consumed: jax.Array  # float32 [6], visible after announced consumption
+	item_knocked_off: jax.Array  # float32 [6], visible after announced removal
 
 
 class Observation(NamedTuple):
@@ -125,6 +132,9 @@ def observe(state, side, engine_tables) -> Observation:
 		f(state.boosts[side]) / 6,
 		f(state.volatiles[side, CONFUSION] > 0),
 		*own_turn_state,
+		state.item[side],
+		state.item_consumed[side],
+		state.item_knocked_off[side],
 	)
 	# A public rank selects one private slot without exposing the slot itself.
 	ranks = jnp.arange(1, TEAM_SLOTS + 1)
@@ -136,6 +146,7 @@ def observe(state, side, engine_tables) -> Observation:
 	maximum = jnp.maximum(state.stats[foe, slots, 0].astype(jnp.int32), 1)
 	percent = (100 * hp + maximum - 1) // maximum
 	percent = jnp.where(hp < maximum, jnp.minimum(percent, 99), percent)
+	item_revealed = seen & state.item_revealed[foe, slots]
 	moves = jnp.where(state.revealed_moves[foe, slots] != 0, state.moves[foe, slots], 0)
 	# Sorting by -id puts padding last; reverse sign restores descending IDs.
 	moves = -jnp.sort(-moves, axis=-1)
@@ -152,6 +163,10 @@ def observe(state, side, engine_tables) -> Observation:
 		f(state.boosts[foe]) / 6,
 		f(state.volatiles[foe, CONFUSION] > 0),
 		*foe_turn_state,
+		jnp.where(item_revealed, state.item_public[foe, slots], 0).astype(jnp.int16),
+		f(item_revealed),
+		f(item_revealed & state.item_consumed[foe, slots]),
+		f(item_revealed & state.item_knocked_off[foe, slots]),
 	)
 	request = jnp.where(state.winner == ONGOING, state.request[side], NONE)
 	return Observation(

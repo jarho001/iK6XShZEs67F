@@ -10,7 +10,7 @@ Showdown commit: `1242c1e2d9763ba5b85d33f13aecb89bae19ae3d`
 | --- | ---: | ---: | ---: |
 | Moves | 223 | 170 | 82.2% |
 | Abilities | 126 | 0 | 0.0% |
-| Items | 44 | 0 | 0.0% |
+| Items | 44 | 44 | 100.0% |
 
 Fully supported teams: 0.0%
 
@@ -377,47 +377,47 @@ Fully supported teams: 0.0%
 
 | Id | Display name | Occurrences | Teams | Supported |
 | --- | --- | ---: | ---: | --- |
-| leftovers | Leftovers | 22954 | 94.9% | no |
-| lifeorb | Life Orb | 13658 | 79.1% | no |
-| choiceband | Choice Band | 4513 | 37.3% | no |
-| choicespecs | Choice Specs | 2658 | 23.9% | no |
-| blacksludge | Black Sludge | 2562 | 23.5% | no |
-| choicescarf | Choice Scarf | 2221 | 20.2% | no |
-| eviolite | Eviolite | 1400 | 13.2% | no |
-| toxicorb | Toxic Orb | 1359 | 13.0% | no |
-| flyinggem | Flying Gem | 1151 | 11.1% | no |
-| whiteherb | White Herb | 1055 | 10.3% | no |
-| rockyhelmet | Rocky Helmet | 938 | 8.9% | no |
-| lumberry | Lum Berry | 751 | 7.4% | no |
-| expertbelt | Expert Belt | 605 | 6.0% | no |
-| focussash | Focus Sash | 596 | 5.9% | no |
-| sitrusberry | Sitrus Berry | 546 | 5.4% | no |
-| silkscarf | Silk Scarf | 383 | 3.8% | no |
-| souldew | Soul Dew | 339 | 3.4% | no |
-| chestoberry | Chesto Berry | 308 | 3.1% | no |
-| blackglasses | Black Glasses | 251 | 2.5% | no |
-| custapberry | Custap Berry | 241 | 2.4% | no |
-| lightball | Light Ball | 185 | 1.9% | no |
-| thickclub | Thick Club | 181 | 1.8% | no |
-| damprock | Damp Rock | 169 | 1.7% | no |
-| stick | Stick | 145 | 1.4% | no |
-| fightinggem | Fighting Gem | 101 | 1.0% | no |
-| lustrousorb | Lustrous Orb | 93 | 0.9% | no |
-| griseousorb | Griseous Orb | 82 | 0.8% | no |
-| flameorb | Flame Orb | 61 | 0.6% | no |
-| ironplate | Iron Plate | 39 | 0.4% | no |
-| spookyplate | Spooky Plate | 37 | 0.4% | no |
-| skyplate | Sky Plate | 35 | 0.3% | no |
-| mindplate | Mind Plate | 34 | 0.3% | no |
-| dracoplate | Draco Plate | 33 | 0.3% | no |
-| splashplate | Splash Plate | 33 | 0.3% | no |
-| stoneplate | Stone Plate | 33 | 0.3% | no |
-| dreadplate | Dread Plate | 30 | 0.3% | no |
-| earthplate | Earth Plate | 30 | 0.3% | no |
-| fistplate | Fist Plate | 30 | 0.3% | no |
-| meadowplate | Meadow Plate | 30 | 0.3% | no |
-| insectplate | Insect Plate | 29 | 0.3% | no |
-| icicleplate | Icicle Plate | 28 | 0.3% | no |
-| toxicplate | Toxic Plate | 27 | 0.3% | no |
-| flameplate | Flame Plate | 26 | 0.3% | no |
-| zapplate | Zap Plate | 20 | 0.2% | no |
+| leftovers | Leftovers | 22954 | 94.9% | yes |
+| lifeorb | Life Orb | 13658 | 79.1% | yes |
+| choiceband | Choice Band | 4513 | 37.3% | yes |
+| choicespecs | Choice Specs | 2658 | 23.9% | yes |
+| blacksludge | Black Sludge | 2562 | 23.5% | yes |
+| choicescarf | Choice Scarf | 2221 | 20.2% | yes |
+| eviolite | Eviolite | 1400 | 13.2% | yes |
+| toxicorb | Toxic Orb | 1359 | 13.0% | yes |
+| flyinggem | Flying Gem | 1151 | 11.1% | yes |
+| whiteherb | White Herb | 1055 | 10.3% | yes |
+| rockyhelmet | Rocky Helmet | 938 | 8.9% | yes |
+| lumberry | Lum Berry | 751 | 7.4% | yes |
+| expertbelt | Expert Belt | 605 | 6.0% | yes |
+| focussash | Focus Sash | 596 | 5.9% | yes |
+| sitrusberry | Sitrus Berry | 546 | 5.4% | yes |
+| silkscarf | Silk Scarf | 383 | 3.8% | yes |
+| souldew | Soul Dew | 339 | 3.4% | yes |
+| chestoberry | Chesto Berry | 308 | 3.1% | yes |
+| blackglasses | Black Glasses | 251 | 2.5% | yes |
+| custapberry | Custap Berry | 241 | 2.4% | yes |
+| lightball | Light Ball | 185 | 1.9% | yes |
+| thickclub | Thick Club | 181 | 1.8% | yes |
+| damprock | Damp Rock | 169 | 1.7% | yes |
+| stick | Stick | 145 | 1.4% | yes |
+| fightinggem | Fighting Gem | 101 | 1.0% | yes |
+| lustrousorb | Lustrous Orb | 93 | 0.9% | yes |
+| griseousorb | Griseous Orb | 82 | 0.8% | yes |
+| flameorb | Flame Orb | 61 | 0.6% | yes |
+| ironplate | Iron Plate | 39 | 0.4% | yes |
+| spookyplate | Spooky Plate | 37 | 0.4% | yes |
+| skyplate | Sky Plate | 35 | 0.3% | yes |
+| mindplate | Mind Plate | 34 | 0.3% | yes |
+| dracoplate | Draco Plate | 33 | 0.3% | yes |
+| splashplate | Splash Plate | 33 | 0.3% | yes |
+| stoneplate | Stone Plate | 33 | 0.3% | yes |
+| dreadplate | Dread Plate | 30 | 0.3% | yes |
+| earthplate | Earth Plate | 30 | 0.3% | yes |
+| fistplate | Fist Plate | 30 | 0.3% | yes |
+| meadowplate | Meadow Plate | 30 | 0.3% | yes |
+| insectplate | Insect Plate | 29 | 0.3% | yes |
+| icicleplate | Icicle Plate | 28 | 0.3% | yes |
+| toxicplate | Toxic Plate | 27 | 0.3% | yes |
+| flameplate | Flame Plate | 26 | 0.3% | yes |
+| zapplate | Zap Plate | 20 | 0.2% | yes |

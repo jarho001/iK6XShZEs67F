@@ -12,7 +12,7 @@ from pokejax import support
 def test_initial_support(synthetic_pool, tables):
 	assert {"tackle", "swordsdance", "closecombat", "bellydrum"} <= support.SUPPORTED_MOVES
 	assert support.SUPPORTED_ABILITIES == frozenset()
-	assert support.SUPPORTED_ITEMS == frozenset()
+	assert len(support.SUPPORTED_ITEMS) == 44
 	result = support.team_supported(synthetic_pool, tables)
 	assert result.shape == (3,)
 	assert result.dtype == np.bool_
@@ -29,6 +29,12 @@ def test_effects2_moves_match_allowed_file():
 	allowed = json.loads(Path("tests/fixtures/diff-effects2.allowed.json").read_text())
 	assert allowed["moves"] == sorted(allowed["moves"])
 	assert set(allowed["moves"]) <= support.SUPPORTED_MOVES
+
+
+def test_items_match_allowed_file():
+	allowed = json.loads(Path("tests/fixtures/diff-items.allowed.json").read_text())
+	assert allowed["items"] == sorted(support.SUPPORTED_ITEMS)
+	assert len(allowed["items"]) == 44
 
 
 @pytest.mark.parametrize(

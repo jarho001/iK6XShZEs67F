@@ -19,6 +19,8 @@
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-turns.allowed.json --out tests/fixtures/diff-turns.jsonl.gz
  * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-resumable.allowed.json --out work/diff/resumable.jsonl.gz
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-resumable.allowed.json --out tests/fixtures/diff-resumable.jsonl.gz
+ * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-items.allowed.json --out work/diff/items.jsonl.gz
+ * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-items.allowed.json --out tests/fixtures/diff-items.jsonl.gz
  *
  * JSONL schema v2: header {type, schemaVersion, showdownCommit, seed, count,
  * acceptedMoves, ...}; battle {type, index, seed (four uint16 words), policySeed,
@@ -31,7 +33,8 @@
  * sides: [{active: fixed slot 0..5, boosts: [atk,def,spa,spd,spe,accuracy,evasion],
  * request: "move"|"switch"|"none", legalActions: [nine bits], status,
  * statusCounter, types, item, ability, volatiles, sideConditions,
- * members: [{hp,maxhp,pp:[four slots],fainted,status,item,ability}]}],
+ * members: [{hp,maxhp,pp:[four slots],fainted,status,item,itemConsumed,
+ * itemKnockedOff,ability}]}],
  * weather, weatherTurns, pseudoWeather}. Conditions map ids to {layers, turns}.
  * Types and volatiles are null for fainted actives; all other fields are compared.
  * Active confusion also adds volatileCounters: {confusion: time}; absent counters
@@ -65,8 +68,8 @@
  *    EVERY target has zero handlers for that event, so iteration does nothing.
  * 2. runSwitch's allActive speed shuffle: this sets internal speedOrder solely
  *    for SwitchIn handler ordering (sim/battle.ts resolvePriority). Runtime checks
- *    allow only the independent sleep and toxic switch-in status handlers, with
- *    no hazards, items, abilities, or other SwitchIn handlers.
+ *    allow sleep/toxic status, hazards, Choice-item lock reset, and White Herb
+ *    when no negative boosts exist; these handlers have no order-sensitive effects.
  *    It is distinct from queue replacement order, which IS recorded as context 1.
  * There are no other exceptions during steps. Constructor draws precede the
  * initial snapshot and are reproducible from the recorded battle seed; this
@@ -103,8 +106,10 @@ const BOOSTS = ['atk', 'def', 'spa', 'spd', 'spe', 'accuracy', 'evasion'];
 const TURN_LIMIT = 1000; // Showdown's own Endless Battle Clause also caps at 1000.
 const EXCEPTIONS = [
 	'empty-eachEvent-Update',
+	'berry-eachEvent-Update',
 	'empty-eachEvent-BeforeTurn',
 	'empty-switchIn-order',
+	'benign-item-switchIn-order',
 	'equal-speed-runSwitch-insertion',
 	'same-side-residual-order',
 ];
@@ -188,6 +193,9 @@ function snapshot(battle, fixed) {
 				side.active[0].status === 'tox' ? side.active[0].statusState.stage ?? 0 : 0,
 			types: side.active[0].fainted ? null : side.active[0].getTypes().map(type => dex.toID(type)),
 			item: side.active[0].item, ability: side.active[0].ability,
+			itemConsumed: !side.active[0].item && Boolean(side.active[0].lastItem) &&
+				!side.active[0].itemKnockedOff,
+			itemKnockedOff: side.active[0].itemKnockedOff,
 			volatiles: side.active[0].fainted ? null : Object.keys(side.active[0].volatiles).sort(),
 			...(!side.active[0].fainted && side.active[0].volatiles.confusion ? {
 				volatileCounters: { confusion: side.active[0].volatiles.confusion.time },
@@ -199,7 +207,11 @@ function snapshot(battle, fixed) {
 			members: fixed[s].map(pokemon => ({
 				hp: pokemon.hp, maxhp: pokemon.maxhp,
 				pp: pokemon.moveSlots.map(move => move.pp), fainted: pokemon.fainted,
-				status: pokemon.status === 'fnt' ? '' : pokemon.status, item: pokemon.item, ability: pokemon.ability,
+				status: pokemon.status === 'fnt' ? '' : pokemon.status,
+				item: pokemon.item,
+				itemConsumed: !pokemon.item && Boolean(pokemon.lastItem) && !pokemon.itemKnockedOff,
+				itemKnockedOff: pokemon.itemKnockedOff,
+				ability: pokemon.ability,
 			})),
 		})),
 	};
@@ -245,7 +257,7 @@ function directCaller() {
 }
 
 function residualOrderOccurrence(order) {
-	if (order === false) return 2;
+	if (order === false || order === 5 || order === 28 || order === 29) return 2;
 	if (order === 9) return 6;
 	if (order === 10) return 7;
 	if (order === 13) return 8;
@@ -480,6 +492,7 @@ function instrument(battle, stats, fixedMembers) {
 				'brn', 'psn', 'tox', 'partiallytrapped', 'protect', 'endure', 'flinch', 'stall', 'lockedmove',
 				'mustrecharge', 'twoturnmove', 'fly', 'dig', 'bounce', 'dive', 'shadowforce',
 				'skullbash', 'skyattack', 'razorwind', 'solarbeam', 'freezeshock', 'iceburn',
+				'leftovers', 'blacksludge', 'toxicorb', 'flameorb', 'whiteherb', 'gem',
 			].includes(h.effect.id)),
 			`Unexpected residual tie: ${tied.map(h => `${h.effect.id}:${h.effectHolder.side.n}`)}`);
 			const sides = new Set(tied.map(h => h.effectHolder.side.n));
@@ -494,24 +507,41 @@ function instrument(battle, stats, fixedMembers) {
 				'Nonempty WeatherChange handlers: cannot ignore order');
 			rule = OUTCOME_RULES.find(row => row.method === 'shuffle' && row.matches(scope));
 		} else if (scope?.kind === 'eachEvent' && ['Update', 'BeforeTurn'].includes(scope.event)) {
-			assert(tied.every(p => battle.findEventHandlers(p, scope.event).length === 0),
-				`Nonempty ${scope.event} handlers: cannot ignore order`);
-			exception = `empty-eachEvent-${scope.event}`;
+			const handlers = tied.map(p => battle.findEventHandlers(p, scope.event));
+			const itemUpdatesOnly = scope.event === 'Update' && handlers.flat().every(h =>
+				['lumberry', 'sitrusberry', 'chestoberry'].includes(h.effect?.id));
+			assert(handlers.every(list => list.length === 0) || itemUpdatesOnly,
+				`Nonempty ${scope.event} handlers: cannot ignore order ${JSON.stringify(
+					handlers.map(list => list.map(h => h.effect?.id ?? '<unknown>'))
+				)}`);
+			exception = handlers.some(list => list.length) ? 'berry-eachEvent-Update' :
+				`empty-eachEvent-${scope.event}`;
 		} else if (scope?.kind === 'runSwitch') {
-			assert(tied.every(p => p.ability === 'noability' && !p.item &&
-				battle.findPokemonEventHandlers(p, 'onSwitchIn').every(h => ['slp', 'tox'].includes(h.effect.id)) &&
-				battle.findPokemonEventHandlers(p, 'onAnySwitchIn').length === 0 &&
+			const switchHandlers = tied.map(p => ({
+				item: p.item,
+				ability: p.ability,
+				onSwitchIn: battle.findPokemonEventHandlers(p, 'onSwitchIn').map(h => h.effect.id),
+				onAnySwitchIn: battle.findPokemonEventHandlers(p, 'onAnySwitchIn').map(h => h.effect.id),
+			}));
+			assert(tied.every(p => p.ability === 'noability' &&
+				battle.findPokemonEventHandlers(p, 'onSwitchIn').every(h => [
+					'slp', 'tox', 'choiceband', 'choicespecs', 'choicescarf',
+				].includes(h.effect.id)) &&
+				battle.findPokemonEventHandlers(p, 'onAnySwitchIn').every(h => h.effect.id === 'whiteherb') &&
+				(p.item !== 'whiteherb' || Object.values(p.boosts).every(boost => boost >= 0)) &&
 				battle.findSideEventHandlers(p.side, 'onSideSwitchIn', undefined, p).length === 0 &&
 				battle.findSideEventHandlers(p.side, 'onSwitchIn', undefined, p)
 					.every(h => ['spikes', 'toxicspikes'].includes(h.effect.id)) &&
 				battle.findFieldEventHandlers(battle.field, 'onFieldSwitchIn', undefined, p).length === 0 &&
 				battle.findFieldEventHandlers(battle.field, 'onSwitchIn', undefined, p).length === 0 &&
 				battle.findBattleEventHandlers('onSwitchIn', undefined, p).length === 0),
-				'Nonempty SwitchIn handlers: cannot ignore speedOrder');
+				`Nonempty SwitchIn handlers: cannot ignore speedOrder ${JSON.stringify(switchHandlers)}`);
 			const hasHazards = tied.some(p =>
 				battle.findSideEventHandlers(p.side, 'onSwitchIn', undefined, p).length > 0);
 			if (hasHazards) {
 				rule = OUTCOME_RULES.find(row => row.method === 'shuffle' && row.matches(scope));
+			} else if (tied.some(p => p.item)) {
+				exception = 'benign-item-switchIn-order';
 			} else {
 				exception = 'empty-switchIn-order';
 			}

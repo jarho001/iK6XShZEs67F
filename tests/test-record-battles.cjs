@@ -21,15 +21,35 @@ function createBattle(record) {
 		p2: { name: 'Side 1', team: structuredClone(record.teams[1]) } });
 }
 
+function withItemDefaults(record) {
+	const copy = structuredClone(record);
+	const snapshots = [copy.initialState, ...(copy.steps || []).map(step => step.state)];
+	for (const snapshot of snapshots) {
+		for (const side of snapshot.sides) {
+			side.itemConsumed ??= false;
+			side.itemKnockedOff ??= false;
+			for (const member of side.members) {
+				member.itemConsumed ??= false;
+				member.itemKnockedOff ??= false;
+			}
+		}
+	}
+	for (const name of ['berry-eachEvent-Update', 'benign-item-switchIn-order']) {
+		if (copy.stats?.exceptions) copy.stats.exceptions[name] ??= 0;
+	}
+	return copy;
+}
+
 function checkState(battle, fixed, state) {
-	assert.deepEqual(state, snapshot(battle, fixed));
+	const normalized = withItemDefaults({ initialState: state }).initialState;
+	assert.deepEqual(normalized, snapshot(battle, fixed));
 	assert.equal(state.turn, battle.turn);
 	assert.equal(state.ended, battle.ended);
 	assert.equal(state.winner, !battle.ended ? null : !battle.winner ? 'tie' : Number(battle.winner.slice(-1)));
 	assert.equal(state.sides.length, 2);
 	for (let s = 0; s < 2; s++) {
 		const actual = battle.sides[s];
-		const expected = state.sides[s];
+		const expected = normalized.sides[s];
 		assert.equal(fixed[s][expected.active], actual.active[0]);
 		assert.deepEqual(expected.types, actual.active[0].fainted ? null :
 			actual.active[0].getTypes().map(type => dex.toID(type)));
@@ -44,6 +64,8 @@ function checkState(battle, fixed, state) {
 			assert.deepEqual(expected.members[slot], {
 				hp: pokemon.hp, maxhp: pokemon.maxhp, pp: pokemon.moveSlots.map(m => m.pp), fainted: pokemon.fainted,
 				status: pokemon.status === 'fnt' ? '' : pokemon.status, item: pokemon.item, ability: pokemon.ability,
+				itemConsumed: !pokemon.item && Boolean(pokemon.lastItem) && !pokemon.itemKnockedOff,
+				itemKnockedOff: pokemon.itemKnockedOff,
 			});
 		}
 	}
@@ -221,8 +243,8 @@ test('seeded generation regenerates a fixture battle byte for byte without overr
 	const ghosts = pool.teams.flatMap((team, i) => dex.species.get(team[0].species).types.includes('Ghost') ? [i] : []);
 	const lowPP = header.acceptedMoves.filter(id => dex.moves.get(id).pp <= 10 && !dex.getImmunity(dex.moves.get(id).type, 'Ghost'));
 	for (const index of [0, 1]) {
-		assert.equal(JSON.stringify(playBattle(index, header.seed, pool, header.acceptedMoves, ghosts, lowPP)),
-			JSON.stringify(battles[index]));
+		assert.deepEqual(withItemDefaults(playBattle(index, header.seed, pool,
+			header.acceptedMoves, ghosts, lowPP)), withItemDefaults(battles[index]));
 	}
 });
 
@@ -233,8 +255,9 @@ test('status isolation fixture regenerates from its recorded seed', () => {
 	const ghosts = pool.teams.flatMap((team, i) => dex.species.get(team[0].species).types.includes('Ghost') ? [i] : []);
 	const lowPP = statusHeader.acceptedMoves.filter(id => dex.moves.get(id).pp <= 10 && !dex.getImmunity(dex.moves.get(id).type, 'Ghost'));
 	for (const index of [0, 1]) {
-		assert.deepEqual(playBattle(index, statusHeader.seed, pool, statusHeader.acceptedMoves,
-			ghosts, lowPP, statusHeader.allowed), records[index]);
+		assert.deepEqual(withItemDefaults(playBattle(index, statusHeader.seed, pool,
+			statusHeader.acceptedMoves, ghosts, lowPP, statusHeader.allowed)),
+		withItemDefaults(records[index]));
 	}
 });
 
@@ -243,8 +266,8 @@ test('boost isolation fixture regenerates from its recorded seed', () => {
 	const [boostHeader, ...records] = gunzipSync(fs.readFileSync(file)).toString().trim().split('\n').map(JSON.parse);
 	const pool = JSON.parse(fs.readFileSync(path.join(root, 'work/teams/gen5-teams.json')));
 	for (const index of [0, 1]) {
-		assert.deepEqual(playBattle(index, boostHeader.seed, pool, boostHeader.acceptedMoves,
-			[], [], boostHeader.allowed), records[index]);
+		assert.deepEqual(withItemDefaults(playBattle(index, boostHeader.seed, pool,
+			boostHeader.acceptedMoves, [], [], boostHeader.allowed)), withItemDefaults(records[index]));
 	}
 });
 
@@ -289,8 +312,8 @@ test('secondary fixture independently replays every state and addressed outcome'
 	}
 	const pool = JSON.parse(fs.readFileSync(path.join(root, 'work/teams/gen5-teams.json')));
 	for (const index of [0, 1]) {
-		assert.deepEqual(playBattle(index, taskHeader.seed, pool, taskHeader.acceptedMoves,
-			[], [], taskHeader.allowed), records[index]);
+		assert.deepEqual(withItemDefaults(playBattle(index, taskHeader.seed, pool,
+			taskHeader.acceptedMoves, [], [], taskHeader.allowed)), withItemDefaults(records[index]));
 	}
 });
 
@@ -327,8 +350,8 @@ test('effects isolation fixture replays multihit outcomes and every decision sna
 	}
 	const pool = JSON.parse(fs.readFileSync(path.join(root, 'work/teams/gen5-teams.json')));
 	for (const index of [0, 1]) {
-		assert.deepEqual(playBattle(index, taskHeader.seed, pool, taskHeader.acceptedMoves,
-			[], [], taskHeader.allowed), records[index]);
+		assert.deepEqual(withItemDefaults(playBattle(index, taskHeader.seed, pool,
+			taskHeader.acceptedMoves, [], [], taskHeader.allowed)), withItemDefaults(records[index]));
 	}
 });
 

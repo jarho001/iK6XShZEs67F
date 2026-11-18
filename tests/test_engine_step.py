@@ -10,6 +10,7 @@ import pytest
 
 from pokejax.engine.actions import legal_actions
 from pokejax.engine.data import build_engine_tables
+from pokejax.engine.items import gather_active_items
 from pokejax.engine.observation import observe
 from pokejax.engine.order import action_order
 from pokejax.engine.randomness import (
@@ -79,6 +80,11 @@ def tables_and_state(battle_pool):
 		types=jnp.full_like(state.types, -1).at[:, :, 0].set(tables.types.index["water"]),
 		moves=jnp.zeros_like(state.moves).at[:, :, 0].set(tables.moves.index["tackle"]),
 		pp=jnp.zeros_like(state.pp).at[:, :, 0].set(10),
+		item=jnp.zeros_like(state.item),
+		item_public=jnp.zeros_like(state.item_public),
+		item_consumed=jnp.zeros_like(state.item_consumed),
+		item_knocked_off=jnp.zeros_like(state.item_knocked_off),
+		item_revealed=jnp.zeros_like(state.item_revealed),
 	)
 	return tables, t, state
 
@@ -191,13 +197,14 @@ def test_speed_boost_priority_and_switch_order(tables_and_state):
 	for replacement, occurrence in ((False, ACTION_ORDER), (True, SWITCH_IN_ORDER)):
 		for first in (0, 1):
 			equal = s._replace(boosts=jnp.zeros_like(s.boosts), stats=s.stats.at[0, 0, 5].set(100))
-			order = action_order(
+			_, order = action_order(
 				equal,
 				jnp.array([4, 4]),
 				moves,
 				replacement,
 				KEY,
 				FORCED.at[ORDER, 0, occurrence].set(first),
+				gather_active_items(equal, t),
 				t,
 			)
 			assert int(order) == first

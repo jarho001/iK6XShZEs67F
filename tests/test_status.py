@@ -42,6 +42,11 @@ def setup():
 		types=jnp.full_like(s.types, -1).at[:, :, 0].set(tables.types.index["normal"]),
 		moves=jnp.full_like(s.moves, tables.moves.index["tackle"]),
 		pp=jnp.full_like(s.pp, 20),
+		item=jnp.zeros_like(s.item),
+		item_public=jnp.zeros_like(s.item_public),
+		item_consumed=jnp.zeros_like(s.item_consumed),
+		item_knocked_off=jnp.zeros_like(s.item_knocked_off),
+		item_revealed=jnp.zeros_like(s.item_revealed),
 	)
 	return tables, t, s
 
