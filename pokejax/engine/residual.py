@@ -8,17 +8,26 @@ from pokejax.mechanics.stat_stage import scale_stat_stage
 
 from .actions import SIDES
 from .field import weather_residual
-from .randomness import RESIDUAL_ORDER, first_side
+from .randomness import ORDER, RESIDUAL_ORDER, integer
 from .state import (
 	BOOST_SPE,
 	BURN,
+	LOCKED_MOVE,
+	LOCKED_REMAINING,
+	LOCKED_TRUE_DURATION,
+	NUM_VOLATILES,
 	ONGOING,
 	PARALYSIS,
+	PARTIAL_TRAP_SOURCE,
+	PARTIALLY_TRAPPED,
 	POISON,
 	ROOST,
+	SLEEP,
 	SPE,
+	TEAM_SLOTS,
 	TOXIC,
 )
+from .volatiles import confuse_sides
 
 
 class ResidualRow(NamedTuple):
@@ -29,7 +38,16 @@ class ResidualRow(NamedTuple):
 	handler: object
 
 
-def _poison_toxic(state, enabled):
+def _residual_tie_first(key, forced, context):
+	"""Read current row addresses and retain older schema-v2 context-2 records."""
+	sampled = integer(key, forced, ORDER, 0, context, 2)
+	current = forced[ORDER, 0, context].astype(jnp.int32)
+	legacy = forced[ORDER, 0, RESIDUAL_ORDER].astype(jnp.int32)
+	return jnp.where(current >= 0, current, jnp.where(legacy >= 0, legacy, sampled))
+
+
+def _poison_toxic(state, enabled, key, forced, tables):
+	del key, forced, tables
 	slot = state.active
 	status = state.status[SIDES, slot]
 	hp = state.hp[SIDES, slot].astype(jnp.int32)
@@ -43,11 +61,17 @@ def _poison_toxic(state, enabled):
 		jnp.maximum(maximum // 8, 1),
 		jnp.where(toxic, jnp.maximum(maximum // 16, 1) * stage, 0),
 	)
-	counter = state.status_counter.at[SIDES, slot].set(stage.astype(state.status_counter.dtype))
+	active_slots = jnp.arange(state.status_counter.shape[1])[None, :] == slot[:, None]
+	counter = jnp.where(
+		active_slots & toxic[:, None],
+		stage[:, None].astype(state.status_counter.dtype),
+		state.status_counter,
+	)
 	return state._replace(status_counter=counter), damage
 
 
-def _burn(state, enabled):
+def _burn(state, enabled, key, forced, tables):
+	del key, forced, tables
 	slot = state.active
 	status = state.status[SIDES, slot]
 	maximum = state.stats[SIDES, slot, 0].astype(jnp.int32)
@@ -55,14 +79,90 @@ def _burn(state, enabled):
 	return state, damage
 
 
+def _partial_trap(state, enabled, key, forced, tables):
+	"""Gen 5 Bind-family residual, source validity and hidden duration."""
+	del key, forced, tables
+	sides = SIDES
+	foes = 1 - sides
+	active = state.active
+	timer = state.volatiles[:, PARTIALLY_TRAPPED].astype(jnp.int32)
+	source_slot = state.volatiles[:, PARTIAL_TRAP_SOURCE].astype(jnp.int32) - 1
+	source_active = source_slot == state.active[foes]
+	source_alive = state.hp[foes, jnp.clip(source_slot, 0, 5)] > 0
+	trapping = timer > 0
+	active_target = state.hp[sides, active] > 0
+	source_started = state.active_turns[foes, jnp.clip(source_slot, 0, 5)] > 0
+	valid = enabled & (timer > 1) & source_active & source_alive & source_started & active_target
+	maximum = state.stats[sides, active, 0].astype(jnp.int32)
+	damage = jnp.where(valid, jnp.maximum(maximum // 16, 1), 0)
+	expires = enabled & trapping & (timer <= 1)
+	clears = (
+		(enabled & trapping & ~source_active)
+		| (enabled & trapping & ~source_alive)
+		| (enabled & trapping & ~source_started)
+		| expires
+	)
+	volatiles = state.volatiles
+	volatiles = volatiles.at[:, PARTIALLY_TRAPPED].set(
+		jnp.where(valid, jnp.maximum(timer - 1, 0), jnp.where(clears, 0, timer)).astype(
+			volatiles.dtype
+		)
+	)
+	volatiles = volatiles.at[:, PARTIAL_TRAP_SOURCE].set(
+		jnp.where(clears, 0, volatiles[:, PARTIAL_TRAP_SOURCE])
+	)
+	return state._replace(volatiles=volatiles), damage
+
+
+def _locked_move(state, enabled, key, forced, tables):
+	"""Advance Outrage, Thrash and Petal Dance in their residual row."""
+	del tables
+	sides = SIDES
+	active = state.active
+	remaining = state.volatiles[:, LOCKED_REMAINING].astype(jnp.int32)
+	true_duration = state.volatiles[:, LOCKED_TRUE_DURATION].astype(jnp.int32)
+	locked = (state.volatiles[:, LOCKED_MOVE] > 0) & (remaining > 0) & enabled
+	sleeping = state.status[sides, active] == SLEEP
+	residual_runs = locked & (remaining > 1)
+	true_next = jnp.maximum(true_duration - residual_runs.astype(jnp.int32), 0)
+	sleep_ends = residual_runs & sleeping
+	lock_ends = (locked & (remaining == 1)) | sleep_ends
+	volatiles = state.volatiles
+	volatiles = volatiles.at[:, LOCKED_REMAINING].set(
+		jnp.where(
+			residual_runs & ~sleep_ends, remaining - 1, volatiles[:, LOCKED_REMAINING]
+		).astype(volatiles.dtype)
+	)
+	volatiles = volatiles.at[:, LOCKED_TRUE_DURATION].set(
+		jnp.where(residual_runs, true_next, volatiles[:, LOCKED_TRUE_DURATION]).astype(
+			volatiles.dtype
+		)
+	)
+	volatiles = volatiles.at[:, LOCKED_MOVE].set(jnp.where(lock_ends, 0, volatiles[:, LOCKED_MOVE]))
+	volatiles = volatiles.at[:, LOCKED_REMAINING].set(
+		jnp.where(lock_ends, 0, volatiles[:, LOCKED_REMAINING])
+	)
+	volatiles = volatiles.at[:, LOCKED_TRUE_DURATION].set(
+		jnp.where(lock_ends, 0, volatiles[:, LOCKED_TRUE_DURATION])
+	)
+	state = state._replace(volatiles=volatiles)
+	confusion_due = jnp.where(sleep_ends, true_duration <= 1, true_next <= 1)
+	state = confuse_sides(state, lock_ends & confusion_due, key, forced)
+	return state
+
+
 def _end_roost(state, enabled, key, forced, tables):
 	del key, forced, tables
 	active = state.active
 	roost = enabled & (state.volatiles[:, ROOST] > 0)
-	types = state.types.at[SIDES, active].set(
-		jnp.where(roost[:, None], state.roost_types[SIDES, active], state.types[SIDES, active])
+	active_slots = jnp.arange(TEAM_SLOTS)[None, :] == active[:, None]
+	types = jnp.where((active_slots & roost[:, None])[:, :, None], state.roost_types, state.types)
+	columns = jnp.arange(NUM_VOLATILES)
+	volatiles = jnp.where(
+		(columns[None, :] == ROOST) & roost[:, None],
+		0,
+		state.volatiles,
 	)
-	volatiles = state.volatiles.at[:, ROOST].set(jnp.where(roost, 0, state.volatiles[:, ROOST]))
 	return state._replace(types=types, volatiles=volatiles)
 
 
@@ -73,6 +173,7 @@ def _end_roost(state, enabled, key, forced, tables):
 # ability rows come from data/conditions.ts, data/moves.ts, data/items.ts and
 # data/abilities.ts plus Gen 5's inherited condition overrides.
 RESIDUAL_TABLE = (
+	ResidualRow(0, 2, "Locked moves", "global", _locked_move),
 	ResidualRow(1, 5, "weather", "field", weather_residual),
 	ResidualRow(3, 3, "Future Sight", "slot", None),
 	ResidualRow(4, 3, "Wish", "slot", None),
@@ -87,7 +188,7 @@ RESIDUAL_TABLE = (
 	ResidualRow(10, 2, "Burn", "pokemon", _burn),
 	ResidualRow(11, 2, "Nightmare", "pokemon", None),
 	ResidualRow(12, 2, "Curse", "pokemon", None),
-	ResidualRow(13, 2, "Partial trapping", "pokemon", None),
+	ResidualRow(13, 2, "Partial trapping", "pokemon", _partial_trap),
 	ResidualRow(15, 2, "Taunt", "pokemon", None),
 	ResidualRow(16, 2, "Encore", "pokemon", None),
 	ResidualRow(17, 2, "Disable", "pokemon", None),
@@ -107,43 +208,45 @@ RESIDUAL_TABLE = (
 )
 
 
-def _resolve_handler_faint(state, side, damage, enabled):
-	slot = state.active[side]
-	old = state.hp[side, slot].astype(jnp.int32)
+def _resolve_handler_faint(state, damage, enabled):
+	active_slots = jnp.arange(state.hp.shape[1])[None, :] == state.active[:, None]
+	old = state.hp[SIDES, state.active].astype(jnp.int32)
 	hp_value = jnp.maximum(old - damage.astype(jnp.int32), 0)
-	hp = state.hp.at[side, slot].set(hp_value.astype(state.hp.dtype))
+	write = active_slots & enabled[:, None]
+	hp = jnp.where(write, hp_value[:, None].astype(state.hp.dtype), state.hp)
 	alive = jnp.any(hp > 0, axis=1)
-	update = enabled & (damage > 0) & ~jnp.all(alive) & (state.winner == ONGOING)
-	winner = jnp.where(~alive[0], 1, 0)
-	boosts = state.boosts.at[side].set(jnp.where(hp_value > 0, state.boosts[side], 0))
+	update = enabled & (damage > 0) & ~alive & (state.winner == ONGOING)
+	update_battle = jnp.any(update)
+	loser = jnp.argmax(update.astype(jnp.int32))
+	winner = 1 - loser
 	return state._replace(
 		hp=hp,
-		boosts=boosts,
-		winner=jnp.where(update, winner, state.winner).astype(state.winner.dtype),
+		winner=jnp.where(update_battle, winner, state.winner).astype(state.winner.dtype),
 	)
 
 
 def residual(state, enabled, key, forced, tables):
-	"""Run each registered handler and resolve its faint queue in Showdown order."""
+	"""Run the full residual event, then resolve its queued faint messages."""
+	residual_enabled = enabled & (state.winner == ONGOING)
 	speed = scale_stat_stage(
 		state.stats[SIDES, state.active, SPE].astype(jnp.int32),
 		state.boosts[:, BOOST_SPE].astype(jnp.int32),
 	)
 	speed = jnp.where(state.status[SIDES, state.active] == PARALYSIS, speed // 4, speed)
-	tie_first = first_side(key, forced, RESIDUAL_ORDER)
-	first = jnp.where(speed[0] == speed[1], tie_first, jnp.where(speed[0] > speed[1], 0, 1))
-
 	for row in RESIDUAL_TABLE:
-		active = enabled & (state.winner == ONGOING)
+		active = residual_enabled & (state.winner == ONGOING)
 		if row.handler is None:
 			continue
 		if row.scope in ("field", "global"):
 			state = row.handler(state, active, key, forced, tables)
 		elif row.scope == "pokemon":
+			context = {0: 2, 9: 6, 10: 7, 13: 8}[row.order]
+			tie_first = _residual_tie_first(key, forced, context)
+			first = jnp.where(speed[0] == speed[1], tie_first, jnp.where(speed[0] > speed[1], 0, 1))
 			for side in (first, 1 - first):
-				handler_enabled = enabled & (state.winner == ONGOING) & (SIDES == side)
-				state, damage = row.handler(state, handler_enabled)
-				state = _resolve_handler_faint(state, side, damage[side], handler_enabled[side])
+				handler_enabled = residual_enabled & (state.winner == ONGOING) & (SIDES == side)
+				state, damage = row.handler(state, handler_enabled, key, forced, tables)
+				state = _resolve_handler_faint(state, damage, handler_enabled)
 	return state._replace(
 		boosts=jnp.where((state.hp[SIDES, state.active] > 0)[:, None], state.boosts, 0),
 	)

@@ -22,15 +22,28 @@ from pokejax.engine.randomness import UNFORCED, forced_from_records
 from pokejax.engine.reset import check_teams, reset, teams_from_pool
 from pokejax.engine.state import (
 	CONFUSION,
+	ENDURE,
+	FLINCH,
 	HP,
+	LEECH_SEED,
+	LOCKED_MOVE,
 	MOVE,
+	MUST_RECHARGE,
 	NONE,
 	ONGOING,
+	PARTIALLY_TRAPPED,
+	PROTECT,
+	QUICK_GUARD,
+	ROOST,
+	SMACKDOWN,
+	STALL,
 	STATUS_NAMES,
 	SWITCH,
 	TIE,
+	TWO_TURN_MOVE,
 	VOLATILE_NAMES,
 	WEATHER_NAMES,
+	WIDE_GUARD,
 )
 from pokejax.engine.step import step
 from pokejax.tables import load_tables
@@ -47,6 +60,24 @@ STEP_CHUNK = 32
 def comparable(state, tables):
 	"""Map engine state to numeric snapshot fields; supports batches."""
 	# Compare effective current types. The saved Roost restoration copy is internal state.
+	base_volatiles = jnp.stack(
+		(
+			state.volatiles[..., CONFUSION] > 0,
+			state.volatiles[..., FLINCH] > 0,
+			state.volatiles[..., ROOST] > 0,
+			state.volatiles[..., LEECH_SEED] > 0,
+			state.volatiles[..., PARTIALLY_TRAPPED] > 0,
+			state.volatiles[..., PROTECT] > 0,
+			state.volatiles[..., ENDURE] > 0,
+			state.volatiles[..., STALL] > 0,
+			state.volatiles[..., TWO_TURN_MOVE] != 0,
+			state.volatiles[..., LOCKED_MOVE] > 0,
+			state.volatiles[..., MUST_RECHARGE] > 0,
+		),
+		axis=-1,
+	)
+	charge_volatiles = state.volatiles[..., TWO_TURN_MOVE, None] == tables.move_turn_volatile_ids
+	smackdown = state.volatiles[..., SMACKDOWN] > 0
 	return {
 		"active": state.active,
 		"legalActions": jax.vmap(legal_actions, in_axes=(0, None))(state, tables),
@@ -61,7 +92,16 @@ def comparable(state, tables):
 		"ability": state.ability,
 		"ended": state.winner != ONGOING,
 		"boosts": state.boosts,
-		"volatiles": state.volatiles != 0,
+		"volatiles": jnp.concatenate(
+			(base_volatiles, charge_volatiles, smackdown[..., None]), axis=-1
+		),
+		"sideConditions": jnp.stack(
+			(
+				state.volatiles[..., QUICK_GUARD] > 0,
+				state.volatiles[..., WIDE_GUARD] > 0,
+			),
+			axis=-1,
+		),
 		"confusionCounter": state.volatiles[..., CONFUSION],
 		"request": state.request,
 		"hp": state.hp,
@@ -118,6 +158,12 @@ def recorded_state(snapshot, tables):
 		"boosts": np.asarray([side["boosts"] for side in sides]),
 		"volatiles": np.asarray(
 			[[name in (side["volatiles"] or []) for name in VOLATILE_NAMES] for side in sides]
+		),
+		"sideConditions": np.asarray(
+			[
+				[name in side["sideConditions"] for name in ("quickguard", "wideguard")]
+				for side in sides
+			]
 		),
 		"confusionCounter": np.asarray(
 			[side.get("volatileCounters", {}).get("confusion", 0) for side in sides]
@@ -360,7 +406,7 @@ def replay_file(path, *, recording=None) -> ReplayResult:
 					{
 						name: condition
 						for name, condition in side["sideConditions"].items()
-						if name not in ("spikes", "toxicspikes")
+						if name not in ("spikes", "toxicspikes", "quickguard", "wideguard")
 					},
 				)
 			for name, (engine, wanted) in extra.items():

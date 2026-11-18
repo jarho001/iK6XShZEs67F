@@ -13,9 +13,53 @@ NUM_SIDES = 2
 NUM_TYPES = 2
 NUM_STATS = 6
 NUM_BOOSTS = 7
-CONFUSION, FLINCH, ROOST, LEECH_SEED, PARTIALLY_TRAPPED = range(5)
-VOLATILE_NAMES = ("confusion", "flinch", "roost", "leechseed", "partiallytrapped")
-NUM_VOLATILES = len(VOLATILE_NAMES)
+(
+	CONFUSION,
+	FLINCH,
+	ROOST,
+	LEECH_SEED,
+	PARTIALLY_TRAPPED,
+	PROTECT,
+	ENDURE,
+	STALL,
+	TWO_TURN_MOVE,
+	LOCKED_MOVE,
+	LOCKED_REMAINING,
+	MUST_RECHARGE,
+	QUICK_GUARD,
+	WIDE_GUARD,
+	FAKE_OUT_USED,
+	PARTIAL_TRAP_SOURCE,
+	STALL_USED,
+	LOCKED_TRUE_DURATION,
+) = range(18)
+SMACKDOWN = 18
+VOLATILE_NAMES = (
+	"confusion",
+	"flinch",
+	"roost",
+	"leechseed",
+	"partiallytrapped",
+	"protect",
+	"endure",
+	"stall",
+	"twoturnmove",
+	"lockedmove",
+	"mustrecharge",
+	"fly",
+	"dig",
+	"bounce",
+	"dive",
+	"shadowforce",
+	"skullbash",
+	"skyattack",
+	"razorwind",
+	"solarbeam",
+	"freezeshock",
+	"iceburn",
+	"smackdown",
+)
+NUM_VOLATILES = 19
 HP, ATK, DEF, SPA, SPD, SPE = range(NUM_STATS)
 BOOST_ATK, BOOST_DEF, BOOST_SPA, BOOST_SPD, BOOST_SPE, ACCURACY, EVASION = range(NUM_BOOSTS)
 EMPTY = 0
@@ -43,8 +87,9 @@ class BattleState(NamedTuple):
 	and Sleep Clause, respectively; status and status_counter are [2, 6] int8.
 	volatiles is int16 [2, NUM_VOLATILES], active only: zero is absent;
 	confusion stores the private BeforeMove timer (2..5 initially), flinch and
-	roost are 1. Leech Seed and partial trapping have reserved columns. The wider
-	dtype also fits future volatile HP (Substitute) in another column. Weather is
+	roost are 1. Charge/lock state stores move IDs and private turn counters; trap
+	state stores a private duration and source slot. These counters are never
+	observed. The wider dtype also fits future volatile HP (Substitute) in another column. Weather is
 	an int8 enum (0 clear, 1 rain, 2 sun, 3 sand, 4 hail); zero turns means
 	permanent weather or no weather. Hazards and their private switch-in creation
 	order are int8 [side, spikes/toxic spikes].
@@ -73,6 +118,7 @@ class BattleState(NamedTuple):
 	seen_order: jax.Array
 	revealed_moves: jax.Array
 	active: jax.Array
+	active_turns: jax.Array  # uint8 [2, 6], increments at Showdown turn advance
 	boosts: jax.Array
 	volatiles: jax.Array  # int16 [2, NUM_VOLATILES], active Pokemon only
 	weather: jax.Array  # int8 scalar; NO_WEATHER, RAIN, SUN, SAND, HAIL

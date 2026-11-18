@@ -93,6 +93,10 @@ class MoveTable(RowTable):
 	secondary_boosts: NDArray[np.int8]
 	secondary_volatile: NDArray[np.int8]
 	confusion: NDArray[np.bool_]
+	stalling_move: NDArray[np.bool_]
+	volatile_status: NDArray[np.uint8]
+	self_volatile: NDArray[np.uint8]
+	breaks_protect: NDArray[np.bool_]
 	target_names: tuple[str, ...]
 	flag_names: tuple[str, ...]
 
@@ -242,7 +246,13 @@ def _build_moves(rows, types, target_names, flag_names):
 		"secondary_boosts": np.zeros((count, SECONDARY_SLOTS, 7), dtype=np.int8),
 		"secondary_volatile": np.zeros((count, SECONDARY_SLOTS), dtype=np.int8),
 		"confusion": np.zeros(count, dtype=np.bool_),
+		"stalling_move": np.zeros(count, dtype=np.bool_),
+		"volatile_status": np.zeros(count, dtype=np.uint8),
+		"self_volatile": np.zeros(count, dtype=np.uint8),
+		"breaks_protect": np.zeros(count, dtype=np.bool_),
 	}
+	volatile_statuses = {"protect": 1, "endure": 2, "partiallytrapped": 3, "smackdown": 4}
+	self_volatiles = {"lockedmove": 1, "mustrecharge": 2}
 	for row, move in enumerate(rows, start=1):
 		columns["confusion"][row] = move.get("volatileStatus") == "confusion"
 		columns["crit_always"][row] = move.get("willCrit", False)
@@ -321,6 +331,12 @@ def _build_moves(rows, types, target_names, flag_names):
 					row, ("atk", "def", "spa", "spd", "spe", "accuracy", "evasion").index(stat)
 				] = amount
 		columns["no_pp_boosts"][row] = move.get("noPPBoosts", False)
+		columns["stalling_move"][row] = move.get("stallingMove", False)
+		columns["volatile_status"][row] = volatile_statuses.get(move.get("volatileStatus"), 0)
+		columns["self_volatile"][row] = self_volatiles.get(
+			move.get("self", {}).get("volatileStatus"), 0
+		)
+		columns["breaks_protect"][row] = move.get("breaksProtect", False)
 		columns["type"][row] = types.index[_showdown_id(move["type"])]
 		columns["category"][row] = CATEGORY_INDEX[move["category"]]
 		columns["always_hits"][row] = move["accuracy"] is True

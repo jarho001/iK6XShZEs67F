@@ -8,7 +8,17 @@ as a no-op. Finished battles behave as NONE for both sides.
 
 import jax.numpy as jnp
 
-from .state import MOVE, NONE, ONGOING, SWITCH
+from .state import (
+	LOCKED_MOVE,
+	MOVE,
+	MUST_RECHARGE,
+	NONE,
+	ONGOING,
+	PARTIAL_TRAP_SOURCE,
+	PARTIALLY_TRAPPED,
+	SWITCH,
+	TWO_TURN_MOVE,
+)
 
 NUM_ACTIONS = 9
 SIDES = jnp.arange(2)
@@ -28,8 +38,22 @@ def legal_actions(state, engine_tables):
 	pp = state.pp[SIDES, state.active]
 	usable = (moves != 0) & (pp > 0)
 	usable = usable.at[:, 0].set(usable[:, 0] | ~jnp.any(usable, axis=1))
-	move_mask = (request[:, None] == MOVE) & usable
+	forced = (
+		(state.volatiles[:, TWO_TURN_MOVE] > 0)
+		| (state.volatiles[:, LOCKED_MOVE] > 0)
+		| (state.volatiles[:, MUST_RECHARGE] > 0)
+	)
+	only_first = jnp.arange(4)[None, :] == 0
+	move_mask = (request[:, None] == MOVE) & jnp.where(forced[:, None], only_first, usable)
 	move_mask = move_mask.at[:, 0].set(move_mask[:, 0] | (request == NONE))
 	bench_alive = state.hp[SIDES[:, None], bench_slots(state.active)] > 0
-	switch_mask = ((request == MOVE) | (request == SWITCH))[:, None] & bench_alive
+	can_switch = (request == SWITCH) | ((request == MOVE) & ~forced)
+	source_slot = state.volatiles[:, PARTIAL_TRAP_SOURCE].astype(jnp.int32) - 1
+	foe = 1 - SIDES
+	source_active = source_slot == state.active[foe]
+	source_alive = state.hp[foe, jnp.clip(source_slot, 0, 5)] > 0
+	trapped = (state.volatiles[:, PARTIALLY_TRAPPED] > 0) & source_active & source_alive
+	can_switch &= ~trapped
+	can_switch |= request == SWITCH
+	switch_mask = can_switch[:, None] & bench_alive
 	return jnp.concatenate((move_mask, switch_mask), axis=1)

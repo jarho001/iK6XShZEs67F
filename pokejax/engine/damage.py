@@ -7,8 +7,8 @@ from pokejax.mechanics.neutral_damage import neutral_damage_before_roll
 from pokejax.mechanics.stat_stage import scale_stat_stage
 
 from .field import WEATHER_ACCURACY_ALWAYS, effective_move_type, weather_modify
-from .randomness import CRIT, DAMAGE_ROLL, HIT, chance, integer
-from .state import ACCURACY, BURN, EVASION
+from .randomness import CRIT, DAMAGE_ROLL, HIT, MAGNITUDE, chance, integer
+from .state import ACCURACY, BURN, EVASION, TWO_TURN_MOVE
 
 CRIT_DENOMINATORS = jnp.asarray([1, 16, 8, 4, 3, 2], jnp.int32)
 LEVEL_DAMAGE, HALF_CURRENT_DAMAGE, CONSTANT_DAMAGE = 1, 2, 3
@@ -35,7 +35,7 @@ def accuracy_hit(state, side, move, key, forced, tables):
 	)
 
 
-def move_damage_bases(state, side, move, tables):
+def move_damage_bases(state, side, move, key, forced, tables):
 	"""Compute the non-crit and crit pre-roll damage bases once per move."""
 	t = tables
 	foe = 1 - side
@@ -67,7 +67,27 @@ def move_damage_bases(state, side, move, tables):
 	defense_effective = weather_modify(defense_effective, defense_modifier)
 	level = state.level[side, user].astype(jnp.int32)
 	power = t.move_base_power[move].astype(jnp.int32)
+	magnitude = integer(key, forced, MAGNITUDE, side, 0, 100)
+	magnitude_power = jnp.where(
+		magnitude < 5,
+		10,
+		jnp.where(
+			magnitude < 15,
+			30,
+			jnp.where(
+				magnitude < 35,
+				50,
+				jnp.where(
+					magnitude < 65,
+					70,
+					jnp.where(magnitude < 85, 90, jnp.where(magnitude < 95, 110, 150)),
+				),
+			),
+		),
+	)
+	power = jnp.where(t.move_magnitude[move], magnitude_power, power)
 	power *= t.move_weather_power[move, state.weather].astype(jnp.int32)
+	power = weather_modify(power, t.move_weather_power_scale[move, state.weather])
 	base_scenarios = neutral_damage_before_roll(
 		level, jnp.maximum(power, 1), attack_effective, defense_effective
 	)
@@ -131,6 +151,10 @@ def damage_for_hits(state, side, move, hit_indices, bases, key, forced, tables):
 	boosted = jnp.left_shift(damage, jnp.maximum(shift, 0))
 	resisted = damage >> jnp.maximum(-shift, 0)
 	damage = jnp.where(shift > 0, boosted, resisted)
+	target_charge = jnp.maximum(state.volatiles[1 - side, TWO_TURN_MOVE], 0)
+	target_semi = tables.move_charge_semi[target_charge].astype(jnp.int32)
+	semi_power = tables.move_semi_power[move, target_semi]
+	damage *= jnp.where(semi_power, 2, 1).astype(jnp.int32)
 	damage = jnp.where(damage == 0, 1, damage) & 65535
 	damage = jnp.where(damage_kind > 0, fixed, damage)
 	can_damage &= state.hp[1 - side, target] > 0

@@ -8,6 +8,7 @@ import jax.numpy as jnp
 
 from pokejax.mechanics.stat_stage import scale_stat_stage
 
+from .actions import SIDES
 from .randomness import (
 	CONFUSION_DAMAGE_ROLL,
 	CONFUSION_DURATION,
@@ -15,18 +16,41 @@ from .randomness import (
 	chance,
 	integer,
 )
-from .state import ATK, BOOST_ATK, BOOST_DEF, CONFUSION, DEF, FLINCH, ROOST
+from .state import (
+	ATK,
+	BOOST_ATK,
+	BOOST_DEF,
+	CONFUSION,
+	DEF,
+	ENDURE,
+	FLINCH,
+	NUM_VOLATILES,
+	PROTECT,
+	QUICK_GUARD,
+	ROOST,
+	STALL,
+	STALL_USED,
+	TEAM_SLOTS,
+	TWO_TURN_MOVE,
+	WIDE_GUARD,
+)
 
 
 def confuse(state, side, enabled, key, forced):
 	"""addVolatile does not restart existing confusion and rejects zero HP."""
-	current = state.volatiles[side, CONFUSION]
-	apply = enabled & (current == 0) & (state.hp[side, state.active[side]] > 0)
-	duration = integer(key, forced, CONFUSION_DURATION, side, 0, 4) + 2
+	sides_enabled = (SIDES == side) & enabled
+	return confuse_sides(state, sides_enabled, key, forced)
+
+
+def confuse_sides(state, enabled, key, forced):
+	"""Apply confusion to both sides through one dense active-volatile write."""
+	current = state.volatiles[:, CONFUSION]
+	apply = enabled & (current == 0) & (state.hp[SIDES, state.active] > 0)
+	duration = integer(key, forced, CONFUSION_DURATION, SIDES, 0, 4) + 2
+	columns = jnp.arange(state.volatiles.shape[1])
+	mask = apply[:, None] & (columns[None, :] == CONFUSION)
 	return state._replace(
-		volatiles=state.volatiles.at[side, CONFUSION].set(
-			jnp.where(apply, duration, current).astype(state.volatiles.dtype)
-		)
+		volatiles=jnp.where(mask, duration[:, None], state.volatiles).astype(state.volatiles.dtype)
 	)
 
 
@@ -51,6 +75,19 @@ def confusion_damage(state, side, key, forced):
 	return jnp.maximum(1, base * (100 - roll) // 100)
 
 
+def advance_active_turns(state, enabled):
+	"""Advance the hidden active-turn marker when the turn number advances."""
+	active = state.active
+	slots = jnp.arange(state.active_turns.shape[1])
+	active_mask = slots[None, :] == active[:, None]
+	active_hp = state.hp[jnp.arange(2), active] > 0
+	values = state.active_turns.astype(jnp.int16)
+	values = jnp.where(
+		active_mask & enabled & active_hp[:, None], jnp.minimum(values + 1, 255), values
+	)
+	return state._replace(active_turns=values.astype(state.active_turns.dtype))
+
+
 def before_move(state, side, enabled, key, forced):
 	enabled &= state.volatiles[side, FLINCH] == 0
 	counter = state.volatiles[side, CONFUSION]
@@ -60,25 +97,43 @@ def before_move(state, side, enabled, key, forced):
 	slot = state.active[side]
 	damage = jnp.where(self_hit, confusion_damage(state, side, key, forced), 0)
 	hp = jnp.maximum(state.hp[side, slot].astype(jnp.int32) - damage, 0)
+	active_slot = (SIDES == side)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == slot)
+	columns = jnp.arange(NUM_VOLATILES)
+	confusion_column = (SIDES == side)[:, None] & (columns[None, :] == CONFUSION)
 	return state._replace(
-		volatiles=state.volatiles.at[side, CONFUSION].set(counter),
-		hp=state.hp.at[side, slot].set(hp.astype(state.hp.dtype)),
+		volatiles=jnp.where(confusion_column, counter, state.volatiles),
+		hp=jnp.where(active_slot, hp.astype(state.hp.dtype), state.hp),
 	), enabled & ~self_hit
 
 
-def end_turn(state, enabled, expire_roost=None):
-	"""Expire flinch and restore Roost's saved types after the turn."""
+def end_turn(state, enabled, key, forced, expire_roost=None):
+	"""Expire turn guards, flinch and Roost restoration."""
+	del key, forced
 	if expire_roost is None:
 		expire_roost = enabled
 	active = state.active
-	roost = (state.volatiles[:, ROOST] > 0) & expire_roost
-	types = state.types.at[jnp.arange(2), active].set(
-		jnp.where(
-			roost[:, None],
-			state.roost_types[jnp.arange(2), active],
-			state.types[jnp.arange(2), active],
-		)
+	enabled_sides = jnp.broadcast_to(enabled, (2,))
+	expire_roost_sides = jnp.broadcast_to(expire_roost, (2,))
+	roost = (state.volatiles[:, ROOST] > 0) & expire_roost_sides
+	active_slots = jnp.arange(TEAM_SLOTS)[None, :] == active[:, None]
+	types = jnp.where((active_slots & roost[:, None])[:, :, None], state.roost_types, state.types)
+	columns = jnp.arange(NUM_VOLATILES)
+	turn_columns = (
+		(columns == FLINCH)
+		| (columns == PROTECT)
+		| (columns == ENDURE)
+		| (columns == QUICK_GUARD)
+		| (columns == WIDE_GUARD)
 	)
-	volatiles = state.volatiles.at[:, FLINCH].set(jnp.where(enabled, 0, state.volatiles[:, FLINCH]))
-	volatiles = volatiles.at[:, ROOST].set(jnp.where(expire_roost, 0, volatiles[:, ROOST]))
-	return state._replace(types=types, volatiles=volatiles)
+	clear = enabled_sides[:, None] & turn_columns[None, :]
+	clear |= expire_roost_sides[:, None] & (columns[None, :] == ROOST)
+	clear |= (enabled_sides & (state.volatiles[:, STALL_USED] == 0))[:, None] & (
+		columns[None, :] == STALL
+	)
+	clear |= enabled_sides[:, None] & (columns[None, :] == STALL_USED)
+	clear |= (enabled_sides & (state.volatiles[:, TWO_TURN_MOVE] < 0))[:, None] & (
+		columns[None, :] == TWO_TURN_MOVE
+	)
+	volatiles = jnp.where(clear, 0, state.volatiles)
+	state = state._replace(volatiles=volatiles)
+	return state._replace(types=types)

@@ -15,6 +15,8 @@
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-effects2.allowed.json --out tests/fixtures/diff-effects2.jsonl.gz
  * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-field.allowed.json --out work/diff/field.jsonl.gz
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-field.allowed.json --out tests/fixtures/diff-field.jsonl.gz
+ * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-turns.allowed.json --out work/diff/turns.jsonl.gz
+ * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-turns.allowed.json --out tests/fixtures/diff-turns.jsonl.gz
  *
  * JSONL schema v2: header {type, schemaVersion, showdownCommit, seed, count,
  * acceptedMoves, ...}; battle {type, index, seed (four uint16 words), policySeed,
@@ -46,6 +48,9 @@
  * present; context 1 still records replacement queue ties.
  * Order occurrence 3 means a Speed tie during the weather's eachEvent('Weather').
  * Order occurrence 4 means a Speed tie during WeatherChange.
+ * Residual ties use occurrence 2 for default-order volatiles, then 6/7/8 for
+ * Poison/Toxic, burn and partial trapping. Same-side handler permutations are
+ * recorded as verified no-effect exceptions.
  *
  * Every 20th battle uses a pool team with a Ghost lead on both sides. Moves are
  * drawn without replacement from accepted <=10 PP moves whose types cannot hit
@@ -98,6 +103,7 @@ const EXCEPTIONS = [
 	'empty-eachEvent-Update',
 	'empty-eachEvent-BeforeTurn',
 	'empty-switchIn-order',
+	'same-side-residual-order',
 ];
 
 // Fail closed on unfamiliar meaningful move properties. maxMove/zMove and contest
@@ -202,10 +208,19 @@ function legalChoices(side, fixed, ended = false) {
 	const choices = [];
 	if (kind === 'move') {
 		const moves = side.activeRequest.active[0].moves;
-		for (const [slot, move] of moves.entries()) {
+		const hardLock = side.active[0].getLockedMove();
+		if (hardLock) {
+			assert.equal(moves.length, 1, `Hard-locked request should expose one move: ${hardLock}`);
+			const move = moves[0];
 			if (!move.disabled && (move.pp === undefined || move.pp > 0)) {
-				assert(move.id === 'struggle' || side.active[0].moveSlots[slot].id === move.id);
-				choices.push({ action: move.id === 'struggle' ? 0 : slot, choice: `move ${slot + 1}` });
+				choices.push({ action: 0, choice: 'move 1' });
+			}
+		} else {
+			for (const [slot, move] of moves.entries()) {
+				if (!move.disabled && (move.pp === undefined || move.pp > 0)) {
+					assert(move.id === 'struggle' || side.active[0].moveSlots[slot].id === move.id);
+					choices.push({ action: move.id === 'struggle' ? 0 : slot, choice: `move ${slot + 1}` });
+				}
 			}
 		}
 	}
@@ -224,6 +239,14 @@ function legalChoices(side, fixed, ended = false) {
 // The first frame after our wrapper is the actual pinned Showdown call site.
 function directCaller() {
 	return new Error().stack.split('\n')[3].trim().split(' ')[1];
+}
+
+function residualOrderOccurrence(order) {
+	if (order === false) return 2;
+	if (order === 9) return 6;
+	if (order === 10) return 7;
+	if (order === 13) return 8;
+	throw new Error(`Unclassified residual order: ${order}`);
 }
 
 // Each rule identifies a draw site and translates its result to an addressed outcome.
@@ -264,9 +287,26 @@ const OUTCOME_RULES = [
 		scope?.kind === 'status' && scope.status === 'slp' && caller === 'Battle.onStart' &&
 		args[0] === 2 && args[1] === 5,
 		address: scope => [scope.target.side.n, 0], value: value => value - 2 },
+	{ kind: 'lock_duration', method: 'random', matches: (scope, caller, args) =>
+		scope?.kind === 'status' && scope.status === 'lockedmove' && caller === 'Battle.onStart' &&
+		args[0] === 2 && args[1] === 4,
+		address: scope => [scope.target.side.n, 0], value: value => value - 2 },
+	{ kind: 'trap_duration', method: 'random', matches: (scope, caller, args) =>
+		scope?.kind === 'hit_loop' && caller === 'Battle.durationCallback' &&
+		['bind', 'clamp', 'firespin', 'magmastorm', 'sandtomb', 'wrap', 'whirlpool'].includes(scope.move.id) &&
+		args[0] === 5 && args[1] === 7,
+		address: scope => [scope.user.side.n, 0], value: value => value - 5 },
+	{ kind: 'magnitude', method: 'random', matches: (scope, caller, args) =>
+		scope?.kind === 'magnitude' && scope.move.id === 'magnitude' &&
+		caller === 'Battle.onModifyMove' && args.length === 1 && args[0] === 100,
+		address: scope => [scope.user.side.n, 0], value: value => value },
 	{ kind: 'full_paralysis', method: 'chance', matches: (scope, caller, args) =>
 		scope?.kind === 'status' && scope.status === 'par' && caller === 'Battle.onBeforeMove' &&
 		args[0] === 1 && args[1] === 4,
+		address: scope => [scope.target.side.n, 0], value: value => Number(value) },
+	{ kind: 'stall_success', method: 'chance', matches: (scope, caller, args) =>
+		scope?.kind === 'stall' && caller === 'Battle.onStallMove' && args[0] === 1 &&
+		Number.isInteger(args[1]) && args[1] >= 2,
 		address: scope => [scope.target.side.n, 0], value: value => Number(value) },
 	{ kind: 'thaw', method: 'chance', matches: (scope, caller, args) =>
 		scope?.kind === 'status' && scope.status === 'frz' && caller === 'Battle.onBeforeMove' &&
@@ -286,7 +326,8 @@ const OUTCOME_RULES = [
 		address: (scope, tied) => [0, tied.every(a => a.choice === 'instaswitch') ? 1 : 0],
 		value: (value, list, start) => list[start].pokemon.side.n },
 	{ kind: 'order', method: 'shuffle', matches: scope => scope?.kind === 'residual',
-		address: () => [0, 2], value: (value, list, start) => list[start].effectHolder.side.n },
+		address: (scope, tied) => [0, residualOrderOccurrence(tied[0].order)],
+		value: (value, list, start) => list[start].effectHolder.side.n },
 	{ kind: 'order', method: 'shuffle', matches: scope =>
 		scope?.kind === 'eachEvent' && scope.event === 'Weather',
 		address: () => [0, 3], value: (value, list, start) => list[start].side.n },
@@ -334,6 +375,7 @@ function instrument(battle, stats) {
 		({ kind: 'secondaries', user, move, moveData, hitIndex: (move.hit || 1) - 1, occurrence: 0 }));
 	wrap(battle.actions, 'hitStepMoveHitLoop', (targets, user, move) =>
 		({ kind: 'hit_loop', user, move }));
+	wrap(battle.actions, 'useMoveInner', (move, user) => ({ kind: 'magnitude', user, move }));
 	wrap(battle.actions, 'getConfusionDamage', user => ({ kind: 'confusionDamage', user }));
 	wrap(battle, 'randomizer', () => ({
 		kind: scope?.kind === 'confusionDamage' ? 'confusion_damage_roll' : 'damage_roll',
@@ -357,20 +399,23 @@ function instrument(battle, stats) {
 	const chance = battle.randomChance;
 	battle.randomChance = function (numerator, denominator) {
 		const caller = directCaller();
-		const statusScope = this.effect?.effectType === 'Status' || this.effect?.id === 'confusion' ?
+		const statusScope = this.effect?.effectType === 'Status' ||
+			['confusion', 'lockedmove', 'stall'].includes(this.effect?.id) ?
 			{ kind: 'status', status: this.effect.id, target: this.effectState.target } : scope;
+		const effectiveScope = statusScope?.status === 'stall' ?
+			{ kind: 'stall', target: statusScope.target } : statusScope;
 		const rule = OUTCOME_RULES.find(rule => rule.method === 'chance' &&
-			rule.matches(statusScope, caller, [numerator, denominator]));
+			rule.matches(effectiveScope, caller, [numerator, denominator]));
 		assert(rule, `Unclassified randomChance(${numerator}, ${denominator}) at ${caller}`);
 		const value = allow(rule.kind, () => chance.call(this, numerator, denominator));
-		record(rule.kind, ...rule.address(statusScope), rule.value(value));
+		record(rule.kind, ...rule.address(effectiveScope), rule.value(value));
 		return value;
 	};
 	const battleRandom = battle.random;
 	battle.random = function (...args) {
 		const caller = directCaller();
 		const statusScope = caller === 'Battle.onStart' &&
-			(this.effect?.effectType === 'Status' || this.effect?.id === 'confusion') ?
+			(this.effect?.effectType === 'Status' || ['confusion', 'lockedmove'].includes(this.effect?.id)) ?
 			{ kind: 'status', status: this.effect.id, target: this.effectState.target } : scope;
 		if (scope?.kind === 'selfDrops' && caller === 'BattleActions.selfDrops' && args[0] === 100 &&
 			scope.moveData.self?.boosts && scope.moveData.self.chance === undefined) {
@@ -395,20 +440,27 @@ function instrument(battle, stats) {
 	battle.prng.shuffle = function (list, start = 0, end = list.length) {
 		const caller = directCaller();
 		assert.equal(caller, 'Battle.speedSort', `Unclassified shuffle at ${caller}`);
-		assert.equal(end - start, 2, 'Only two-sided singles ties are supported');
 		const tied = list.slice(start, end);
 		let rule;
 		let exception;
 		if (scope?.kind === 'queue') {
+			assert.equal(tied.length, 2, 'Only two-sided singles queue ties are supported');
 			assert(tied.every(a => ['move', 'switch', 'instaswitch'].includes(a.choice)) &&
 				tied[0].pokemon.side !== tied[1].pokemon.side, 'Unexpected tied queue entries');
 			const replacement = tied.every(a => a.choice === 'instaswitch');
 			assert(replacement || tied.every(a => a.choice !== 'instaswitch'));
 			rule = OUTCOME_RULES.find(row => row.method === 'shuffle' && row.matches(scope, caller, tied));
 		} else if (scope?.kind === 'residual') {
-			assert(tied.every(h => ['brn', 'psn', 'tox'].includes(h.effect.id)) &&
-				tied[0].effectHolder.side !== tied[1].effectHolder.side);
-			rule = OUTCOME_RULES.find(row => row.method === 'shuffle' && row.matches(scope));
+			assert(tied.length >= 2, 'Residual speed sort needs at least two handlers');
+			assert(tied.every(h => [
+				'brn', 'psn', 'tox', 'partiallytrapped', 'protect', 'endure', 'flinch', 'stall', 'lockedmove',
+				'mustrecharge', 'twoturnmove', 'fly', 'dig', 'bounce', 'dive', 'shadowforce',
+				'skullbash', 'skyattack', 'razorwind', 'solarbeam', 'freezeshock', 'iceburn',
+			].includes(h.effect.id)),
+			`Unexpected residual tie: ${tied.map(h => `${h.effect.id}:${h.effectHolder.side.n}`)}`);
+			const sides = new Set(tied.map(h => h.effectHolder.side.n));
+			if (sides.size === 1) exception = 'same-side-residual-order';
+			else rule = OUTCOME_RULES.find(row => row.method === 'shuffle' && row.matches(scope));
 		} else if (scope?.kind === 'eachEvent' && scope.event === 'Weather') {
 			assert(tied.every(pokemon => pokemon.side.active.includes(pokemon)) &&
 				tied[0].side !== tied[1].side, 'Unexpected weather event tie');
@@ -444,7 +496,7 @@ function instrument(battle, stats) {
 			throw new Error(`Unclassified shuffle: scope=${scope?.kind}, event=${scope?.event}, entries=${entries}\n${new Error().stack}`);
 		}
 		const value = allow(exception || 'order', () => shuffle.call(this, list, start, end));
-		if (exception) stats.exceptions[exception]++;
+		if (exception) stats.exceptions[exception] = (stats.exceptions[exception] || 0) + 1;
 		else record(rule.kind, ...rule.address(scope, tied), rule.value(value, list, start));
 		return value;
 	};
@@ -455,9 +507,10 @@ function instrument(battle, stats) {
 }
 
 function newStats() {
-	return { steps: 0, outcomes: Object.fromEntries(['order', 'hit', 'crit', 'damage_roll'].map(kind => [kind, 0])),
+	return { steps: 0, outcomes: { order: 0, hit: 0, crit: 0, damage_roll: 0 },
 		misses: 0, crits: 0, ties: 0, struggles: 0, doubleKOs: 0, forcedReplacements: 0,
-		prngDraws: 0, exceptions: Object.fromEntries(EXCEPTIONS.map(key => [key, 0])) };
+		prngDraws: 0, exceptions: Object.fromEntries(
+			EXCEPTIONS.filter(key => key !== 'same-side-residual-order').map(key => [key, 0])), };
 }
 
 function isolationMember(member, moves, options, policy) {

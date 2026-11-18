@@ -8,7 +8,7 @@ Showdown commit: `1242c1e2d9763ba5b85d33f13aecb89bae19ae3d`
 
 | Kind | Distinct | Supported | Supported occurrences |
 | --- | ---: | ---: | ---: |
-| Moves | 223 | 157 | 75.8% |
+| Moves | 223 | 164 | 78.9% |
 | Abilities | 126 | 0 | 0.0% |
 | Items | 44 | 0 | 0.0% |
 
@@ -25,7 +25,7 @@ Fully supported teams: 0.0%
 | icebeam | Ice Beam | 6893 | 52.6% | yes |
 | roost | Roost | 5900 | 47.7% | yes |
 | swordsdance | Swords Dance | 5279 | 43.2% | yes |
-| protect | Protect | 4722 | 39.0% | no |
+| protect | Protect | 4722 | 39.0% | yes |
 | scald | Scald | 4429 | 38.6% | yes |
 | uturn | U-turn | 4610 | 38.2% | no |
 | thunderbolt | Thunderbolt | 4445 | 37.6% | yes |
@@ -54,7 +54,7 @@ Fully supported teams: 0.0%
 | encore | Encore | 1811 | 17.0% | no |
 | xscissor | X-Scissor | 1766 | 16.8% | yes |
 | bravebird | Brave Bird | 1757 | 16.7% | yes |
-| outrage | Outrage | 1714 | 16.4% | no |
+| outrage | Outrage | 1714 | 16.4% | yes |
 | shadowball | Shadow Ball | 1682 | 16.0% | yes |
 | doubleedge | Double-Edge | 1688 | 15.9% | yes |
 | earthpower | Earth Power | 1690 | 15.7% | yes |
@@ -128,7 +128,7 @@ Fully supported teams: 0.0%
 | powerwhip | Power Whip | 522 | 5.2% | yes |
 | energyball | Energy Ball | 522 | 5.1% | yes |
 | sludgewave | Sludge Wave | 526 | 5.1% | yes |
-| fakeout | Fake Out | 494 | 4.9% | no |
+| fakeout | Fake Out | 494 | 4.9% | yes |
 | seedbomb | Seed Bomb | 483 | 4.8% | yes |
 | whirlwind | Whirlwind | 478 | 4.7% | no |
 | aerialace | Aerial Ace | 472 | 4.7% | no |
@@ -165,7 +165,7 @@ Fully supported teams: 0.0%
 | discharge | Discharge | 273 | 2.7% | yes |
 | agility | Agility | 265 | 2.6% | yes |
 | flamecharge | Flame Charge | 262 | 2.6% | yes |
-| solarbeam | Solar Beam | 251 | 2.5% | no |
+| solarbeam | Solar Beam | 251 | 2.5% | yes |
 | thunderpunch | Thunder Punch | 250 | 2.5% | yes |
 | bellydrum | Belly Drum | 247 | 2.5% | yes |
 | yawn | Yawn | 248 | 2.5% | no |
@@ -182,7 +182,7 @@ Fully supported teams: 0.0%
 | firefang | Fire Fang | 198 | 2.0% | yes |
 | storedpower | Stored Power | 198 | 2.0% | no |
 | blizzard | Blizzard | 198 | 2.0% | yes |
-| gigaimpact | Giga Impact | 189 | 1.9% | no |
+| gigaimpact | Giga Impact | 189 | 1.9% | yes |
 | retaliate | Retaliate | 189 | 1.9% | no |
 | dragonpulse | Dragon Pulse | 189 | 1.9% | no |
 | psystrike | Psystrike | 188 | 1.9% | no |
@@ -224,7 +224,7 @@ Fully supported teams: 0.0%
 | vacuumwave | Vacuum Wave | 91 | 0.9% | yes |
 | disable | Disable | 90 | 0.9% | no |
 | clearsmog | Clear Smog | 85 | 0.8% | yes |
-| petaldance | Petal Dance | 82 | 0.8% | no |
+| petaldance | Petal Dance | 82 | 0.8% | yes |
 | relicsong | Relic Song | 82 | 0.8% | no |
 | weatherball | Weather Ball | 82 | 0.8% | yes |
 | flamewheel | Flame Wheel | 81 | 0.8% | yes |
@@ -237,7 +237,7 @@ Fully supported teams: 0.0%
 | psychoshift | Psycho Shift | 61 | 0.6% | yes |
 | fierydance | Fiery Dance | 57 | 0.6% | yes |
 | icefang | Ice Fang | 50 | 0.5% | yes |
-| magmastorm | Magma Storm | 38 | 0.4% | no |
+| magmastorm | Magma Storm | 38 | 0.4% | yes |
 | fusionflare | Fusion Flare | 37 | 0.4% | no |
 | fusionbolt | Fusion Bolt | 27 | 0.3% | no |
 | refresh | Refresh | 19 | 0.2% | yes |

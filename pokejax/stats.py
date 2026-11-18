@@ -29,7 +29,9 @@ from pokejax.engine.state import (
 	BURN,
 	CONFUSION,
 	FREEZE,
+	LOCKED_MOVE,
 	MOVE,
+	MUST_RECHARGE,
 	ONGOING,
 	PARALYSIS,
 	POISON,
@@ -37,6 +39,7 @@ from pokejax.engine.state import (
 	SWITCH,
 	TIE,
 	TOXIC,
+	TWO_TURN_MOVE,
 )
 from pokejax.engine.step import step
 from pokejax.tables import load_tables
@@ -149,6 +152,12 @@ def _rollout_batch(teams, policy_keys, engine_tables):
 		selected_moves = jnp.where(
 			jnp.any(usable, axis=-1), selected_moves, engine_tables.struggle_id
 		)
+		locked = state.volatiles[indices[:, None], sides, LOCKED_MOVE]
+		charging = state.volatiles[indices[:, None], sides, TWO_TURN_MOVE]
+		recharging = state.volatiles[indices[:, None], sides, MUST_RECHARGE] > 0
+		selected_moves = jnp.where(locked > 0, locked, selected_moves)
+		selected_moves = jnp.where(charging > 0, charging, selected_moves)
+		selected_moves = jnp.where(recharging, -2, selected_moves)
 		is_move = was_ongoing[:, None] & (state.request == MOVE) & (actions < 4)
 		can_switch = (state.request == MOVE) | (state.request == SWITCH)
 		is_switch = was_ongoing[:, None] & can_switch & (actions >= 4)
@@ -267,7 +276,9 @@ def engine_summaries(showdown, *, seed, tables=None):
 				trace["decisions"].append(
 					{
 						"moves": [
-							None
+							"recharge"
+							if moves[decision, local, side] == -2
+							else None
 							if moves[decision, local, side] < 0
 							else move_ids[int(moves[decision, local, side])]
 							for side in range(2)

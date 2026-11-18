@@ -23,7 +23,17 @@ import jax
 import jax.numpy as jnp
 
 from .actions import legal_actions
-from .state import CONFUSION, NONE, ONGOING, TEAM_SLOTS
+from .state import (
+	CONFUSION,
+	LOCKED_MOVE,
+	MUST_RECHARGE,
+	NONE,
+	ONGOING,
+	PARTIAL_TRAP_SOURCE,
+	PARTIALLY_TRAPPED,
+	TEAM_SLOTS,
+	TWO_TURN_MOVE,
+)
 
 
 class OwnObservation(NamedTuple):
@@ -39,6 +49,10 @@ class OwnObservation(NamedTuple):
 	stats: jax.Array  # float32 [6, 6], hp/atk/def/spa/spd/spe
 	boosts: jax.Array  # float32 [7], atk/def/spa/spd/spe/accuracy/evasion
 	confused: jax.Array  # float32 scalar; duration is private
+	charging: jax.Array  # float32 scalar; public two-turn state, no duration
+	recharging: jax.Array  # float32 scalar
+	locked: jax.Array  # float32 scalar; public locked-move state
+	trapped: jax.Array  # float32 scalar; source must still be active
 
 
 class OpponentObservation(NamedTuple):
@@ -53,6 +67,10 @@ class OpponentObservation(NamedTuple):
 	unseen: jax.Array  # float32 [6]
 	boosts: jax.Array  # float32 [7], active only
 	confused: jax.Array  # float32 scalar; duration is private
+	charging: jax.Array  # float32 scalar; public two-turn state, no duration
+	recharging: jax.Array  # float32 scalar
+	locked: jax.Array  # float32 scalar; public locked-move state
+	trapped: jax.Array  # float32 scalar; source must still be active
 
 
 class Observation(NamedTuple):
@@ -73,6 +91,24 @@ def observe(state, side, engine_tables) -> Observation:
 	def f(x):
 		return x.astype(jnp.float32)
 
+	def public_turn_state(member_side):
+		source_side = 1 - member_side
+		source_slot = state.volatiles[member_side, PARTIAL_TRAP_SOURCE].astype(jnp.int32) - 1
+		source_active = source_slot == state.active[source_side]
+		source_alive = state.hp[source_side, jnp.clip(source_slot, 0, TEAM_SLOTS - 1)] > 0
+		trapped = (
+			(state.volatiles[member_side, PARTIALLY_TRAPPED] > 0) & source_active & source_alive
+		)
+		return (
+			f(state.volatiles[member_side, TWO_TURN_MOVE] > 0),
+			f(state.volatiles[member_side, MUST_RECHARGE] > 0),
+			f(state.volatiles[member_side, LOCKED_MOVE] > 0),
+			f(trapped),
+		)
+
+	own_turn_state = public_turn_state(side)
+	foe_turn_state = public_turn_state(foe)
+
 	own = OwnObservation(
 		state.species[side],
 		state.types[side].astype(jnp.int16) + 1,
@@ -86,6 +122,7 @@ def observe(state, side, engine_tables) -> Observation:
 		f(state.stats[side]) / 1000,
 		f(state.boosts[side]) / 6,
 		f(state.volatiles[side, CONFUSION] > 0),
+		*own_turn_state,
 	)
 	# A public rank selects one private slot without exposing the slot itself.
 	ranks = jnp.arange(1, TEAM_SLOTS + 1)
@@ -112,6 +149,7 @@ def observe(state, side, engine_tables) -> Observation:
 		f(~seen),
 		f(state.boosts[foe]) / 6,
 		f(state.volatiles[foe, CONFUSION] > 0),
+		*foe_turn_state,
 	)
 	request = jnp.where(state.winner == ONGOING, state.request[side], NONE)
 	return Observation(

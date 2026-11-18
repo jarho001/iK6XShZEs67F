@@ -14,12 +14,14 @@ from .state import (
 	PARALYSIS,
 	POISON,
 	SAND,
+	SMACKDOWN,
 	SPE,
 	SPIKES,
 	TEAM_SLOTS,
 	TOXIC,
 	TOXIC_SPIKES,
 )
+from .turn_moves import clear_partial_trap
 
 WEATHER_ACCURACY_ALWAYS = -2
 WEATHER_ACCURACY_BASE = -1
@@ -69,10 +71,11 @@ def apply_move_field_effects(state, side, move, enabled, field_hit, hit, key, fo
 	foe_order = jnp.where(first_layers, new_order, foe_order)
 	hazard_order = jnp.where((SIDES == foe)[:, None], foe_order[None, :], order)
 	hazard_order = jnp.where((SIDES == side)[:, None] & clear, 0, hazard_order)
-	return state._replace(
+	state = state._replace(
 		hazards=hazards.astype(state.hazards.dtype),
 		hazard_order=hazard_order.astype(state.hazard_order.dtype),
 	)
+	return clear_partial_trap(state, side, clear)
 
 
 def _resolve_entry_faint(state, enabled_sides):
@@ -91,7 +94,9 @@ def _active_member_mask(slots):
 
 def _apply_spikes_handler(state, slots, enabled, tables):
 	types = state.types[SIDES, slots]
-	grounded = ~jnp.any(types == tables.flying_type, axis=1)
+	grounded = ~jnp.any(types == tables.flying_type, axis=1) | (
+		state.volatiles[SIDES, SMACKDOWN] > 0
+	)
 	hp_before = state.hp[SIDES, slots].astype(jnp.int32)
 	maximum = state.stats[SIDES, slots, 0].astype(jnp.int32)
 	spikes = state.hazards[:, SPIKES].astype(jnp.int32)
@@ -107,7 +112,9 @@ def _apply_spikes_handler(state, slots, enabled, tables):
 
 def _apply_toxic_spikes_handler(state, slots, enabled, tables):
 	types = state.types[SIDES, slots]
-	grounded = ~jnp.any(types == tables.flying_type, axis=1)
+	grounded = ~jnp.any(types == tables.flying_type, axis=1) | (
+		state.volatiles[SIDES, SMACKDOWN] > 0
+	)
 	hp = state.hp[SIDES, slots]
 	toxic_layers = state.hazards[:, TOXIC_SPIKES].astype(jnp.int32)
 	poison_type = jnp.any(types == tables.poison_type, axis=1)

@@ -135,6 +135,7 @@ def reset(key, teams: Teams, engine_tables: EngineTables) -> BattleState:
 		seen_order=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.int8).at[:, 0].set(1),
 		revealed_moves=jnp.zeros((NUM_SIDES, TEAM_SLOTS, MOVE_SLOTS), jnp.uint8),
 		active=jnp.zeros(NUM_SIDES, jnp.int8),
+		active_turns=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.uint8).at[:, 0].set(1),
 		boosts=jnp.zeros((NUM_SIDES, NUM_BOOSTS), jnp.int8),
 		volatiles=jnp.zeros((NUM_SIDES, NUM_VOLATILES), jnp.int16),
 		weather=jnp.asarray(0, jnp.int8),

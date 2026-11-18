@@ -3,7 +3,7 @@
 import jax.numpy as jnp
 
 from .actions import SIDES
-from .state import HP, NO_TYPE, ROOST
+from .state import HP, NO_TYPE, NUM_VOLATILES, ROOST, TEAM_SLOTS
 
 
 def _heal_fraction(value, numerator, denominator, callback):
@@ -47,13 +47,15 @@ def apply_healing_active(state, side, move, enabled, hit, active_hp, tables):
 	new_types = jnp.where(
 		jnp.all(new_types < 0), jnp.asarray([t.normal_type, NO_TYPE], old_types.dtype), new_types
 	)
-	types = state.types.at[side, user].set(jnp.where(roost, new_types, old_types))
-	roost_types = state.roost_types.at[side, user].set(
-		jnp.where(roost, old_types, state.roost_types[side, user])
+	team_slots = jnp.arange(TEAM_SLOTS)
+	user_mask = (SIDES == side)[:, None] & (team_slots[None, :] == user)
+	types = jnp.where(user_mask[:, :, None] & roost, new_types[None, None, :], state.types)
+	roost_types = jnp.where(
+		user_mask[:, :, None] & roost, old_types[None, None, :], state.roost_types
 	)
-	volatiles = state.volatiles.at[side, ROOST].set(
-		jnp.where(roost, 1, state.volatiles[side, ROOST])
-	)
+	columns = jnp.arange(NUM_VOLATILES)
+	roost_mask = (SIDES == side)[:, None] & (columns[None, :] == ROOST) & roost
+	volatiles = jnp.where(roost_mask, 1, state.volatiles)
 	return (
 		state._replace(types=types, roost_types=roost_types, volatiles=volatiles),
 		active_hp,
@@ -67,5 +69,6 @@ def apply_healing(state, side, move, enabled, hit, tables):
 	state, active_hp, healed = apply_healing_active(
 		state, side, move, enabled, hit, active_hp, tables
 	)
-	hp = state.hp.at[SIDES, state.active].set(active_hp.astype(state.hp.dtype))
+	active_slots = jnp.arange(state.hp.shape[1])[None, :] == state.active[:, None]
+	hp = jnp.where(active_slots, active_hp[:, None].astype(state.hp.dtype), state.hp)
 	return state._replace(hp=hp), healed

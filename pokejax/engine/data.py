@@ -93,6 +93,23 @@ class EngineTables(NamedTuple):
 	weather_residual_immune: jax.Array
 	weather_status_immune: jax.Array
 	poison_type: jax.Array
+	move_stall_kind: jax.Array
+	move_volatile_status: jax.Array
+	move_self_volatile: jax.Array
+	move_breaks_protect: jax.Array
+	move_protects: jax.Array
+	move_charge: jax.Array
+	move_turn_volatile_ids: jax.Array
+	move_charge_semi: jax.Array
+	move_charge_boosts: jax.Array
+	move_charge_sun_skip: jax.Array
+	move_fakeout: jax.Array
+	move_target_foe: jax.Array
+	move_spread: jax.Array
+	move_hits_semi: jax.Array
+	move_semi_power: jax.Array
+	move_weather_power_scale: jax.Array
+	move_magnitude: jax.Array
 
 
 def build_engine_tables(tables: Tables) -> EngineTables:
@@ -211,6 +228,9 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 	):
 		weather_type[weather_ball, weather] = tables.types.index[type_name]
 		weather_power[weather_ball, weather] = 2
+	weather_power_scale = np.full((len(moves.ids), NUM_WEATHERS), 4096, np.int16)
+	solarbeam = moves.index["solarbeam"]
+	weather_power_scale[solarbeam, (RAIN, SAND, HAIL)] = 2048
 	weather_heal = np.broadcast_to(
 		moves.heal[:, None, :], (len(moves.ids), NUM_WEATHERS, 2)
 	).astype(np.int16, copy=True)
@@ -233,6 +253,62 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 	weather_immune[HAIL, tables.types.index["ice"]] = True
 	weather_status_immune = np.zeros((NUM_WEATHERS, 7), np.bool_)
 	weather_status_immune[SUN, FREEZE] = True
+	stall_kind = np.zeros(len(moves.ids), np.uint8)
+	stall_kind[moves.volatile_status == 1] = 1
+	stall_kind[moves.volatile_status == 2] = 2
+	stall_kind[moves.index["quickguard"]] = 3
+	stall_kind[moves.index["wideguard"]] = 4
+	charge = moves.flags[:, moves.flag_names.index("charge")]
+	move_turn_volatile_ids = np.asarray(
+		[
+			moves.index[name]
+			for name in (
+				"fly",
+				"dig",
+				"bounce",
+				"dive",
+				"shadowforce",
+				"skullbash",
+				"skyattack",
+				"razorwind",
+				"solarbeam",
+				"freezeshock",
+				"iceburn",
+			)
+		],
+		dtype=np.int16,
+	)
+	charge_semi = np.zeros(len(moves.ids), np.uint8)
+	for name in ("fly", "bounce"):
+		charge_semi[moves.index[name]] = 1
+	charge_semi[moves.index["dig"]] = 2
+	charge_semi[moves.index["dive"]] = 3
+	charge_semi[moves.index["shadowforce"]] = 4
+	charge_boosts = np.zeros((len(moves.ids), 7), np.int8)
+	charge_boosts[moves.index["skullbash"], 1] = 1
+	hits_semi = np.zeros((len(moves.ids), 5), np.bool_)
+	semi_power = np.zeros_like(hits_semi)
+	for semi, names in (
+		(1, ("gust", "twister", "skyuppercut", "thunder", "hurricane", "smackdown")),
+		(2, ("earthquake", "magnitude")),
+		(3, ("surf", "whirlpool")),
+	):
+		for name in names:
+			hits_semi[moves.index[name], semi] = True
+	for semi, names in (
+		(1, ("gust", "twister")),
+		(2, ("earthquake", "magnitude")),
+		(3, ("surf", "whirlpool")),
+	):
+		for name in names:
+			semi_power[moves.index[name], semi] = True
+	target_foe = np.isin(
+		np.asarray(moves.target_names)[moves.target],
+		("normal", "any", "randomNormal", "allAdjacent", "allAdjacentFoes"),
+	)
+	spread = np.isin(
+		np.asarray(moves.target_names)[moves.target], ("allAdjacent", "allAdjacentFoes")
+	)
 	return EngineTables(
 		*map(
 			jnp.asarray,
@@ -303,6 +379,23 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 				weather_immune,
 				weather_status_immune,
 				np.asarray(tables.types.index["poison"], dtype=np.int32),
+				stall_kind,
+				moves.volatile_status,
+				moves.self_volatile,
+				moves.breaks_protect,
+				moves.flags[:, moves.flag_names.index("protect")],
+				charge,
+				move_turn_volatile_ids,
+				charge_semi,
+				charge_boosts,
+				np.asarray(moves.ids) == "solarbeam",
+				np.asarray(moves.ids) == "fakeout",
+				target_foe,
+				spread,
+				hits_semi,
+				semi_power,
+				weather_power_scale,
+				np.asarray(moves.ids) == "magnitude",
 			),
 		)
 	)

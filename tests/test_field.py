@@ -99,19 +99,19 @@ def test_weather_modifier_accuracy_weather_ball_and_rock_special_defense(setup):
 	)
 	surf = tables.moves.index["surf"]
 
-	clear = move_damage_bases(state, 0, surf, t)[0]
+	clear = move_damage_bases(state, 0, surf, KEY, FORCED, t)[0]
 	rain = state._replace(weather=jnp.int8(RAIN))
 	sun = state._replace(weather=jnp.int8(SUN))
 	assert int(clear) == 81
-	assert int(move_damage_bases(rain, 0, surf, t)[0]) == 121
-	assert int(move_damage_bases(sun, 0, surf, t)[0]) == 40
+	assert int(move_damage_bases(rain, 0, surf, KEY, FORCED, t)[0]) == 121
+	assert int(move_damage_bases(sun, 0, surf, KEY, FORCED, t)[0]) == 40
 	assert int(t.weather_damage_by_type[RAIN, water]) == 6144
 	assert int(t.weather_damage_by_type[RAIN, fire]) == 2048
 
 	weather_ball = tables.moves.index["weatherball"]
 	ball_sun = sun._replace(moves=sun.moves.at[0, 0, 0].set(weather_ball))
 	assert int(effective_move_type(ball_sun, weather_ball, t)) == fire
-	assert int(move_damage_bases(ball_sun, 0, weather_ball, t)[0]) == 129
+	assert int(move_damage_bases(ball_sun, 0, weather_ball, KEY, FORCED, t)[0]) == 129
 
 	thunder = tables.moves.index["thunder"]
 	hurricane = tables.moves.index["hurricane"]
@@ -129,8 +129,8 @@ def test_weather_modifier_accuracy_weather_ball_and_rock_special_defense(setup):
 		weather=jnp.int8(SAND),
 	)
 	flamethrower = tables.moves.index["flamethrower"]
-	assert int(move_damage_bases(rock_target, 0, flamethrower, t)[0]) < int(
-		move_damage_bases(state, 0, flamethrower, t)[0]
+	assert int(move_damage_bases(rock_target, 0, flamethrower, KEY, FORCED, t)[0]) < int(
+		move_damage_bases(state, 0, flamethrower, KEY, FORCED, t)[0]
 	)
 
 

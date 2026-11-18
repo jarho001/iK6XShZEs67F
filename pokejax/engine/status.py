@@ -5,7 +5,17 @@ import jax.numpy as jnp
 from .actions import SIDES
 from .field import effective_move_type
 from .randomness import FULL_PARALYSIS, SLEEP_DURATION, THAW, chance, integer
-from .state import FREEZE, HEALTHY, PARALYSIS, SLEEP, TEAM_SLOTS, TOXIC
+from .state import (
+	FREEZE,
+	HEALTHY,
+	MUST_RECHARGE,
+	PARALYSIS,
+	SLEEP,
+	TEAM_SLOTS,
+	TOXIC,
+	TWO_TURN_MOVE,
+)
+from .turn_moves import set_active_volatile
 from .volatiles import before_move as volatile_before_move
 
 REST, PARTY_CURE, TRANSFER, REFRESH = range(1, 5)
@@ -23,7 +33,17 @@ def switch_in(state, side, slot, enabled):
 	)
 
 
-def before_move(state, side, move, enabled, key, forced, tables):
+def before_move(state, side, move, enabled, key, forced, tables, recharge=False):
+	started = enabled
+	was_charging = state.volatiles[side, TWO_TURN_MOVE] > 0
+	recharge_now = enabled & recharge
+	state = set_active_volatile(
+		state,
+		side,
+		MUST_RECHARGE,
+		jnp.where(recharge_now, 0, state.volatiles[side, MUST_RECHARGE]),
+	)
+	enabled &= ~recharge_now
 	slot = state.active[side]
 	status = state.status[side, slot]
 	counter = state.status_counter[side, slot]
@@ -34,14 +54,22 @@ def before_move(state, side, move, enabled, key, forced, tables):
 	thaw = enabled & (status == FREEZE) & ~can_defrost & chance(key, forced, THAW, side, 0, 1, 5)
 	frozen = enabled & (status == FREEZE) & ~thaw & ~can_defrost
 	clear = wake | thaw
+	member_mask = (SIDES == side)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == slot)
 	state = state._replace(
-		status=state.status.at[side, slot].set(jnp.where(clear, HEALTHY, status)),
-		status_counter=state.status_counter.at[side, slot].set(jnp.where(clear, 0, counter)),
+		status=jnp.where(member_mask & clear, HEALTHY, state.status),
+		status_counter=jnp.where(member_mask, jnp.where(clear, 0, counter), state.status_counter),
 	)
 	enabled &= ~(sleeping & ~wake) & ~frozen
 	state, enabled = volatile_before_move(state, side, enabled, key, forced)
 	paralyzed = enabled & (status == PARALYSIS) & chance(key, forced, FULL_PARALYSIS, side, 0, 1, 4)
-	return state, enabled & ~paralyzed
+	can_act = enabled & ~paralyzed
+	state = set_active_volatile(
+		state,
+		side,
+		TWO_TURN_MOVE,
+		jnp.where(was_charging & started & ~can_act, 0, state.volatiles[side, TWO_TURN_MOVE]),
+	)
+	return state, can_act
 
 
 def inflict_status(state, side, inflicted, enabled, key, forced, tables):
@@ -148,4 +176,5 @@ def after_hit(state, side, move, enabled, tables):
 	thaw &= (
 		effective_move_type(state, move, tables) == tables.fire_type
 	) | tables.move_thaws_target[move]
-	return state._replace(status=state.status.at[foe, slot].set(jnp.where(thaw, HEALTHY, status)))
+	target_mask = (SIDES == foe)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == slot)
+	return state._replace(status=jnp.where(target_mask & thaw, HEALTHY, state.status))
