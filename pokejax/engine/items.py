@@ -7,6 +7,8 @@ import numpy as np
 
 from pokejax.tables import Tables
 
+from .abilities import ability_cures, berry_allowed, reveal_abilities, status_immunity
+from .modifiers import chain, modify
 from .state import (
 	BURN,
 	CHOICE_MOVE,
@@ -296,18 +298,23 @@ def gather_active_items(state, tables) -> ActiveItemRows:
 	)
 
 
-def apply_stat_modifier(value, side, stat, rows):
-	"""Apply one active held-item stat modifier after stat-stage scaling."""
-	active = rows.stat_species[side]
-	active &= ~rows.stat_requires_nfe[side] | rows.species_nfe[side]
-	modifier = rows.stat_modifier[side, stat].astype(jnp.int32)
-	modified = (value.astype(jnp.int32) * modifier + 2047) // 4096
-	return jnp.where(active, modified, value).astype(value.dtype)
+def stat_modifier(stat, rows):
+	active = rows.stat_species & (~rows.stat_requires_nfe | rows.species_nfe)
+	return jnp.where(active, rows.stat_modifier[..., stat], 4096)
 
 
-def apply_active_stat_modifiers(values, stat, rows):
-	"""Apply the same stat hook to both active Pokemon with static side axes."""
-	return jnp.stack([apply_stat_modifier(values[side], side, stat, rows) for side in (0, 1)])
+def apply_stat_modifier(value, side, stat, rows, modifier=4096):
+	"""Apply ability and held-item modifiers together at the stat event boundary."""
+	item = jnp.where(
+		rows.stat_species[side] & (~rows.stat_requires_nfe[side] | rows.species_nfe[side]),
+		rows.stat_modifier[side, stat],
+		4096,
+	)
+	return modify(value, chain(modifier, item)).astype(value.dtype)
+
+
+def apply_active_stat_modifiers(values, stat, rows, modifier=4096):
+	return modify(values, chain(modifier, stat_modifier(stat, rows)))
 
 
 def reveal_active_items(state, sides):
@@ -351,7 +358,7 @@ def item_base_power_modifier(side, type_, gem_trigger, damage_kind, rows):
 	return jnp.where(gem_hook, 6144, jnp.where(type_hook, 4915, 4096)).astype(jnp.int32)
 
 
-def apply_after_move_items(state, side, move, enabled, move_hit, rows, tables):
+def apply_after_move_items(state, side, move, enabled, move_hit, rows, tables, sheer=False):
 	"""Resolve White Herb and Life Orb after a move's normal hit effects."""
 	negative = jnp.any(state.boosts < 0, axis=1)
 	white_herb = enabled & rows.boost_restore & negative & (state.hp[SIDES, state.active] > 0)
@@ -363,7 +370,7 @@ def apply_after_move_items(state, side, move, enabled, move_hit, rows, tables):
 	# self-switch effect does not set source.forceSwitchFlag before this hook.
 	user_side = SIDES == side
 	recoil = user_side & enabled & move_hit & (rows.damage_kind == DAMAGE_LIFE_ORB)
-	recoil &= tables.move_category[move] != 2
+	recoil &= ~jnp.asarray(sheer) & (tables.move_category[move] != 2)
 	user = state.active[side]
 	maximum = state.stats[side, user, HP].astype(jnp.int32)
 	hp = state.hp[side, user].astype(jnp.int32)
@@ -381,20 +388,34 @@ def gather_active_update_hooks(state, tables):
 	return ActiveItemUpdateHooks(rows[:, BERRY_KIND], rows[:, BOOST_RESTORE] != 0)
 
 
-def update_active_items(state, enabled, rows):
-	"""Resolve berries and White Herb at Showdown's onUpdate boundaries."""
+def update_active_items(state, enabled, rows, abilities=None, ignore_confusion=False):
+	"""Resolve active cures and held-item updates in event order."""
 	active = state.active
 	hp = state.hp[SIDES, active].astype(jnp.int32)
 	maximum = state.stats[SIDES, active, HP].astype(jnp.int32)
 	status = state.status[SIDES, active]
-	confused = state.volatiles[SIDES, CONFUSION] > 0
+	confused = (state.volatiles[SIDES, CONFUSION] > 0) & ~jnp.asarray(ignore_confusion)
+	status_cure = jnp.zeros((2,), jnp.bool_)
+	confusion_cure = status_cure
+	can_eat = True
+	if abilities is not None:
+		status_cure, confusion_cure = ability_cures(state, abilities)
+		status_cure &= enabled
+		confusion_cure &= enabled
+		can_eat = berry_allowed(state, abilities)
+		state = reveal_abilities(state, status_cure | confusion_cure)
 	berry = rows.berry_kind
-	lum = (berry == BERRY_LUM) & ((status != HEALTHY) | confused)
-	chesto = (berry == BERRY_CHESTO) & (status == SLEEP)
+	lum = (berry == BERRY_LUM) & (
+		((status != HEALTHY) & ~status_cure) | (confused & ~confusion_cure)
+	)
+	chesto = (berry == BERRY_CHESTO) & (status == SLEEP) & ~status_cure
 	sitrus = (berry == BERRY_SITRUS) & (hp > 0) & (2 * hp <= maximum) & (hp < maximum)
+	lum &= can_eat & (hp > 0)
+	chesto &= can_eat & (hp > 0)
+	sitrus &= can_eat
 	consume = enabled & (lum | chesto | sitrus)
-	clear_status = enabled & (lum | chesto)
-	clear_confusion = enabled & lum
+	clear_status = (enabled & (lum | chesto)) | status_cure
+	clear_confusion = (enabled & lum) | confusion_cure
 	white_herb = enabled & rows.boost_restore & jnp.any(state.boosts < 0, axis=1) & (hp > 0)
 	boosts = jnp.where(
 		white_herb[:, None], jnp.where(state.boosts < 0, 0, state.boosts), state.boosts
@@ -455,7 +476,7 @@ def apply_residual_white_herb(state, enabled, rows):
 	return consume_active_items(state, trigger)
 
 
-def apply_residual_status_items(state, enabled, key, forced, tables, rows):
+def apply_residual_status_items(state, enabled, key, forced, tables, rows, abilities, weather):
 	"""Apply Toxic and Flame Orbs together; their effects touch only the holder."""
 	del key, forced
 	kind = rows.residual_kind
@@ -465,7 +486,9 @@ def apply_residual_status_items(state, enabled, key, forced, tables, rows):
 	immune = jnp.any(
 		(types >= 0) & tables.status_immune[status[:, None], jnp.maximum(types, 0)], axis=1
 	)
-	immune |= tables.weather_status_immune[state.weather, status]
+	immune |= tables.weather_status_immune[weather, status] | status_immunity(
+		abilities, status, weather
+	)
 	attempt = enabled & (state.hp[SIDES, state.active] > 0) & (toxic | (kind == RESIDUAL_FLAME_ORB))
 	applied = attempt & (state.status[SIDES, state.active] == HEALTHY) & ~immune
 	slots = jnp.arange(TEAM_SLOTS)[None, :] == state.active[:, None]

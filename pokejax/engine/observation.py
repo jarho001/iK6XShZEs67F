@@ -54,6 +54,7 @@ class OwnObservation(NamedTuple):
 	recharging: jax.Array  # float32 scalar
 	locked: jax.Array  # float32 scalar; public locked-move state
 	trapped: jax.Array  # float32 scalar; source must still be active
+	ability: jax.Array  # int16 [6]
 	item: jax.Array  # int16 [6], current held item IDs
 	item_consumed: jax.Array  # bool [6]
 	item_knocked_off: jax.Array  # bool [6]
@@ -75,6 +76,7 @@ class OpponentObservation(NamedTuple):
 	recharging: jax.Array  # float32 scalar
 	locked: jax.Array  # float32 scalar; public locked-move state
 	trapped: jax.Array  # float32 scalar; source must still be active
+	ability: jax.Array  # int16 [6]
 	item: jax.Array  # int16 [6], revealed opponent item IDs; zero while hidden
 	item_revealed: jax.Array  # float32 [6], protocol has named the item
 	item_consumed: jax.Array  # float32 [6], visible after announced consumption
@@ -132,6 +134,7 @@ def observe(state, side, engine_tables) -> Observation:
 		f(state.boosts[side]) / 6,
 		f(state.volatiles[side, CONFUSION] > 0),
 		*own_turn_state,
+		state.ability[side],
 		state.item[side],
 		state.item_consumed[side],
 		state.item_knocked_off[side],
@@ -163,6 +166,7 @@ def observe(state, side, engine_tables) -> Observation:
 		f(state.boosts[foe]) / 6,
 		f(state.volatiles[foe, CONFUSION] > 0),
 		*foe_turn_state,
+		jnp.where(seen, state.ability_public[foe, slots], 0),
 		jnp.where(item_revealed, state.item_public[foe, slots], 0).astype(jnp.int16),
 		f(item_revealed),
 		f(item_revealed & state.item_consumed[foe, slots]),

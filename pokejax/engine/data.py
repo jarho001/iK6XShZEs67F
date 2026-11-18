@@ -9,6 +9,7 @@ import numpy as np
 from pokejax.support import CONFUSION_MOVES, SECONDARY_MOVES
 from pokejax.tables import Tables
 
+from .abilities import build_ability_hooks
 from .items import build_item_hook_table
 from .state import (
 	BURN,
@@ -118,6 +119,13 @@ class EngineTables(NamedTuple):
 	species_nfe: jax.Array
 	species_num: jax.Array
 	item_hooks: object
+	ability_hooks: jax.Array
+	move_punch: jax.Array
+	move_sheer_force: jax.Array
+	ice_type: jax.Array
+	fighting_type: jax.Array
+	captivate_id: jax.Array
+	anticipation_type: jax.Array
 
 
 def build_engine_tables(tables: Tables) -> EngineTables:
@@ -317,6 +325,11 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 	spread = np.isin(
 		np.asarray(moves.target_names)[moves.target], ("allAdjacent", "allAdjacentFoes")
 	)
+	# Anticipation asks only whether a base move type can hit super effectively.
+	exponents = np.pad(tables.types.exponent, ((0, 0), (1, 0)))
+	immunities = np.pad(tables.types.immune, ((0, 0), (1, 0)))
+	anticipation_type = (exponents[:, :, None] + exponents[:, None, :]) > 0
+	anticipation_type &= ~(immunities[:, :, None] | immunities[:, None, :])
 	return EngineTables(
 		*map(
 			jnp.asarray,
@@ -416,4 +429,11 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 			),
 		),
 		item_hooks=build_item_hook_table(tables),
+		ability_hooks=build_ability_hooks(tables),
+		move_punch=jnp.asarray(moves.flags[:, moves.flag_names.index("punch")]),
+		move_sheer_force=jnp.asarray(np.any(moves.secondary_chance > 0, axis=1)),
+		ice_type=jnp.asarray(tables.types.index["ice"], jnp.int32),
+		fighting_type=jnp.asarray(tables.types.index["fighting"], jnp.int32),
+		captivate_id=jnp.asarray(moves.index["captivate"], jnp.int32),
+		anticipation_type=jnp.asarray(anticipation_type),
 	)

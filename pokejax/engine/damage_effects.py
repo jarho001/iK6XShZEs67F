@@ -3,8 +3,17 @@
 import jax.numpy as jnp
 from jax import lax
 
+from .abilities import (
+	OBLIVIOUS,
+	ROCK_HEAD,
+	SKILL_LINK,
+	absorb_hit,
+	absorption,
+	has_hook,
+	reveal_abilities,
+)
 from .actions import SIDES
-from .damage import accuracy_hit, damage_for_hits, move_damage_bases
+from .damage import accuracy_hit, damage_for_hits, move_damage_bases, type_matchup
 from .field import effective_move_type
 from .items import CONTACT_ROCKY_HELMET, DAMAGE_TAKEN_FOCUS_SASH, update_item_state
 from .move_effects import apply_healing_active
@@ -21,7 +30,22 @@ def _round_fraction(value, numerator, denominator):
 	return lax.div(value * numerator.astype(jnp.int32) + denominator // 2, denominator)
 
 
-def apply_damage_effects(state, side, move, enabled, blocked, key, forced, tables, item_rows):
+def apply_damage_effects(
+	state,
+	side,
+	move,
+	enabled,
+	guarded,
+	invulnerable,
+	key,
+	forced,
+	tables,
+	item_rows,
+	rows,
+	weather,
+	sheer,
+	analytic,
+):
 	"""Resolve a fixed five-hit axis with one move-level damage calculation."""
 	t = tables
 	foe = 1 - side
@@ -30,7 +54,8 @@ def apply_damage_effects(state, side, move, enabled, blocked, key, forced, table
 	self_faint_kind = t.move_self_faint[move]
 	pre_faint = enabled & (self_faint_kind == SELF_FAINT_ALWAYS)
 
-	checked_hit = accuracy_hit(state, side, move, key, forced, t)
+	blocked = guarded | invulnerable
+	checked_hit = accuracy_hit(state, side, move, key, forced, t, rows, weather)
 	count = hit_count(
 		key,
 		forced,
@@ -38,14 +63,43 @@ def apply_damage_effects(state, side, move, enabled, blocked, key, forced, table
 		t.move_hit_min[move].astype(jnp.int32),
 		t.move_hit_max[move].astype(jnp.int32),
 	)
-	type_ = effective_move_type(state, move, t)
+	count = jnp.where(has_hook(rows[side], SKILL_LINK), t.move_hit_max[move], count)
+	type_ = effective_move_type(state, move, t, weather)
+	immune, exponent, levitate = type_matchup(state, side, move, type_, t, rows)
+	immune_for_move = immune & ((t.move_category[move] != 2) | t.move_checks_immunity[move])
+	absorbed = absorption(
+		state, side, rows[foe], type_, exponent, immune_for_move, enabled & ~blocked, move, t
+	)
+	oblivious = enabled & ~blocked & (move == t.captivate_id) & has_hook(rows[foe], OBLIVIOUS)
+	state = reveal_abilities(
+		state,
+		(SIDES == foe)
+		& (absorbed | oblivious | (enabled & levitate & immune_for_move & ~invulnerable)),
+	)
+	blocked |= absorbed | oblivious
 	gem_trigger = enabled & ~blocked & checked_hit & (t.move_category[move] != 2)
 	gem_trigger &= (move != t.struggle_id) & (item_rows.gem_type[side] == type_)
-	gem_trigger &= target_hp_before > 0
-	bases = move_damage_bases(state, side, move, key, forced, t, item_rows, gem_trigger)
+	gem_trigger &= (target_hp_before > 0) & ~immune
+	bases = move_damage_bases(
+		state,
+		side,
+		move,
+		key,
+		forced,
+		t,
+		item_rows,
+		gem_trigger,
+		rows,
+		weather,
+		type_,
+		immune,
+		exponent,
+		sheer,
+		analytic,
+	)
 	hit_indices = jnp.arange(MAX_HITS, dtype=jnp.int32)
 	damage, can_damage = damage_for_hits(
-		state, side, move, hit_indices, bases, key, forced, t, item_rows
+		state, side, move, hit_indices, bases, key, forced, t, item_rows, rows, type_
 	)
 	move_success = enabled & ~blocked & checked_hit & can_damage
 	active_hits = (hit_indices < count) & move_success
@@ -96,7 +150,10 @@ def apply_damage_effects(state, side, move, enabled, blocked, key, forced, table
 	recoil_fraction = t.move_recoil[move]
 	recoil_base = jnp.where(t.move_recoil_basehp[move], user_max, total_damage)
 	recoil = _round_fraction(recoil_base, recoil_fraction[0], recoil_fraction[1])
-	recoil = jnp.where((total_damage > 0) & (recoil_fraction[0] > 0), jnp.maximum(recoil, 1), 0)
+	recoil_blocked = has_hook(rows[side], ROCK_HEAD) & (move != t.struggle_id)
+	recoil = jnp.where(
+		~recoil_blocked & (total_damage > 0) & (recoil_fraction[0] > 0), jnp.maximum(recoil, 1), 0
+	)
 	user_hp = jnp.maximum(user_hp - jnp.where(enabled, recoil, 0), 0)
 
 	crash = enabled & t.move_crash_damage[move] & ~effect_hit & (target_hp_before > 0)
@@ -105,13 +162,14 @@ def apply_damage_effects(state, side, move, enabled, blocked, key, forced, table
 	post_faint = enabled & (self_faint_kind == SELF_FAINT_ON_HIT) & effect_hit
 	user_hp = jnp.where(post_faint, 0, user_hp)
 	user_hp = jnp.where(pre_faint, 0, user_hp)
+	state, absorbed_hp = absorb_hit(state, foe, rows[foe], absorbed, target_hp_before)
 	active_hp = state.hp[SIDES, state.active].astype(jnp.int32)
-	active_hp = jnp.where(SIDES == foe, jnp.maximum(target_hp_before - total_damage, 0), active_hp)
+	active_hp = jnp.where(SIDES == foe, jnp.maximum(absorbed_hp - total_damage, 0), active_hp)
 	active_hp = jnp.where(SIDES == side, user_hp, active_hp)
 	# These move-table effects are mutually exclusive with primary move effects.
 	# Resolve them in this common HP write so every action scatters active HP once.
 	state, active_hp, _ = apply_healing_active(
-		state, side, move, enabled & ~blocked, checked_hit, active_hp, t
+		state, side, move, enabled & ~blocked, checked_hit, active_hp, t, weather
 	)
 	active_slots = jnp.arange(state.hp.shape[1])[None, :] == state.active[:, None]
 	hp = jnp.where(active_slots, active_hp[:, None].astype(state.hp.dtype), state.hp)

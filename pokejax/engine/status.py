@@ -2,6 +2,14 @@
 
 import jax.numpy as jnp
 
+from .abilities import (
+	OWN_TEMPO,
+	active_abilities,
+	effective_weather,
+	has_hook,
+	reveal_abilities,
+	status_immunity,
+)
 from .actions import SIDES
 from .field import effective_move_type
 from .randomness import FULL_PARALYSIS, SLEEP_DURATION, THAW, chance, integer
@@ -77,7 +85,10 @@ def inflict_status(state, side, inflicted, enabled, key, forced, tables):
 	slot = state.active[side]
 	types = state.types[side, slot]
 	immune = jnp.any((types >= 0) & tables.status_immune[inflicted, jnp.maximum(types, 0)])
-	immune |= tables.weather_status_immune[state.weather, inflicted]
+	rows = active_abilities(state, tables)
+	weather = effective_weather(state, rows)
+	immune |= tables.weather_status_immune[weather, inflicted]
+	immune |= status_immunity(rows[side], inflicted, weather)
 	clause = jnp.any(
 		(state.status[side] == SLEEP) & (state.sleep_from_foe[side] != 0) & (state.hp[side] > 0)
 	)
@@ -102,7 +113,7 @@ def inflict_status(state, side, inflicted, enabled, key, forced, tables):
 	)
 
 
-def apply_move(state, side, move, enabled, hit, key, forced, tables):
+def apply_move(state, side, move, enabled, hit, key, forced, tables, abilities, weather):
 	"""Apply move status effects with dense team masks and one field write."""
 	foe = 1 - side
 	user, target = state.active[side], state.active[foe]
@@ -121,13 +132,18 @@ def apply_move(state, side, move, enabled, hit, key, forced, tables):
 	inflicted = jnp.where(transfer, user_status, tables.move_status[move])
 	types = state.types[foe, target]
 	immune = jnp.any((types >= 0) & tables.status_immune[inflicted, jnp.maximum(types, 0)])
-	immune |= tables.weather_status_immune[state.weather, inflicted]
+	immune |= tables.weather_status_immune[weather, inflicted]
+	ability_immune = status_immunity(abilities[foe], inflicted, weather)
 	clause = jnp.any(
 		(state.status[foe] == SLEEP) & (state.sleep_from_foe[foe] != 0) & (state.hp[foe] > 0)
 	)
 	inflict = enabled & hit & ~tables.move_status_self[move]
 	inflict &= (state.hp[foe, target] > 0) & (inflicted != HEALTHY)
 	inflict &= (target_status == HEALTHY) & ~immune & ~((inflicted == SLEEP) & clause)
+	reveal_target = inflict & ability_immune & ~transfer
+	own_tempo = has_hook(abilities[foe], OWN_TEMPO) & (state.hp[foe, target] > 0)
+	reveal_target |= enabled & hit & tables.move_confusion[move] & own_tempo
+	inflict &= ~ability_immune
 	duration = (integer(key, forced, SLEEP_DURATION, foe, 0, 3) + 2).astype(jnp.int8)
 	target_status_after = jnp.where(inflict, inflicted, target_status)
 	status = jnp.where(target_mask & inflict, inflicted, status)
@@ -154,6 +170,13 @@ def apply_move(state, side, move, enabled, hit, key, forced, tables):
 		& (user_status != SLEEP)
 		& (state.hp[side, user] < state.stats[side, user, 0])
 	)
+	sleep_immunity = status_immunity(abilities[side], SLEEP, weather)
+	permanent_sleep_immunity = status_immunity(abilities[side], SLEEP, 0)
+	state = reveal_abilities(
+		state,
+		((SIDES == foe) & reveal_target) | ((SIDES == side) & rest & permanent_sleep_immunity),
+	)
+	rest &= ~sleep_immunity
 	status = jnp.where(user_mask & rest, SLEEP, status)
 	counter = jnp.where(user_mask & rest, 3, counter)
 	start = jnp.where(user_mask & rest, 3, start)
@@ -168,13 +191,13 @@ def apply_move(state, side, move, enabled, hit, key, forced, tables):
 	)
 
 
-def after_hit(state, side, move, enabled, tables):
+def after_hit(state, side, move, enabled, tables, weather=None):
 	foe = 1 - side
 	slot = state.active[foe]
 	status = state.status[foe, slot]
 	thaw = enabled & (state.hp[foe, slot] > 0) & (status == FREEZE)
 	thaw &= (
-		effective_move_type(state, move, tables) == tables.fire_type
+		effective_move_type(state, move, tables, weather) == tables.fire_type
 	) | tables.move_thaws_target[move]
 	target_mask = (SIDES == foe)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == slot)
 	return state._replace(status=jnp.where(target_mask & thaw, HEALTHY, state.status))

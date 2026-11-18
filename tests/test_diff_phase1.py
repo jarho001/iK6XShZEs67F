@@ -41,6 +41,7 @@ def test_fixtures(fixture):
 		"turns",
 		"resumable",
 		"items",
+		"abilities1",
 	],
 )
 def test_large_recording(name):

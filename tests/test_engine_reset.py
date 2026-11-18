@@ -69,13 +69,17 @@ def test_showdown_reset(tables, tmp_path):
 				np.testing.assert_array_equal(state.max_pp[index], pp)
 	np.testing.assert_array_equal(state.pp, state.max_pp)
 	assert np.all(state.active == 0)
-	assert np.all(state.boosts == 0)
 	assert np.all(state.status == 0)
 	assert np.all(state.status_counter == 0)
 	assert np.all(state.request == MOVE)
 	assert np.all(state.winner == ONGOING)
 	for name in teams._fields:
-		np.testing.assert_array_equal(getattr(state, name), getattr(teams, name))
+		if name == "item":
+			np.testing.assert_array_equal(
+				np.where(state.item_consumed, state.item_public, state.item), teams.item
+			)
+		else:
+			np.testing.assert_array_equal(getattr(state, name), getattr(teams, name))
 
 
 def test_oracle_regeneration(tmp_path):

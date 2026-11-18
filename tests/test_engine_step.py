@@ -71,7 +71,8 @@ def battle_pool(tmp_path_factory):
 def tables_and_state(battle_pool):
 	tables = load_tables()
 	t = build_engine_tables(tables)
-	state = reset(KEY, teams_from_pool(battle_pool, 0, 1), t)
+	teams = teams_from_pool(battle_pool, 0, 1)
+	state = reset(KEY, teams._replace(ability=jnp.zeros_like(teams.ability)), t)
 	# Hand-built equal level/stats, large HP, one plain move, no STAB.
 	state = state._replace(
 		level=jnp.full_like(state.level, 100),

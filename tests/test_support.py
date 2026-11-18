@@ -11,7 +11,7 @@ from pokejax import support
 
 def test_initial_support(synthetic_pool, tables):
 	assert {"tackle", "swordsdance", "closecombat", "bellydrum"} <= support.SUPPORTED_MOVES
-	assert support.SUPPORTED_ABILITIES == frozenset()
+	assert {"levitate", "intimidate", "download"} <= support.SUPPORTED_ABILITIES
 	assert len(support.SUPPORTED_ITEMS) == 44
 	result = support.team_supported(synthetic_pool, tables)
 	assert result.shape == (3,)
@@ -29,6 +29,11 @@ def test_effects2_moves_match_allowed_file():
 	allowed = json.loads(Path("tests/fixtures/diff-effects2.allowed.json").read_text())
 	assert allowed["moves"] == sorted(allowed["moves"])
 	assert set(allowed["moves"]) <= support.SUPPORTED_MOVES
+
+
+def test_abilities_match_allowed_file():
+	allowed = json.loads(Path("tests/fixtures/diff-abilities1.allowed.json").read_text())
+	assert allowed["abilities"] == sorted(support.SUPPORTED_ABILITIES)
 
 
 def test_items_match_allowed_file():

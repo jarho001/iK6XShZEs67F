@@ -35,7 +35,8 @@ def setup():
 		},
 		tables,
 	)
-	s = reset(KEY, teams_from_pool(pool, 0, 1), t)
+	teams = teams_from_pool(pool, 0, 1)
+	s = reset(KEY, teams._replace(ability=jnp.zeros_like(teams.ability)), t)
 	s = s._replace(
 		stats=jnp.full_like(s.stats, 100).at[:, :, 0].set(160),
 		hp=jnp.full_like(s.hp, 160),

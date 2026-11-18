@@ -4,7 +4,18 @@ import jax.numpy as jnp
 
 from pokejax.tables import SECONDARY_SLOTS
 
+from .abilities import (
+	INNER_FOCUS,
+	OWN_TEMPO,
+	SERENE_GRACE,
+	SHIELD_DUST,
+	apply_boost_delta,
+	berry_allowed,
+	has_hook,
+	status_immunity,
+)
 from .actions import SIDES
+from .items import BERRY_LUM, consume_active_items
 from .randomness import (
 	CONFUSION_DURATION,
 	MAX_OCCURRENCES,
@@ -14,27 +25,35 @@ from .randomness import (
 	chance,
 	integer,
 )
-from .state import CONFUSION, FLINCH, HEALTHY, SLEEP, TEAM_SLOTS
+from .state import CONFUSION, FLINCH, HEALTHY, POISON, SLEEP, TEAM_SLOTS
 
 
-def apply_secondaries(state, side, move, first_hit, later_hits, key, forced, tables):
+def secondary_chances(tables, move, source):
+	return tables.move_secondary_chance[move] * jnp.where(has_hook(source, SERENE_GRACE), 2, 1)
+
+
+def apply_secondaries(
+	state, side, move, first_hit, later_hits, key, forced, tables, abilities, weather, sheer, items
+):
 	"""Roll both secondary rows together, then write active effects by side."""
 	rows = jnp.arange(SECONDARY_SLOTS)
 	later_forced = forced[SECONDARY, side, 2:MAX_OCCURRENCES:SECONDARY_SLOTS]
 	later_bits = key[SECONDARY, side, 2:MAX_OCCURRENCES:SECONDARY_SLOTS]
+	chance_ = secondary_chances(tables, move, abilities[side])
 	later_passed = jnp.where(
 		later_forced >= 0,
 		later_forced != 0,
-		(later_bits % 100) < tables.move_secondary_chance[move, 0],
+		(later_bits % 100) < chance_[0],
 	)
 	any_later = jnp.any(later_passed & later_hits)
-	chance_ = tables.move_secondary_chance[move]
 	required_species = tables.move_secondary_user_species[move]
 	user_species = state.species[side, state.active[side]]
 	eligible = (required_species == 0) | (user_species == required_species)
 	first_pass = first_hit & chance(key, forced, SECONDARY, side, rows, chance_, 100)
 	apply = eligible & (first_pass | ((rows == 0) & any_later))
-	targets = jnp.where(tables.move_secondary_self[move], side, 1 - side)
+	self_effect = tables.move_secondary_self[move]
+	apply &= ~sheer & (self_effect | ~has_hook(abilities[1 - side], SHIELD_DUST))
+	targets = jnp.where(self_effect, side, 1 - side)
 	by_side = targets[:, None] == SIDES
 	active = state.active
 	active_hp = state.hp[SIDES, active]
@@ -51,7 +70,9 @@ def apply_secondaries(state, side, move, first_hit, later_hits, key, forced, tab
 	immune = jnp.any(
 		present & tables.status_immune[inflicted[:, None], jnp.maximum(types, 0)], axis=1
 	)
-	immune |= tables.weather_status_immune[state.weather, inflicted]
+	immune |= tables.weather_status_immune[weather, inflicted] | status_immunity(
+		abilities[targets], inflicted, weather
+	)
 	sleep_clause = jnp.any(
 		(state.status == SLEEP) & (state.sleep_from_foe != 0) & (state.hp > 0),
 		axis=1,
@@ -59,6 +80,15 @@ def apply_secondaries(state, side, move, first_hit, later_hits, key, forced, tab
 	can_inflict = apply & (target_hp > 0) & (inflicted != HEALTHY)
 	can_inflict &= (active_status[targets] == HEALTHY) & ~immune
 	can_inflict &= ~((inflicted == SLEEP) & sleep_clause[targets])
+	# Poison from the first hit can use Lum before the next hit rolls its
+	# own secondary. A landed later hit also proves the target survived hit one.
+	foe = 1 - side
+	lum_between_hits = first_pass[0] & apply[0] & jnp.any(later_hits)
+	lum_between_hits &= (targets[0] == foe) & (inflicted[0] == POISON)
+	lum_between_hits &= (active_status[foe] == HEALTHY) & ~immune[0]
+	lum_between_hits &= (items.berry_kind[foe] == BERRY_LUM) & berry_allowed(state, abilities)[foe]
+	can_inflict &= ~((rows == 0) & lum_between_hits & ~any_later)
+	state = consume_active_items(state, (SIDES == foe) & lum_between_hits)
 	row0, row1 = can_inflict
 	row1 &= ~(row0 & (targets[0] == targets[1]))
 	status_effects = jnp.stack((row0, row1))[:, None] & by_side
@@ -79,15 +109,18 @@ def apply_secondaries(state, side, move, first_hit, later_hits, key, forced, tab
 	hit_effects = (apply & (target_hp > 0))[:, None] & by_side
 	for row in range(SECONDARY_SLOTS):
 		delta = jnp.where(hit_effects[row, :, None], tables.move_secondary_boosts[move, row], 0)
-		boosts = jnp.clip(boosts + delta, -6, 6)
+		boosts = apply_boost_delta(boosts, delta, abilities, SIDES != side)
 
 	volatile_kind = tables.move_secondary_volatile[move]
 	confusion = jnp.any(hit_effects & (volatile_kind == 1)[:, None], axis=0)
+	confusion &= ~has_hook(abilities, OWN_TEMPO)
 	confusion &= state.volatiles[:, CONFUSION] == 0
 	confusion_duration = (integer(key, forced, CONFUSION_DURATION, SIDES, 0, 4) + 2).astype(
 		state.volatiles.dtype
 	)
-	flinch = jnp.any(hit_effects & (volatile_kind == 2)[:, None], axis=0)
+	flinch = jnp.any(hit_effects & (volatile_kind == 2)[:, None], axis=0) & ~has_hook(
+		abilities, INNER_FOCUS
+	)
 	columns = jnp.arange(state.volatiles.shape[1])
 	volatiles = jnp.where(
 		confusion[:, None] & (columns == CONFUSION), confusion_duration[:, None], state.volatiles

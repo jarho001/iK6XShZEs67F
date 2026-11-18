@@ -4,9 +4,17 @@ import jax.numpy as jnp
 
 from pokejax.mechanics.stat_stage import scale_stat_stage
 
+from .abilities import (
+	WEATHER,
+	WEATHER_IMMUNITY,
+	active_abilities,
+	effective_weather,
+	grounded_ability,
+	status_immunity,
+	suppresses_weather,
+)
 from .actions import SIDES
-from .items import apply_active_stat_modifiers
-from .randomness import SWITCH_HANDLER_ORDER, WEATHER_CHANGE_ORDER, WEATHER_ORDER, first_side
+from .randomness import WEATHER_CHANGE_ORDER, WEATHER_ORDER, first_side
 from .state import (
 	BOOST_SPE,
 	HAIL,
@@ -21,6 +29,7 @@ from .state import (
 	TEAM_SLOTS,
 	TOXIC,
 	TOXIC_SPIKES,
+	TWO_TURN_MOVE,
 )
 from .turn_moves import clear_partial_trap
 
@@ -29,17 +38,24 @@ WEATHER_ACCURACY_BASE = -1
 WEATHER_DURATION = 5
 
 
-def effective_move_type(state, move, tables):
+def effective_move_type(state, move, tables, weather=None):
 	"""Return the move-table type after its weather type override."""
-	weather_type = tables.move_weather_type[move, state.weather].astype(jnp.int32)
+	weather_type = tables.move_weather_type[
+		move, state.weather if weather is None else weather
+	].astype(jnp.int32)
 	return jnp.where(weather_type >= 0, weather_type, tables.move_type[move].astype(jnp.int32))
 
 
-def weather_modify(value, modifier):
-	"""Showdown's Gen 5 Battle.modify rounding for a fixed-point modifier."""
-	value = value.astype(jnp.int32)
-	modifier = modifier.astype(jnp.int32)
-	return (value * modifier + 2047) // 4096
+def set_weather(state, weather, enabled, duration, ability=False):
+	"""An ability can replace existing finite weather of the same kind in Gen 5."""
+	change = enabled & (weather > 0)
+	change &= (weather != state.weather) | (ability & (state.weather_turns != 0))
+	return state._replace(
+		weather=jnp.where(change, weather, state.weather).astype(state.weather.dtype),
+		weather_turns=jnp.where(change, duration, state.weather_turns).astype(
+			state.weather_turns.dtype
+		),
+	), change
 
 
 def apply_move_field_effects(
@@ -48,18 +64,13 @@ def apply_move_field_effects(
 	"""Apply weather, hazards, and Rapid Spin through per-move table columns."""
 	apply = enabled & field_hit
 	weather = tables.move_weather[move].astype(state.weather.dtype)
-	weather_change = apply & (weather > 0) & (weather != state.weather)
 	# Field.setWeather emits WeatherChange even when the weather field was clear.
 	_ = first_side(key, forced, WEATHER_CHANGE_ORDER)
-	weather_state = jnp.where(weather_change, weather, state.weather)
 	weather_rock = item_rows.weather_kind[side] == weather
 	duration = jnp.where(
 		weather_rock, item_rows.weather_duration[side].astype(jnp.int32), WEATHER_DURATION
 	)
-	weather_turns = jnp.where(weather_change, duration, state.weather_turns).astype(
-		state.weather_turns.dtype
-	)
-	state = state._replace(weather=weather_state, weather_turns=weather_turns)
+	state, _ = set_weather(state, weather, apply, duration)
 
 	foe = 1 - side
 	hazard = tables.move_hazard[move]
@@ -91,10 +102,11 @@ def _active_member_mask(slots):
 	return jnp.arange(TEAM_SLOTS)[None, :] == slots[:, None]
 
 
-def _apply_switch_hazards_sides(state, slots, enabled, first, tables):
+def apply_active_switch_hazards(state, slots, enabled, first, tables, rows, weather, entrants=None):
 	"""Evaluate each hazard once per side, then commit in switch-in order."""
 	types = state.types[SIDES, slots]
 	grounded = ~jnp.any(types == tables.flying_type, axis=1) | (state.volatiles[:, SMACKDOWN] > 0)
+	grounded &= grounded_ability(state, rows)
 	before = state.hp[SIDES, slots].astype(jnp.int32)
 	active = enabled & grounded & (before > 0) & (state.winner == ONGOING)
 	spikes = state.hazards[:, SPIKES]
@@ -123,6 +135,17 @@ def _apply_switch_hazards_sides(state, slots, enabled, first, tables):
 	immune = jnp.any(
 		(types >= 0) & tables.status_immune[inflicted[:, None], jnp.maximum(types, 0)], axis=1
 	)
+	if entrants is not None:
+		# SwitchIn orders handlers by cached Speed before suborder. A faster
+		# entrant sets its weather after its own hazards and before the slower
+		# entrant's Toxic Spikes status check.
+		first_weather = entrants[first, WEATHER]
+		first_sets = enabled[first] & (after[first] > 0) & (first_weather > 0)
+		later_weather = jnp.where(first_sets, first_weather, state.weather)
+		alive_later = jnp.where(first_side, after > 0, before > 0)
+		later_weather = jnp.where(suppresses_weather(entrants, alive_later), 0, later_weather)
+		weather = jnp.where(first_side | ~jnp.all(enabled), weather, later_weather)
+	immune |= status_immunity(rows, inflicted, weather)
 	poison = toxic_active & ~poison_type & ~immune & (state.status[SIDES, slots] == HEALTHY)
 	poison_slots = member_mask & poison[:, None]
 	clear = absorb[:, None] & (jnp.arange(state.hazards.shape[1]) == TOXIC_SPIKES)
@@ -142,27 +165,15 @@ def _apply_switch_hazards_sides(state, slots, enabled, first, tables):
 
 
 def apply_switch_hazards(state, side, slot, enabled, tables):
-	"""Apply one incoming Pokemon's Spikes and Toxic Spikes callbacks."""
+	"""Apply one incoming member's hazards without changing its team slot."""
 	slots = jnp.where(SIDES == side, slot, state.active)
-	enabled_sides = (SIDES == side) & enabled
-	return _apply_switch_hazards_sides(state, slots, enabled_sides, side, tables)
-
-
-def apply_switch_hazards_ordered(state, switchers, enabled, key, forced, item_rows, tables):
-	"""Run grouped SwitchIn handlers in Showdown Speed and tie order."""
-	sides = SIDES
-	speed = scale_stat_stage(
-		state.stats[sides, state.active, SPE].astype(jnp.int32),
-		state.boosts[:, BOOST_SPE].astype(jnp.int32),
+	rows = tables.ability_hooks[state.ability[SIDES, slots]]
+	return apply_active_switch_hazards(
+		state, slots, (SIDES == side) & enabled, side, tables, rows, effective_weather(state, rows)
 	)
-	speed = apply_active_stat_modifiers(speed, SPE, item_rows)
-	speed = jnp.where(state.status[sides, state.active] == PARALYSIS, speed // 4, speed)
-	tie_first = first_side(key, forced, SWITCH_HANDLER_ORDER)
-	first = jnp.where(speed[0] == speed[1], tie_first, jnp.where(speed[0] > speed[1], 0, 1))
-	return _apply_switch_hazards_sides(state, state.active, enabled & switchers, first, tables)
 
 
-def weather_residual(state, enabled, key, forced, tables):
+def weather_residual(state, enabled, key, forced, tables, rows=None, speed=None):
 	"""Apply the weather field callback to both actives before resolving faints."""
 	sides = SIDES
 	weather = state.weather.astype(jnp.int32)
@@ -175,11 +186,15 @@ def weather_residual(state, enabled, key, forced, tables):
 	# clearWeather emits WeatherChange when a finite weather expires.
 	_ = first_side(key, forced, WEATHER_CHANGE_ORDER)
 
-	speed = scale_stat_stage(
-		state.stats[sides, state.active, SPE].astype(jnp.int32),
-		state.boosts[:, BOOST_SPE].astype(jnp.int32),
-	)
-	speed = jnp.where(state.status[sides, state.active] == PARALYSIS, speed // 4, speed)
+	if rows is None:
+		rows = active_abilities(state, tables)
+	if speed is None:
+		speed = scale_stat_stage(
+			state.stats[sides, state.active, SPE].astype(jnp.int32),
+			state.boosts[:, BOOST_SPE].astype(jnp.int32),
+		)
+		speed = jnp.where(state.status[sides, state.active] == PARALYSIS, speed // 4, speed)
+	weather = effective_weather(state, rows)
 	tie_order = first_side(key, forced, WEATHER_ORDER)
 	first = jnp.where(speed[0] == speed[1], tie_order, jnp.where(speed[0] > speed[1], 0, 1))
 
@@ -188,6 +203,10 @@ def weather_residual(state, enabled, key, forced, tables):
 	present = active_types >= 0
 	safe_types = jnp.maximum(active_types, 0)
 	immune = jnp.any(present & tables.weather_residual_immune[weather, safe_types], axis=1)
+	immune |= (rows[:, WEATHER_IMMUNITY] & (1 << weather)) != 0
+	# Dig and Dive's condition onImmunity callbacks block sand and hail.
+	semi = tables.move_charge_semi[jnp.maximum(state.volatiles[:, TWO_TURN_MOVE], 0)]
+	immune |= (semi == 2) | (semi == 3)
 	can_damage = callback & ((weather == SAND) | (weather == HAIL))
 	can_damage &= ~immune & (state.hp[sides, active_slots] > 0)
 	maximum = state.stats[sides, active_slots, 0].astype(jnp.int32)

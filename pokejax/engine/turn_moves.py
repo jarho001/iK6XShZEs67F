@@ -2,6 +2,7 @@
 
 import jax.numpy as jnp
 
+from .abilities import LEVITATE, NO_GUARD, apply_boost_delta, has_hook
 from .actions import SIDES
 from .randomness import LOCK_DURATION, STALL_SUCCESS, TRAP_DURATION, integer
 from .state import (
@@ -32,7 +33,7 @@ def set_active_volatile(state, side, column, value):
 	return state._replace(volatiles=volatiles)
 
 
-def target_is_blocked(state, side, move, tables):
+def target_move_guards(state, side, move, tables, abilities):
 	"""Protect, Quick Guard, Wide Guard and semi-invulnerability checks."""
 	foe = 1 - side
 	targeted = tables.move_target_foe[move]
@@ -50,7 +51,7 @@ def target_is_blocked(state, side, move, tables):
 	charge = jnp.maximum(state.volatiles[foe, TWO_TURN_MOVE], 0)
 	semi = tables.move_charge_semi[charge].astype(jnp.int32)
 	invulnerable = targeted & (semi > 0) & ~tables.move_hits_semi[move, semi]
-	return guarded | invulnerable
+	return guarded, invulnerable & ~jnp.any(has_hook(abilities, NO_GUARD))
 
 
 def try_stalling_move(state, side, move, enabled, will_act, key, forced, tables):
@@ -129,15 +130,17 @@ def locked_move(state, side):
 	return state.volatiles[side, LOCKED_MOVE]
 
 
-def apply_charge_boosts(state, side, move, enabled, tables):
+def apply_charge_boosts(state, side, move, enabled, tables, abilities):
 	"""Apply a charge-turn stat boost, such as Skull Bash's Defense rise."""
 	delta = tables.move_charge_boosts[move].astype(jnp.int32)
-	changed = jnp.clip(state.boosts.astype(jnp.int32) + delta[None, :], -6, 6)
+	changed = apply_boost_delta(
+		state.boosts, jnp.broadcast_to(delta, state.boosts.shape), abilities, False
+	)
 	boosts = jnp.where((SIDES == side)[:, None] & enabled, changed, state.boosts)
 	return state._replace(boosts=boosts.astype(state.boosts.dtype))
 
 
-def apply_move_volatiles(state, side, move, hit, key, forced, tables):
+def apply_move_volatiles(state, side, move, hit, key, forced, tables, abilities):
 	"""Apply table-declared trap, lock and recharge volatiles after a hit."""
 	foe = 1 - side
 	target = state.active[foe]
@@ -187,7 +190,9 @@ def apply_move_volatiles(state, side, move, hit, key, forced, tables):
 	target_charge = jnp.maximum(volatiles[foe, TWO_TURN_MOVE], 0).astype(jnp.int32)
 	target_semi = tables.move_charge_semi[target_charge]
 	smackdown = (tables.move_volatile_status[move] == 4) & hit
-	smackdown &= (state.hp[foe, target] > 0) & (target_is_flying | (target_semi == 1))
+	smackdown &= (state.hp[foe, target] > 0) & (
+		target_is_flying | (target_semi == 1) | has_hook(abilities[foe], LEVITATE)
+	)
 	volatiles = jnp.where(
 		(SIDES == foe)[:, None] & smackdown & (columns[None, :] == SMACKDOWN),
 		jnp.asarray(1, volatiles.dtype),

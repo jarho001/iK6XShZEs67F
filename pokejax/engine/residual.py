@@ -4,12 +4,10 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
-from pokejax.mechanics.stat_stage import scale_stat_stage
-
+from .abilities import OWN_TEMPO, active_abilities, effective_weather, has_hook
 from .actions import SIDES
 from .field import weather_residual
 from .items import (
-	apply_active_stat_modifiers,
 	apply_residual_status_items,
 	apply_residual_white_herb,
 	gather_active_items,
@@ -17,22 +15,20 @@ from .items import (
 	reveal_active_items,
 	update_active_items,
 )
+from .order import active_speed
 from .randomness import ORDER, RESIDUAL_ORDER, integer
 from .state import (
-	BOOST_SPE,
 	BURN,
 	LOCKED_MOVE,
 	LOCKED_REMAINING,
 	LOCKED_TRUE_DURATION,
 	NUM_VOLATILES,
 	ONGOING,
-	PARALYSIS,
 	PARTIAL_TRAP_SOURCE,
 	PARTIALLY_TRAPPED,
 	POISON,
 	ROOST,
 	SLEEP,
-	SPE,
 	TEAM_SLOTS,
 	TOXIC,
 )
@@ -144,7 +140,7 @@ def _white_herb(state, enabled, key, forced, tables, item_rows):
 	return apply_residual_white_herb(state, enabled, item_rows)
 
 
-def _locked_move(state, enabled, key, forced, tables):
+def _locked_move(state, enabled, key, forced, tables, rows):
 	"""Advance Outrage, Thrash and Petal Dance in their residual row."""
 	del tables
 	sides = SIDES
@@ -177,12 +173,14 @@ def _locked_move(state, enabled, key, forced, tables):
 	)
 	state = state._replace(volatiles=volatiles)
 	confusion_due = jnp.where(sleep_ends, true_duration <= 1, true_next <= 1)
-	state = confuse_sides(state, lock_ends & confusion_due, key, forced)
+	state = confuse_sides(
+		state, lock_ends & confusion_due & ~has_hook(rows, OWN_TEMPO), key, forced
+	)
 	return state
 
 
-def _end_roost(state, enabled, key, forced, tables):
-	del key, forced, tables
+def _end_roost(state, enabled, key, forced, tables, rows):
+	del key, forced, tables, rows
 	active = state.active
 	roost = enabled & (state.volatiles[:, ROOST] > 0)
 	active_slots = jnp.arange(TEAM_SLOTS)[None, :] == active[:, None]
@@ -237,16 +235,13 @@ RESIDUAL_TABLE = (
 )
 
 
-def residual(state, enabled, key, forced, tables):
+def residual(state, enabled, key, forced, tables, rows=None):
 	"""Run the full residual event, then resolve its queued faint messages."""
 	residual_enabled = enabled & (state.winner == ONGOING)
 	item_rows = gather_active_items(state, tables)
-	speed = scale_stat_stage(
-		state.stats[SIDES, state.active, SPE].astype(jnp.int32),
-		state.boosts[:, BOOST_SPE].astype(jnp.int32),
-	)
-	speed = apply_active_stat_modifiers(speed, SPE, item_rows)
-	speed = jnp.where(state.status[SIDES, state.active] == PARALYSIS, speed // 4, speed)
+	if rows is None:
+		rows = active_abilities(state, tables)
+	speed = active_speed(state, item_rows, rows)
 	slots = jnp.arange(TEAM_SLOTS)[None, :] == state.active[:, None]
 	bench_alive = jnp.any((state.hp > 0) & ~slots, axis=1)
 	speed_tie = speed[0] == speed[1]
@@ -255,8 +250,14 @@ def residual(state, enabled, key, forced, tables):
 		active = residual_enabled & (state.winner == ONGOING)
 		if row.handler is None:
 			continue
-		if row.scope in ("field", "global"):
-			state = row.handler(state, active, key, forced, tables)
+		if row.scope == "field":
+			state = row.handler(state, active, key, forced, tables, rows, speed)
+		elif row.scope == "global":
+			state = row.handler(state, active, key, forced, tables, rows)
+		elif row.handler is apply_residual_status_items:
+			state = row.handler(
+				state, active, key, forced, tables, item_rows, rows, effective_weather(state, rows)
+			)
 		elif row.scope == "item":
 			state = row.handler(state, active, key, forced, tables, item_rows)
 		elif row.scope == "status":
@@ -266,7 +267,7 @@ def residual(state, enabled, key, forced, tables):
 			tie_first = _residual_tie_first(key, forced, context)
 			first = jnp.where(speed_tie, tie_first, faster)
 			state = row.handler(state, active, first, bench_alive, tables, item_rows)
-	state = update_active_items(state, residual_enabled, item_rows)
+	state = update_active_items(state, residual_enabled, item_rows, rows)
 	return state._replace(
 		boosts=jnp.where((state.hp[SIDES, state.active] > 0)[:, None], state.boosts, 0),
 	)

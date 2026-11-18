@@ -1,7 +1,7 @@
 'use strict';
 
 // Run with node --test tests/test-record-battles.cjs (requires pinned Showdown).
-const { acceptedMoves, instrument, legalChoices, newStats, playBattle, snapshot, isolationMember } = require('../reference/record-battles.cjs');
+const { acceptedMoves, instrument, isolationBattle, legalChoices, newStats, playBattle, snapshot, isolationMember } = require('../reference/record-battles.cjs');
 const { PRNG } = require('../reference/vendor/pokemon-showdown/dist/sim/prng');
 const { Battle } = require('../reference/vendor/pokemon-showdown/dist/sim/battle');
 const { Dex } = require('../reference/vendor/pokemon-showdown/dist/sim/dex');
@@ -454,4 +454,27 @@ test('isolation keeps allowed pool choices and replaces only disallowed choices'
 	assert(!stripped.moves.includes('toxic'));
 	assert.equal(stripped.ability, 'noability');
 	assert.equal(stripped.item, '');
+});
+
+
+test('a tied lead weather war records the handler shuffle and guards queue insertion', () => {
+	const battle = isolationBattle([11, 22, 33, 44]);
+	try {
+		const stats = newStats();
+		const guard = instrument(battle, stats);
+		guard.begin();
+		for (const [side, ability] of ['Drizzle', 'Drought'].entries()) {
+			battle.setPlayer(`p${side + 1}`, {
+				name: `Side ${side}`,
+				team: [{ species: 'Bulbasaur', gender: 'M', ability, moves: ['tackle'] }],
+			});
+		}
+		const outcomes = guard.end();
+		const order = outcomes.find(row => row.kind === 'order' && row.occurrence === 5);
+		assert(order);
+		assert.equal(order.side, 0);
+		assert.equal(battle.field.weather, order.value === 0 ? 'sunnyday' : 'raindance');
+		assert.equal(battle.field.weatherState.duration, 0);
+		assert.equal(stats.exceptions['equal-speed-runSwitch-insertion'], 1);
+	} finally { battle.destroy(); }
 });

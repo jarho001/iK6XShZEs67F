@@ -1,8 +1,4 @@
-"""Host team validation and pure reset to the first turn (Showdown turn 1).
-
-Switch-in ability/item effects belong to later mechanic groups; reset derives
-member data and requests the two initial move choices.
-"""
+"""Host team validation and pure reset to the first turn (Showdown turn 1)."""
 
 from typing import NamedTuple
 
@@ -14,7 +10,10 @@ from pokejax.mechanics.stats import derive_stored_stats
 from pokejax.tables import Tables
 from pokejax.teams import TeamPool
 
+from .abilities import active_abilities
 from .data import EngineTables
+from .items import gather_active_items, update_active_items
+from .randomness import UNFORCED
 from .state import (
 	FIRST_TURN,
 	MOVE,
@@ -27,6 +26,7 @@ from .state import (
 	TEAM_SLOTS,
 	BattleState,
 )
+from .switching import run_switch_in, switch_handler_first
 
 
 class Teams(NamedTuple):
@@ -93,9 +93,8 @@ def check_teams(teams: Teams, tables: Tables):
 		raise ValueError("Each member needs 1..4 moves with empty slots at the end")
 
 
-def reset(key, teams: Teams, engine_tables: EngineTables) -> BattleState:
-	"""Derive compact member data; key is reserved for future reset randomness."""
-	del key
+def reset(key, teams: Teams, engine_tables: EngineTables, forced=UNFORCED) -> BattleState:
+	"""Derive compact member data and resolve the lead switch-ins."""
 	t = engine_tables
 	stats = derive_stored_stats(
 		t.species_base_stats[teams.species].astype(jnp.int32),
@@ -111,7 +110,7 @@ def reset(key, teams: Teams, engine_tables: EngineTables) -> BattleState:
 		t.species_types[teams.species],
 		t.species_plain_types[teams.species],
 	)
-	return BattleState(
+	state = BattleState(
 		species=teams.species.astype(jnp.int16),
 		level=teams.level.astype(jnp.uint8),
 		types=initial_types,
@@ -122,6 +121,8 @@ def reset(key, teams: Teams, engine_tables: EngineTables) -> BattleState:
 		pp=max_pp,
 		max_pp=max_pp,
 		ability=teams.ability.astype(jnp.int16),
+		ability_base=teams.ability.astype(jnp.int16),
+		ability_public=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.int16),
 		item=teams.item.astype(jnp.int16),
 		item_consumed=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.bool_),
 		item_knocked_off=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.bool_),
@@ -155,3 +156,8 @@ def reset(key, teams: Teams, engine_tables: EngineTables) -> BattleState:
 		turn=jnp.asarray(FIRST_TURN, jnp.int32),
 		winner=jnp.asarray(ONGOING, jnp.int8),
 	)
+	items = gather_active_items(state, t)
+	rows = active_abilities(state, t)
+	first = switch_handler_first(state, key, forced, items, rows)
+	state, _ = run_switch_in(state, jnp.ones(NUM_SIDES, jnp.bool_), first, t, rows=rows)
+	return update_active_items(state, True, items, rows)

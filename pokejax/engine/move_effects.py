@@ -17,14 +17,16 @@ def _heal_fraction(value, numerator, denominator, callback):
 	return lax.div(jnp.maximum(product + bias, 0), denominator)
 
 
-def apply_healing_active(state, side, move, enabled, hit, active_hp, tables):
+def apply_healing_active(state, side, move, enabled, hit, active_hp, tables, weather=None):
 	"""Apply table-driven recovery to active HP and update Roost's type fields."""
 	t = tables
 	foe = 1 - side
 	user, target = state.active[side], state.active[foe]
 	maximum = state.stats[side, user, HP].astype(jnp.int32)
 	hp = active_hp[side]
-	numerator, denominator = t.move_weather_heal[move, state.weather]
+	numerator, denominator = t.move_weather_heal[
+		move, state.weather if weather is None else weather
+	]
 	can_heal = enabled & hit & (numerator > 0) & (hp > 0) & (hp < maximum)
 	amount = jnp.maximum(
 		1,

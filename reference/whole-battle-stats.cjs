@@ -10,22 +10,18 @@ const path = require('node:path');
 const { parseArgs } = require('node:util');
 const { execFileSync } = require('node:child_process');
 const assert = require('node:assert/strict');
-const { Battle } = require('./vendor/pokemon-showdown/dist/sim/battle');
 const { Dex } = require('./vendor/pokemon-showdown/dist/sim/dex');
 const { PRNG } = require('./vendor/pokemon-showdown/dist/sim/prng');
-const { isolationMember, legalChoices, seedFor } = require('./record-battles.cjs');
+const { isolationMember, legalChoices, seedFor, isolationBattle } = require('./record-battles.cjs');
 
 const root = path.resolve(__dirname, '..');
 const vendor = path.join(__dirname, 'vendor/pokemon-showdown');
 const dex = Dex.forFormat('gen5randombattle');
 
 function playBattle(index, masterSeed, teamPair, policySeedWords) {
-	const battle = new Battle({
-		formatid: 'gen5randombattle',
-		seed: seedFor(masterSeed, index, 'battle'),
-		p1: { name: 'Side 0', team: structuredClone(teamPair[0]) },
-		p2: { name: 'Side 1', team: structuredClone(teamPair[1]) },
-	});
+	const battle = isolationBattle(seedFor(masterSeed, index, 'battle'));
+	battle.setPlayer('p1', { name: 'Side 0', team: structuredClone(teamPair[0]) });
+	battle.setPlayer('p2', { name: 'Side 1', team: structuredClone(teamPair[1]) });
 	const policy = new PRNG(policySeedWords);
 	const fixed = battle.sides.map(side => [...side.pokemon]);
 	const decisions = [];
@@ -113,7 +109,7 @@ async function main() {
 	const moves = [...new Set([...supported.moves, ...(extra.moves || []).map(id => dex.toID(id))])].sort();
 	const options = {
 		taskMoves: (extra.moves || []).map(id => dex.toID(id)),
-		abilities: [...supported.abilities, ...(extra.abilities || []).map(id => dex.toID(id))],
+		abilities: [...new Set([...supported.abilities, ...(extra.abilities || []).map(id => dex.toID(id))])].sort(),
 		items: [...new Set([...supported.items, ...(extra.items || []).map(id => dex.toID(id))])].sort(),
 	};
 	assert(moves.length >= 4);

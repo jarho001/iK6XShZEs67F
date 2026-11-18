@@ -9,7 +9,7 @@ Showdown commit: `1242c1e2d9763ba5b85d33f13aecb89bae19ae3d`
 | Kind | Distinct | Supported | Supported occurrences |
 | --- | ---: | ---: | ---: |
 | Moves | 223 | 170 | 82.2% |
-| Abilities | 126 | 0 | 0.0% |
+| Abilities | 126 | 77 | 62.9% |
 | Items | 44 | 44 | 100.0% |
 
 Fully supported teams: 0.0%
@@ -246,132 +246,132 @@ Fully supported teams: 0.0%
 
 | Id | Display name | Occurrences | Teams | Supported |
 | --- | --- | ---: | ---: | --- |
-| levitate | Levitate | 3596 | 31.5% | no |
-| pressure | Pressure | 2696 | 24.2% | no |
-| intimidate | Intimidate | 2104 | 19.3% | no |
+| levitate | Levitate | 3596 | 31.5% | yes |
+| pressure | Pressure | 2696 | 24.2% | yes |
+| intimidate | Intimidate | 2104 | 19.3% | yes |
 | sturdy | Sturdy | 1578 | 15.0% | no |
 | regenerator | Regenerator | 1411 | 13.4% | no |
 | prankster | Prankster | 1076 | 10.3% | no |
 | justified | Justified | 1066 | 10.3% | no |
-| guts | Guts | 1058 | 10.3% | no |
+| guts | Guts | 1058 | 10.3% | yes |
 | torrent | Torrent | 1031 | 10.1% | no |
-| thickfat | Thick Fat | 1038 | 10.0% | no |
-| waterabsorb | Water Absorb | 1026 | 10.0% | no |
-| sheerforce | Sheer Force | 1010 | 9.8% | no |
+| thickfat | Thick Fat | 1038 | 10.0% | yes |
+| waterabsorb | Water Absorb | 1026 | 10.0% | yes |
+| sheerforce | Sheer Force | 1010 | 9.8% | yes |
 | naturalcure | Natural Cure | 1020 | 9.8% | no |
-| clearbody | Clear Body | 926 | 9.0% | no |
+| clearbody | Clear Body | 926 | 9.0% | yes |
 | swarm | Swarm | 915 | 8.9% | no |
-| swiftswim | Swift Swim | 896 | 8.7% | no |
-| technician | Technician | 896 | 8.7% | no |
+| swiftswim | Swift Swim | 896 | 8.7% | yes |
+| technician | Technician | 896 | 8.7% | yes |
 | overgrow | Overgrow | 884 | 8.6% | no |
-| lightningrod | Lightning Rod | 835 | 8.2% | no |
-| chlorophyll | Chlorophyll | 801 | 7.8% | no |
-| flashfire | Flash Fire | 796 | 7.8% | no |
+| lightningrod | Lightning Rod | 835 | 8.2% | yes |
+| chlorophyll | Chlorophyll | 801 | 7.8% | yes |
+| flashfire | Flash Fire | 796 | 7.8% | yes |
 | blaze | Blaze | 764 | 7.5% | no |
-| serenegrace | Serene Grace | 752 | 7.4% | no |
-| tintedlens | Tinted Lens | 711 | 7.0% | no |
+| serenegrace | Serene Grace | 752 | 7.4% | yes |
+| tintedlens | Tinted Lens | 711 | 7.0% | yes |
 | defiant | Defiant | 696 | 6.8% | no |
 | hydration | Hydration | 685 | 6.8% | no |
-| sapsipper | Sap Sipper | 633 | 6.2% | no |
-| rockhead | Rock Head | 603 | 6.0% | no |
+| sapsipper | Sap Sipper | 633 | 6.2% | yes |
+| rockhead | Rock Head | 603 | 6.0% | yes |
 | moxie | Moxie | 598 | 6.0% | no |
 | magicguard | Magic Guard | 598 | 5.9% | no |
-| stormdrain | Storm Drain | 595 | 5.8% | no |
-| voltabsorb | Volt Absorb | 587 | 5.7% | no |
+| stormdrain | Storm Drain | 595 | 5.8% | yes |
+| voltabsorb | Volt Absorb | 587 | 5.7% | yes |
 | speedboost | Speed Boost | 576 | 5.7% | no |
-| insomnia | Insomnia | 552 | 5.4% | no |
+| insomnia | Insomnia | 552 | 5.4% | yes |
 | earlybird | Early Bird | 539 | 5.3% | no |
 | synchronize | Synchronize | 533 | 5.2% | no |
 | multitype | Multitype | 519 | 5.2% | no |
-| analytic | Analytic | 529 | 5.2% | no |
-| waterveil | Water Veil | 502 | 5.0% | no |
+| analytic | Analytic | 529 | 5.2% | yes |
+| waterveil | Water Veil | 502 | 5.0% | yes |
 | shedskin | Shed Skin | 487 | 4.8% | no |
-| battlearmor | Battle Armor | 471 | 4.7% | no |
-| dryskin | Dry Skin | 462 | 4.6% | no |
+| battlearmor | Battle Armor | 471 | 4.7% | yes |
+| dryskin | Dry Skin | 462 | 4.6% | yes |
 | aftermath | Aftermath | 458 | 4.5% | no |
-| adaptability | Adaptability | 450 | 4.4% | no |
-| reckless | Reckless | 444 | 4.3% | no |
+| adaptability | Adaptability | 450 | 4.4% | yes |
+| reckless | Reckless | 444 | 4.3% | yes |
 | static | Static | 434 | 4.3% | no |
-| ironfist | Iron Fist | 430 | 4.3% | no |
-| moldbreaker | Mold Breaker | 434 | 4.2% | no |
-| sniper | Sniper | 417 | 4.1% | no |
-| vitalspirit | Vital Spirit | 415 | 4.1% | no |
-| scrappy | Scrappy | 414 | 4.1% | no |
+| ironfist | Iron Fist | 430 | 4.3% | yes |
+| moldbreaker | Mold Breaker | 434 | 4.2% | yes |
+| sniper | Sniper | 417 | 4.1% | yes |
+| vitalspirit | Vital Spirit | 415 | 4.1% | yes |
+| scrappy | Scrappy | 414 | 4.1% | yes |
 | flamebody | Flame Body | 399 | 4.0% | no |
-| innerfocus | Inner Focus | 391 | 3.9% | no |
-| solidrock | Solid Rock | 370 | 3.7% | no |
-| noguard | No Guard | 361 | 3.6% | no |
+| innerfocus | Inner Focus | 391 | 3.9% | yes |
+| solidrock | Solid Rock | 370 | 3.7% | yes |
+| noguard | No Guard | 361 | 3.6% | yes |
 | shadowtag | Shadow Tag | 355 | 3.5% | no |
-| motordrive | Motor Drive | 354 | 3.5% | no |
-| shellarmor | Shell Armor | 346 | 3.5% | no |
-| drought | Drought | 345 | 3.4% | no |
-| drizzle | Drizzle | 343 | 3.4% | no |
-| unnerve | Unnerve | 346 | 3.4% | no |
-| download | Download | 337 | 3.4% | no |
-| skilllink | Skill Link | 335 | 3.3% | no |
-| sandstream | Sand Stream | 332 | 3.3% | no |
+| motordrive | Motor Drive | 354 | 3.5% | yes |
+| shellarmor | Shell Armor | 346 | 3.5% | yes |
+| drought | Drought | 345 | 3.4% | yes |
+| drizzle | Drizzle | 343 | 3.4% | yes |
+| unnerve | Unnerve | 346 | 3.4% | yes |
+| download | Download | 337 | 3.4% | yes |
+| skilllink | Skill Link | 335 | 3.3% | yes |
+| sandstream | Sand Stream | 332 | 3.3% | yes |
 | magicbounce | Magic Bounce | 330 | 3.3% | no |
 | unburden | Unburden | 329 | 3.2% | no |
 | roughskin | Rough Skin | 324 | 3.2% | no |
-| anticipation | Anticipation | 317 | 3.1% | no |
-| frisk | Frisk | 310 | 3.1% | no |
-| cloudnine | Cloud Nine | 304 | 3.0% | no |
+| anticipation | Anticipation | 317 | 3.1% | yes |
+| frisk | Frisk | 310 | 3.1% | yes |
+| cloudnine | Cloud Nine | 304 | 3.0% | yes |
 | harvest | Harvest | 299 | 3.0% | no |
 | weakarmor | Weak Armor | 299 | 3.0% | no |
-| multiscale | Multiscale | 293 | 2.9% | no |
-| owntempo | Own Tempo | 273 | 2.7% | no |
-| simple | Simple | 264 | 2.6% | no |
+| multiscale | Multiscale | 293 | 2.9% | yes |
+| owntempo | Own Tempo | 273 | 2.7% | yes |
+| simple | Simple | 264 | 2.6% | yes |
 | trace | Trace | 260 | 2.6% | no |
 | poisonheal | Poison Heal | 256 | 2.6% | no |
-| quickfeet | Quick Feet | 256 | 2.6% | no |
+| quickfeet | Quick Feet | 256 | 2.6% | yes |
 | liquidooze | Liquid Ooze | 256 | 2.5% | no |
-| teravolt | Teravolt | 239 | 2.4% | no |
-| marvelscale | Marvel Scale | 224 | 2.2% | no |
-| hustle | Hustle | 216 | 2.2% | no |
-| turboblaze | Turboblaze | 215 | 2.1% | no |
+| teravolt | Teravolt | 239 | 2.4% | yes |
+| marvelscale | Marvel Scale | 224 | 2.2% | yes |
+| hustle | Hustle | 216 | 2.2% | yes |
+| turboblaze | Turboblaze | 215 | 2.1% | yes |
 | flowergift | Flower Gift | 210 | 2.1% | no |
 | magnetpull | Magnet Pull | 208 | 2.1% | no |
 | mummy | Mummy | 193 | 1.9% | no |
-| unaware | Unaware | 194 | 1.9% | no |
-| sandrush | Sand Rush | 190 | 1.9% | no |
+| unaware | Unaware | 194 | 1.9% | yes |
+| sandrush | Sand Rush | 190 | 1.9% | yes |
 | truant | Truant | 189 | 1.9% | no |
 | poisontouch | Poison Touch | 187 | 1.9% | no |
 | effectspore | Effect Spore | 185 | 1.9% | no |
-| contrary | Contrary | 184 | 1.8% | no |
+| contrary | Contrary | 184 | 1.8% | yes |
 | arenatrap | Arena Trap | 183 | 1.8% | no |
 | imposter | Imposter | 181 | 1.8% | no |
 | colorchange | Color Change | 180 | 1.8% | no |
-| compoundeyes | Compound Eyes | 180 | 1.8% | no |
-| filter | Filter | 178 | 1.8% | no |
-| immunity | Immunity | 177 | 1.8% | no |
-| plus | Plus | 177 | 1.8% | no |
-| airlock | Air Lock | 175 | 1.8% | no |
-| bigpecks | Big Pecks | 175 | 1.8% | no |
-| victorystar | Victory Star | 174 | 1.7% | no |
-| overcoat | Overcoat | 170 | 1.7% | no |
-| purepower | Pure Power | 169 | 1.7% | no |
-| limber | Limber | 167 | 1.7% | no |
+| compoundeyes | Compound Eyes | 180 | 1.8% | yes |
+| filter | Filter | 178 | 1.8% | yes |
+| immunity | Immunity | 177 | 1.8% | yes |
+| plus | Plus | 177 | 1.8% | yes |
+| airlock | Air Lock | 175 | 1.8% | yes |
+| bigpecks | Big Pecks | 175 | 1.8% | yes |
+| victorystar | Victory Star | 174 | 1.7% | yes |
+| overcoat | Overcoat | 170 | 1.7% | yes |
+| purepower | Pure Power | 169 | 1.7% | yes |
+| limber | Limber | 167 | 1.7% | yes |
 | forecast | Forecast | 166 | 1.7% | no |
-| minus | Minus | 166 | 1.7% | no |
+| minus | Minus | 166 | 1.7% | yes |
 | icebody | Ice Body | 165 | 1.6% | no |
-| shielddust | Shield Dust | 164 | 1.6% | no |
-| tangledfeet | Tangled Feet | 164 | 1.6% | no |
-| toxicboost | Toxic Boost | 164 | 1.6% | no |
+| shielddust | Shield Dust | 164 | 1.6% | yes |
+| tangledfeet | Tangled Feet | 164 | 1.6% | yes |
+| toxicboost | Toxic Boost | 164 | 1.6% | yes |
 | stickyhold | Sticky Hold | 163 | 1.6% | no |
 | slowstart | Slow Start | 162 | 1.6% | no |
 | cursedbody | Cursed Body | 157 | 1.6% | no |
 | illusion | Illusion | 157 | 1.6% | no |
-| wonderskin | Wonder Skin | 157 | 1.6% | no |
+| wonderskin | Wonder Skin | 157 | 1.6% | yes |
 | baddreams | Bad Dreams | 156 | 1.6% | no |
 | ironbarbs | Iron Barbs | 155 | 1.6% | no |
-| wonderguard | Wonder Guard | 152 | 1.5% | no |
-| hugepower | Huge Power | 151 | 1.5% | no |
+| wonderguard | Wonder Guard | 152 | 1.5% | yes |
+| hugepower | Huge Power | 151 | 1.5% | yes |
 | raindish | Rain Dish | 148 | 1.5% | no |
-| snowwarning | Snow Warning | 141 | 1.4% | no |
-| superluck | Super Luck | 140 | 1.4% | no |
+| snowwarning | Snow Warning | 141 | 1.4% | yes |
+| superluck | Super Luck | 140 | 1.4% | yes |
 | defeatist | Defeatist | 130 | 1.3% | no |
-| hypercutter | Hyper Cutter | 111 | 1.1% | no |
-| leafguard | Leaf Guard | 80 | 0.8% | no |
+| hypercutter | Hyper Cutter | 111 | 1.1% | yes |
+| leafguard | Leaf Guard | 80 | 0.8% | yes |
 
 ## Items
 

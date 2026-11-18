@@ -84,6 +84,7 @@ def test_no_hidden_information(battles, side):
 			"evs",
 			"ivs",
 			"ability",
+			"ability_base",
 			"item",
 			"nature",
 			"happiness",
@@ -286,7 +287,7 @@ def test_shapes_dtypes_jit_vmap(battles):
 	assert o_boosted.opponent.boosts[1] == 0.5
 	for team in (o.own, o.opponent):
 		for name, x in zip(team._fields, team):
-			integer_fields = {"species", "types", "moves", "status", "item"}
+			integer_fields = {"species", "types", "moves", "status", "item", "ability"}
 			boolean_fields = {"item_consumed", "item_knocked_off"} if team is o.own else set()
 			assert x.dtype == (
 				jnp.int16

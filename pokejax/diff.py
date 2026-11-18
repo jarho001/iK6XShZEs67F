@@ -24,6 +24,7 @@ from pokejax.engine.state import (
 	CHOICE_MOVE,
 	CONFUSION,
 	ENDURE,
+	FLASH_FIRE,
 	FLINCH,
 	HP,
 	LEECH_SEED,
@@ -95,10 +96,17 @@ def comparable(state, tables):
 		"itemConsumed": state.item_consumed,
 		"itemKnockedOff": state.item_knocked_off,
 		"ability": state.ability,
+		"abilityPublic": state.ability_public,
 		"ended": state.winner != ONGOING,
 		"boosts": state.boosts,
 		"volatiles": jnp.concatenate(
-			(base_volatiles, charge_volatiles, smackdown[..., None], choice_lock[..., None]),
+			(
+				base_volatiles,
+				charge_volatiles,
+				smackdown[..., None],
+				choice_lock[..., None],
+				state.volatiles[..., FLASH_FIRE, None] > 0,
+			),
 			axis=-1,
 		),
 		"sideConditions": jnp.stack(
@@ -167,6 +175,12 @@ def recorded_state(snapshot, tables):
 		"ability": np.asarray(
 			[[tables.abilities.index.get(m["ability"], -1) for m in team] for team in members]
 		),
+		"abilityPublic": np.asarray(
+			[
+				[tables.abilities.index.get(m.get("abilityPublic", ""), -1) for m in team]
+				for team in members
+			]
+		),
 		"ended": np.asarray(snapshot["ended"]),
 		"boosts": np.asarray([side["boosts"] for side in sides]),
 		"volatiles": np.asarray(
@@ -210,8 +224,8 @@ def recorded_state(snapshot, tables):
 
 
 @jax.jit
-def _initial(teams, tables):
-	states = jax.vmap(reset, in_axes=(None, 0, None))(KEY, teams, tables)
+def _initial(teams, tables, forced):
+	states = jax.vmap(reset, in_axes=(None, 0, None, 0))(KEY, teams, tables, forced)
 	return states, comparable(states, tables)
 
 
@@ -340,12 +354,15 @@ def replay_file(path, *, recording=None) -> ReplayResult:
 			forced[b, t] = forced_from_records(record["outcomes"], host=True)
 	valid = np.arange(shape[1])[None] < lengths[:, None]
 	engine_tables = build_engine_tables(tables)
+	initial_forced = np.stack(
+		[forced_from_records(battle.get("initialOutcomes", []), host=True) for battle in battles]
+	)
 	parts = []
 	for start in range(0, len(battles), BATTLE_CHUNK):
 		end = min(start + BATTLE_CHUNK, len(battles))
 		indices = np.minimum(np.arange(start, start + BATTLE_CHUNK), end - 1)
 		chunk_teams = jax.tree.map(lambda x, indices=indices: x[indices], teams)
-		states, initial = _initial(chunk_teams, engine_tables)
+		states, initial = _initial(chunk_teams, engine_tables, initial_forced[indices])
 		histories = [initial]
 		for offset in range(0, shape[1], STEP_CHUNK):
 			stop = min(offset + STEP_CHUNK, shape[1])

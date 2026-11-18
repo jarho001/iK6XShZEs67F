@@ -60,8 +60,10 @@ VOLATILE_NAMES = (
 	"iceburn",
 	"smackdown",
 	"choicelock",
+	"flashfire",
 )
-NUM_VOLATILES = 20
+FLASH_FIRE = 20
+NUM_VOLATILES = 21
 HP, ATK, DEF, SPA, SPD, SPE = range(NUM_STATS)
 BOOST_ATK, BOOST_DEF, BOOST_SPA, BOOST_SPD, BOOST_SPE, ACCURACY, EVASION = range(NUM_BOOSTS)
 EMPTY = 0
@@ -110,7 +112,9 @@ class BattleState(NamedTuple):
 	moves: jax.Array
 	pp: jax.Array
 	max_pp: jax.Array
-	ability: jax.Array
+	ability: jax.Array  # int16 [2, 6], current ability
+	ability_base: jax.Array  # int16 [2, 6], restored when volatile state clears
+	ability_public: jax.Array  # int16 [2, 6], last protocol reveal
 	item: jax.Array  # int16 [2, 6], current held item ID; zero means none
 	item_consumed: jax.Array  # bool [2, 6], removed by a consumable effect
 	item_knocked_off: jax.Array  # bool [2, 6], removed by Knock Off or another takeItem
