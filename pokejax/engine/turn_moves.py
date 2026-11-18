@@ -81,7 +81,7 @@ def try_stalling_move(state, side, move, enabled, will_act, key, forced, tables)
 	)
 	volatiles = jnp.where(
 		side_mask[:, None] & (columns[None, :] == STALL),
-		jnp.where(succeeded, next_counter, jnp.where(failed, 0, counter)).astype(volatiles.dtype),
+		jnp.where(succeeded, next_counter, counter).astype(volatiles.dtype),
 		volatiles,
 	)
 	volatiles = jnp.where(

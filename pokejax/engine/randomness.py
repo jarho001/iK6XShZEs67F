@@ -22,6 +22,9 @@ occurrence 0, value 0..3 added to 2. confusion_hit: affected side, occurrence 0,
 value 1=self-hit, 0=acts. confusion_damage_roll: same axes, value 0..15.
 hit_count: attacker side, occurrence 0, value 2..5. Gen 5 uses 35% each for 2 and 3 hits,
 then 15% each for 4 and 5.
+drag_in: side being dragged, occurrence 0, value is the selected fixed team slot
+0..5. This forces the chosen member; unforced sampling is uniform over its
+currently usable bench.
 
 The step draws a table of random bits once, addressed by kind, side and occurrence. integer
 requires n>0; chance requires 0<=numerator<=denominator and denominator>0.
@@ -51,6 +54,7 @@ OUTCOME_KINDS = (
 	("trap_duration", 1),
 	("lock_duration", 1),
 	("magnitude", 99),
+	("drag_in", 5),
 )
 KIND_NAMES = tuple(name for name, _ in OUTCOME_KINDS)
 NUM_KINDS = len(KIND_NAMES)
@@ -64,6 +68,7 @@ STALL_SUCCESS, TRAP_DURATION, LOCK_DURATION = map(
 	KIND_NAMES.index, ("stall_success", "trap_duration", "lock_duration")
 )
 MAGNITUDE = KIND_NAMES.index("magnitude")
+DRAG_IN = KIND_NAMES.index("drag_in")
 OUTCOME_MAXIMUM = tuple(maximum for _, maximum in OUTCOME_KINDS)
 OUTCOME_MINIMUM = tuple(2 if name == "hit_count" else 0 for name, _ in OUTCOME_KINDS)
 (

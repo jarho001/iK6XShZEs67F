@@ -80,6 +80,7 @@ class EngineTables(NamedTuple):
 	multitype_id: jax.Array
 	fire_type: jax.Array
 	flying_type: jax.Array
+	ground_type: jax.Array
 	normal_type: jax.Array
 	move_weather: jax.Array
 	move_hazard: jax.Array
@@ -110,6 +111,8 @@ class EngineTables(NamedTuple):
 	move_semi_power: jax.Array
 	move_weather_power_scale: jax.Array
 	move_magnitude: jax.Array
+	move_self_switch: jax.Array
+	move_force_switch: jax.Array
 
 
 def build_engine_tables(tables: Tables) -> EngineTables:
@@ -366,6 +369,7 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 				np.asarray(tables.abilities.index["multitype"], dtype=np.int32),
 				np.asarray(tables.types.index["fire"], dtype=np.int32),
 				np.asarray(tables.types.index["flying"], dtype=np.int32),
+				np.asarray(tables.types.index["ground"], dtype=np.int32),
 				np.asarray(tables.types.index["normal"], dtype=np.int32),
 				weather_moves,
 				hazards,
@@ -396,6 +400,11 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 				semi_power,
 				weather_power_scale,
 				np.asarray(moves.ids) == "magnitude",
+				np.isin(np.asarray(moves.ids), ("uturn", "voltswitch")),
+				np.isin(
+					np.asarray(moves.ids),
+					("roar", "whirlwind", "dragontail", "circlethrow"),
+				),
 			),
 		)
 	)

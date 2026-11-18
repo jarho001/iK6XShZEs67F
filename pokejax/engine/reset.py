@@ -143,6 +143,11 @@ def reset(key, teams: Teams, engine_tables: EngineTables) -> BattleState:
 		hazards=jnp.zeros((NUM_SIDES, 2), jnp.int8),
 		hazard_order=jnp.zeros((NUM_SIDES, 2), jnp.int8),
 		request=jnp.full(NUM_SIDES, MOVE, jnp.int8),
+		turn_stage=jnp.asarray(0, jnp.int8),
+		turn_actions=jnp.zeros(NUM_SIDES, jnp.int8),
+		turn_moves=jnp.zeros(NUM_SIDES, jnp.int16),
+		turn_pending=jnp.zeros(NUM_SIDES, jnp.bool_),
+		turn_first=jnp.asarray(0, jnp.int8),
 		turn=jnp.asarray(FIRST_TURN, jnp.int32),
 		winner=jnp.asarray(ONGOING, jnp.int8),
 	)

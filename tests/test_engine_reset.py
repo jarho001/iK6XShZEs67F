@@ -103,7 +103,10 @@ def test_compact_state_and_shedinja(synthetic_pool, tables):
 	assert sum(leaf.nbytes for leaf in jax.tree.leaves(state)) < 4096
 	assert int(state.hp[0, 0]) == 1
 	assert int(state.stats[0, 0, 0]) == 1
-	assert all(jnp.issubdtype(leaf.dtype, jnp.integer) for leaf in jax.tree.leaves(state))
+	assert all(
+		jnp.issubdtype(leaf.dtype, jnp.integer) or jnp.issubdtype(leaf.dtype, jnp.bool_)
+		for leaf in jax.tree.leaves(state)
+	)
 	other = reset(jax.random.key(1), teams, t)
 	for a, b in zip(state, other):
 		np.testing.assert_array_equal(a, b)

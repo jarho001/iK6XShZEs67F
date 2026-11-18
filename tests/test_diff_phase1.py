@@ -30,7 +30,8 @@ def test_fixtures(fixture):
 # The 300-battle recordings in work/diff/ (git-ignored) run only with --large.
 @pytest.mark.large
 @pytest.mark.parametrize(
-	"name", ["phase1", "status", "boosts", "secondaries", "effects2", "field", "turns"]
+	"name",
+	["phase1", "status", "boosts", "secondaries", "effects2", "field", "turns", "resumable"],
 )
 def test_large_recording(name):
 	path = ROOT / f"work/diff/{name}.jsonl.gz"

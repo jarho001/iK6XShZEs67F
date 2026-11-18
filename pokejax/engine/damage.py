@@ -8,7 +8,7 @@ from pokejax.mechanics.stat_stage import scale_stat_stage
 
 from .field import WEATHER_ACCURACY_ALWAYS, effective_move_type, weather_modify
 from .randomness import CRIT, DAMAGE_ROLL, HIT, MAGNITUDE, chance, integer
-from .state import ACCURACY, BURN, EVASION, TWO_TURN_MOVE
+from .state import ACCURACY, BURN, EVASION, SMACKDOWN, TWO_TURN_MOVE
 
 CRIT_DENOMINATORS = jnp.asarray([1, 16, 8, 4, 3, 2], jnp.int32)
 LEVEL_DAMAGE, HALF_CURRENT_DAMAGE, CONSTANT_DAMAGE = 1, 2, 3
@@ -45,9 +45,13 @@ def move_damage_bases(state, side, move, key, forced, tables):
 	target_types = state.types[foe, target]
 	present = target_types >= 0
 	safe_types = jnp.maximum(target_types, 0)
-	immune = ~struggle & jnp.any(present & t.type_immune[type_, safe_types])
+	grounded_flying = (type_ == t.ground_type) & (state.volatiles[foe, SMACKDOWN] > 0)
+	counts_as_type = present & ~((target_types == t.flying_type) & grounded_flying)
+	immune = ~struggle & jnp.any(counts_as_type & t.type_immune[type_, safe_types])
 	exponent = jnp.where(
-		struggle, 0, jnp.sum(jnp.where(present, t.type_exponent[type_, safe_types], 0))
+		struggle,
+		0,
+		jnp.sum(jnp.where(counts_as_type, t.type_exponent[type_, safe_types], 0)),
 	).astype(jnp.int32)
 	physical = t.move_category[move] == 0
 	attack_index = jnp.where(physical, 1, 3)

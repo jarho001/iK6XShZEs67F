@@ -6,13 +6,10 @@ masked arithmetic can evaluate unused outcomes without consuming randomness.
 
 import jax.numpy as jnp
 
-from .actions import SIDES, bench_slots
+from .actions import SIDES
 from .boosts import apply_boosts
 from .damage_effects import SELF_FAINT_ALWAYS, apply_damage_effects
-from .field import (
-	apply_move_field_effects,
-	apply_switch_hazards_ordered,
-)
+from .field import apply_move_field_effects, apply_switch_hazards_ordered
 from .order import action_order
 from .randomness import random_bits
 from .residual import residual
@@ -28,15 +25,18 @@ from .state import (
 	ONGOING,
 	QUICK_GUARD,
 	ROOST,
-	SLEEP,
 	SUN,
 	SWITCH,
 	TEAM_SLOTS,
-	TOXIC,
+	TURN_IDLE,
+	TURN_MOVES,
+	TURN_REPLACEMENT,
+	TURN_RESIDUAL,
 	TWO_TURN_MOVE,
 	WIDE_GUARD,
 )
 from .status import after_hit, apply_move, before_move
+from .switching import drag_in, switch_actions
 from .turn_moves import (
 	apply_charge_boosts,
 	apply_move_volatiles,
@@ -48,51 +48,6 @@ from .turn_moves import (
 from .volatiles import advance_active_turns, confuse, end_turn
 
 
-def _switch_both(state, actions, enabled):
-	"""Switch both sides with one set of fixed-team writes."""
-	choices = jnp.clip(actions - 4, 0, 4)
-	targets = bench_slots(state.active)[SIDES, choices]
-	outgoing = state.active
-	active = jnp.where(enabled, targets, outgoing).astype(state.active.dtype)
-	boosts = jnp.where(enabled[:, None], 0, state.boosts)
-	volatile_columns = jnp.arange(state.volatiles.shape[1])
-	side_condition = (volatile_columns == QUICK_GUARD) | (volatile_columns == WIDE_GUARD)
-	clear_volatile = enabled[:, None] & ~side_condition[None, :]
-	volatiles = jnp.where(clear_volatile, 0, state.volatiles)
-
-	team_slots = jnp.arange(TEAM_SLOTS)
-	outgoing_mask = team_slots[None, :] == outgoing[:, None]
-	restore_roost = enabled & (state.volatiles[:, ROOST] > 0)
-	types = jnp.where(
-		(restore_roost[:, None] & outgoing_mask)[:, :, None], state.roost_types, state.types
-	)
-
-	target_order = state.seen_order[SIDES, targets]
-	next_order = jnp.max(state.seen_order, axis=1) + 1
-	seen_order = jnp.where(
-		(enabled & (target_order == 0))[:, None] & (team_slots[None, :] == targets[:, None]),
-		next_order[:, None],
-		state.seen_order,
-	)
-
-	status = state.status[SIDES, targets]
-	counter = state.status_counter[SIDES, targets]
-	counter = jnp.where(status == TOXIC, 0, counter)
-	counter = jnp.where(status == SLEEP, state.sleep_start[SIDES, targets], counter)
-	target_mask = enabled[:, None] & (team_slots[None, :] == targets[:, None])
-	active_turns = jnp.where(target_mask, 0, state.active_turns)
-	status_counter = jnp.where(target_mask, counter[:, None], state.status_counter)
-	return state._replace(
-		active=active,
-		active_turns=active_turns,
-		boosts=boosts,
-		volatiles=volatiles,
-		types=types,
-		seen_order=seen_order,
-		status_counter=status_counter,
-	)
-
-
 def _move(
 	state,
 	side,
@@ -101,8 +56,7 @@ def _move(
 	enabled,
 	charged_at_start,
 	first,
-	requests,
-	actions,
+	opponent_pending,
 	key,
 	forced,
 	tables,
@@ -142,7 +96,7 @@ def _move(
 		pp=jnp.where(selected_move, new_pp, state.pp),
 		revealed_moves=jnp.where(selected_move, revealed, state.revealed_moves),
 	)
-	will_act = (side == first) & (requests[foe] == MOVE) & (actions[foe] < 4)
+	will_act = (side == first) & opponent_pending
 	state, stalled = try_stalling_move(state, side, move, enabled, will_act, key, forced, tables)
 	stall_kind = tables.move_stall_kind[move]
 	move_allowed = enabled & ((stall_kind == 0) | stalled)
@@ -207,23 +161,57 @@ def _move(
 		jnp.where(lock_ends, 0, state.volatiles[side, LOCKED_TRUE_DURATION]),
 	)
 	state = confuse(state, side, confusion, key, forced)
+	user_alive = state.hp[side, user] > 0
+	target_alive = state.hp[foe, state.active[foe]] > 0
+	bench_alive = (state.hp[side] > 0) & (jnp.arange(TEAM_SLOTS) != state.active[side])
+	pivot = enabled & tables.move_self_switch[move] & hit & user_alive
+	pivot &= jnp.any(bench_alive)
+	drag = enabled & tables.move_force_switch[move] & hit & user_alive & target_alive
+	state, dragged = drag_in(state, foe, drag, key, forced, tables)
 	hp = state.hp.astype(jnp.int32)
 	boosts = jnp.where((hp[SIDES, state.active] > 0)[:, None], state.boosts, 0)
-	return state._replace(boosts=boosts)
+	return state._replace(boosts=boosts), pivot, dragged
+
+
+def _resolve_action_winner(state, alive_before, side, move, tables):
+	"""Resolve a move's faint result before the next queued Showdown action."""
+	alive = jnp.any(state.hp > 0, axis=1)
+	newly_dead = alive_before & ~alive
+	last_faint = jnp.where(tables.move_self_faint[move] == SELF_FAINT_ALWAYS, 1 - side, side)
+	last_faint = jnp.where(
+		jnp.any(newly_dead) & (jnp.sum(newly_dead) == 1),
+		jnp.argmax(newly_dead.astype(jnp.int32)),
+		last_faint,
+	)
+	winner = jnp.where(~alive[0], 1, 0)
+	winner = jnp.where(~jnp.any(alive), last_faint, winner)
+	winner = jnp.where(jnp.all(alive), ONGOING, winner).astype(state.winner.dtype)
+	return state._replace(winner=jnp.where(state.winner == ONGOING, winner, state.winner))
+
+
+def _clear_turn_plan(state, clear):
+	return state._replace(
+		turn_stage=jnp.where(clear, TURN_IDLE, state.turn_stage).astype(state.turn_stage.dtype),
+		turn_actions=jnp.where(clear, 0, state.turn_actions),
+		turn_moves=jnp.where(clear, 0, state.turn_moves),
+		turn_pending=jnp.where(clear, False, state.turn_pending),
+		turn_first=jnp.where(clear, 0, state.turn_first).astype(state.turn_first.dtype),
+	)
 
 
 def step(state, actions, key, forced, engine_tables):
-	"""Run both legal choices to the next move, replacement, or end request.
-
-	Faint replacements precede Battle.nextTurn, so their request retains the
-	old turn number. Finishing the replacement step advances it; a win does not.
-	"""
+	"""Run a fixed move queue and pause at each public switch decision."""
 	t = engine_tables
 	key = random_bits(key)
 	ongoing = state.winner == ONGOING
-	normal = jnp.any(state.request == MOVE) & ongoing
-	replacement = ~normal & jnp.any(state.request == SWITCH) & ongoing
-	moves = state.moves[SIDES, state.active, jnp.minimum(actions, 3)]
+	requests = state.request
+	start_turn = (state.turn_stage == TURN_IDLE) & jnp.any(requests == MOVE) & ongoing
+	legacy_replacement = (state.turn_stage == TURN_IDLE) & jnp.any(requests == SWITCH) & ongoing
+
+	# Fix the chosen actions, resolved moves, and queue order exactly once. Resume
+	# calls use these saved values and never recompute priority or speed order.
+	move_slots = jnp.minimum(actions, 3)
+	moves = state.moves[SIDES, state.active, move_slots]
 	charging = state.volatiles[:, TWO_TURN_MOVE]
 	locked = state.volatiles[:, LOCKED_MOVE]
 	recharge = state.volatiles[:, MUST_RECHARGE] > 0
@@ -233,87 +221,133 @@ def step(state, actions, key, forced, engine_tables):
 	moves = jnp.where(recharge, 0, moves)
 	usable = (state.moves[SIDES, state.active] != 0) & (state.pp[SIDES, state.active] > 0)
 	moves = jnp.where(jnp.any(usable, axis=1) | forced_move, moves, t.struggle_id)
-	first = action_order(state, actions, moves, replacement, key, forced, t)
-	requests = state.request
-	will_switch = (actions >= 4) & (requests != NONE) & ongoing
-	last_faint = jnp.asarray(0, state.winner.dtype)
-	alive = jnp.any(state.hp > 0, axis=1)
-	# Switches have higher queue priority than every move in this pool. Showdown
-	# resolves the grouped SwitchIn handlers after the switch actions and before
-	# the first move, so compute their shared speed order once here.
-	state = _switch_both(state, actions, will_switch)
-	alive_after = jnp.any(state.hp > 0, axis=1)
-	newly_dead = alive & ~alive_after
-	last_faint = jnp.where(
-		jnp.any(newly_dead),
-		jnp.where(jnp.sum(newly_dead) == 1, jnp.argmax(newly_dead), 1 - first),
-		last_faint,
+	first = action_order(state, actions, moves, False, key, forced, t)
+	pending = (requests == MOVE) & (actions < 4) & ongoing
+	state = state._replace(
+		turn_stage=jnp.where(start_turn, TURN_MOVES, state.turn_stage).astype(
+			state.turn_stage.dtype
+		),
+		turn_actions=jnp.where(start_turn, move_slots, state.turn_actions).astype(
+			state.turn_actions.dtype
+		),
+		turn_moves=jnp.where(start_turn, moves, state.turn_moves).astype(state.turn_moves.dtype),
+		turn_pending=jnp.where(start_turn, pending, state.turn_pending),
+		turn_first=jnp.where(start_turn, first, state.turn_first).astype(state.turn_first.dtype),
 	)
-	alive = alive_after
-	state = apply_switch_hazards_ordered(state, will_switch, jnp.any(will_switch), key, forced, t)
-	alive_after = jnp.any(state.hp > 0, axis=1)
-	newly_dead = alive & ~alive_after
-	last_faint = jnp.where(
-		jnp.any(newly_dead),
-		jnp.where(jnp.sum(newly_dead) == 1, jnp.argmax(newly_dead), 1 - first),
-		last_faint,
+
+	# Both voluntary and requested switches share the same dense switch-out and
+	# switch-in paths. Switches happen before the saved moves, as in Showdown.
+	switch_mask = (actions >= 4) & (requests != NONE) & ongoing
+	state = switch_actions(state, actions, switch_mask)
+	state = apply_switch_hazards_ordered(state, switch_mask, jnp.any(switch_mask), key, forced, t)
+
+	# The two statically traced move slots are always present. A pause masks the
+	# second slot when the first move asks its user to switch; its queue remains in
+	# turn_pending for the next call.
+	run_moves = state.turn_stage == TURN_MOVES
+	first = state.turn_first.astype(jnp.int32)
+	second = 1 - first
+	first_pending = state.turn_pending[first]
+	first_other_pending = state.turn_pending[second]
+	first_enabled = run_moves & first_pending & (state.winner == ONGOING)
+	alive_before = jnp.any(state.hp > 0, axis=1)
+	state, first_pivot, first_dragged = _move(
+		state,
+		first,
+		state.turn_actions[first],
+		state.turn_moves[first],
+		first_enabled,
+		state.volatiles[first, TWO_TURN_MOVE] > 0,
+		first,
+		first_other_pending,
+		key,
+		forced,
+		t,
 	)
-	alive = alive_after
-	for side in (first, 1 - first):
-		action = actions[side]
-		move = normal & (requests[side] == MOVE) & (action < 4)
-		state = _move(
-			state,
-			side,
-			action,
-			moves[side],
-			move,
-			charging[side] > 0,
-			first,
-			requests,
-			actions,
-			key,
-			forced,
-			t,
-		)
-		alive_after = jnp.any(state.hp > 0, axis=1)
-		newly_dead = alive & ~alive_after
-		faint_order = jnp.where(t.move_self_faint[moves[side]] == SELF_FAINT_ALWAYS, 1 - side, side)
-		faint_order = jnp.where(
-			jnp.any(newly_dead) & (jnp.sum(newly_dead) == 1),
-			jnp.argmax(newly_dead.astype(jnp.int32)),
-			faint_order,
-		)
-		last_faint = jnp.where(jnp.any(newly_dead), faint_order, last_faint)
-		alive = alive_after
-	winner = jnp.where(~alive[0], 1, 0)
-	winner = jnp.where(~jnp.any(alive), last_faint, winner)
-	winner = jnp.where(jnp.all(alive), ONGOING, winner).astype(state.winner.dtype)
-	winner = jnp.where(state.winner == ONGOING, winner, state.winner)
-	state = state._replace(winner=winner)
-	state = residual(state, normal & (state.winner == ONGOING), key, forced, t)
-	ended = state.winner != ONGOING
+	first_pivot &= state.winner == ONGOING
+	first_ran = first_enabled
+	first_mask = (SIDES == first) & first_ran
+	pending_after_first = state.turn_pending & ~first_mask & ~first_dragged
+	state = state._replace(turn_pending=pending_after_first)
+	state = _resolve_action_winner(state, alive_before, first, state.turn_moves[first], t)
+
+	second_pending = state.turn_pending[second]
+	second_enabled = run_moves & second_pending & ~first_pivot & (state.winner == ONGOING)
+	alive_before = jnp.any(state.hp > 0, axis=1)
+	state, second_pivot, second_dragged = _move(
+		state,
+		second,
+		state.turn_actions[second],
+		state.turn_moves[second],
+		second_enabled,
+		state.volatiles[second, TWO_TURN_MOVE] > 0,
+		first,
+		state.turn_pending[first],
+		key,
+		forced,
+		t,
+	)
+	second_pivot &= state.winner == ONGOING
+	second_mask = (SIDES == second) & second_enabled
+	state = state._replace(turn_pending=state.turn_pending & ~second_mask & ~second_dragged)
+	state = _resolve_action_winner(state, alive_before, second, state.turn_moves[second], t)
+
+	pivot_pause = (first_pivot | second_pivot) & (state.winner == ONGOING)
+	pivot_sides = ((SIDES == first) & first_pivot) | ((SIDES == second) & second_pivot)
+	state = state._replace(
+		turn_stage=jnp.where(
+			run_moves & ~jnp.any(state.turn_pending), TURN_RESIDUAL, state.turn_stage
+		).astype(state.turn_stage.dtype),
+		request=jnp.where(
+			pivot_pause,
+			jnp.where(pivot_sides, SWITCH, NONE),
+			state.request,
+		).astype(state.request.dtype),
+	)
+
+	# Residual is a separate saved stage. End-of-turn volatiles expire only after
+	# any replacement request is completed, just before Battle.endTurn advances.
+	run_residual = (state.turn_stage == TURN_RESIDUAL) & ~pivot_pause & (state.winner == ONGOING)
+	state = residual(state, run_residual, key, forced, t)
+	state = end_turn(state, run_residual & (state.winner == ONGOING), key, forced)
+	state = state._replace(
+		turn_stage=jnp.where(
+			run_residual & (state.winner == ONGOING), TURN_REPLACEMENT, state.turn_stage
+		).astype(state.turn_stage.dtype)
+	)
+
+	# A fainted active is requested only once the rest of the queued turn and its
+	# residual have run. Hazard KOs on a replacement repeat this same request.
 	fainted = state.hp[SIDES, state.active] == 0
 	needs_switch = fainted & jnp.any(state.hp > 0, axis=1)
-	clear_fainted = needs_switch & ~ended
-	roost = (state.volatiles[SIDES, ROOST] > 0) & fainted
-	volatile_columns = jnp.arange(state.volatiles.shape[1])
-	side_condition = (volatile_columns == QUICK_GUARD) | (volatile_columns == WIDE_GUARD)
-	team_slots = jnp.arange(TEAM_SLOTS)
-	active_slots = team_slots[None, :] == state.active[:, None]
-	types = jnp.where((active_slots & roost[:, None])[:, :, None], state.roost_types, state.types)
+	waiting = jnp.any(needs_switch)
+	ended = state.winner != ONGOING
+	active_slots = jnp.arange(TEAM_SLOTS)[None, :] == state.active[:, None]
+	replacement_stage = state.turn_stage == TURN_REPLACEMENT
+	clear_fainted = needs_switch & ~ended & replacement_stage
 	status = jnp.where(active_slots & clear_fainted[:, None], 0, state.status)
 	status_counter = jnp.where(active_slots & clear_fainted[:, None], 0, state.status_counter)
+	roost = fainted & (state.volatiles[:, ROOST] > 0)
+	types = jnp.where((active_slots & roost[:, None])[:, :, None], state.roost_types, state.types)
+	columns = jnp.arange(state.volatiles.shape[1])
+	side_condition = (columns == QUICK_GUARD) | (columns == WIDE_GUARD)
+	volatiles = jnp.where(fainted[:, None] & ~side_condition[None, :], 0, state.volatiles)
 	state = state._replace(
 		types=types,
-		volatiles=jnp.where(fainted[:, None] & ~side_condition[None, :], 0, state.volatiles),
+		volatiles=volatiles,
 		status=status,
 		status_counter=status_counter,
 	)
-	waiting = jnp.any(needs_switch)
+	finish_replacement = replacement_stage & ~waiting & ~ended
+	finish_legacy = legacy_replacement & ~waiting & ~ended
+	finish_turn = finish_replacement | finish_legacy
+	state = advance_active_turns(state, finish_turn)
 	request = jnp.where(waiting, jnp.where(needs_switch, SWITCH, NONE), MOVE)
+	request = jnp.where(pivot_pause, state.request, request)
 	request = jnp.where(ended, NONE, request).astype(state.request.dtype)
-	advance = (normal | replacement) & ~waiting & ~ended
-	state = end_turn(state, normal & ~ended, key, forced)
-	state = advance_active_turns(state, advance)
-	return state._replace(request=request, turn=state.turn + advance.astype(jnp.int32))
+	state = state._replace(
+		request=request,
+		turn=state.turn + finish_turn.astype(jnp.int32),
+	)
+	clear_plan = finish_turn | ended
+	return _clear_turn_plan(state, clear_plan)

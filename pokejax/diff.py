@@ -40,6 +40,7 @@ from pokejax.engine.state import (
 	STATUS_NAMES,
 	SWITCH,
 	TIE,
+	TURN_IDLE,
 	TWO_TURN_MOVE,
 	VOLATILE_NAMES,
 	WEATHER_NAMES,
@@ -104,6 +105,7 @@ def comparable(state, tables):
 		),
 		"confusionCounter": state.volatiles[..., CONFUSION],
 		"request": state.request,
+		"midTurn": state.turn_stage > TURN_IDLE,
 		"hp": state.hp,
 		"maxhp": state.stats[..., HP],
 		"pp": state.pp,
@@ -169,6 +171,7 @@ def recorded_state(snapshot, tables):
 			[side.get("volatileCounters", {}).get("confusion", 0) for side in sides]
 		),
 		"request": np.asarray([REQUESTS[side["request"]] for side in sides]),
+		"midTurn": np.asarray(any(side["request"] == "switch" for side in sides)),
 		**{
 			name: np.asarray([[member[name] for member in team] for team in members])
 			for name in ("hp", "maxhp", "fainted")

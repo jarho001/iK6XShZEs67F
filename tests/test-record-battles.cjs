@@ -128,6 +128,21 @@ test('queue ties address action and replacement contexts, and duplicate addresse
 	} finally { battle.destroy(); }
 });
 
+test('dragged replacements record the selected fixed team slot', () => {
+	const battle = createBattle(battles[0]);
+	try {
+		const fixed = battle.sides.map(side => [...side.pokemon]);
+		const guard = instrument(battle, newStats(), fixed);
+		guard.begin();
+		const selected = battle.getRandomSwitchable(battle.sides[0]);
+		const outcomes = guard.end();
+		assert.deepEqual(outcomes, [{
+			kind: 'drag_in', side: 0, occurrence: 0,
+			value: fixed[0].indexOf(selected),
+		}]);
+	} finally { battle.destroy(); }
+});
+
 test('fixture actions independently replay through Showdown with exact decision snapshots', () => {
 	assert.equal(header.schemaVersion, 2);
 	assert.equal(header.count, 40);

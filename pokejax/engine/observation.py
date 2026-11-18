@@ -32,6 +32,7 @@ from .state import (
 	PARTIAL_TRAP_SOURCE,
 	PARTIALLY_TRAPPED,
 	TEAM_SLOTS,
+	TURN_IDLE,
 	TWO_TURN_MOVE,
 )
 
@@ -78,6 +79,7 @@ class Observation(NamedTuple):
 	opponent: OpponentObservation
 	turn: jax.Array  # float32 scalar
 	request: jax.Array  # float32 [3], NONE/MOVE/SWITCH
+	mid_turn: jax.Array  # float32 scalar; saved turn work remains after this choice
 	legal_actions: jax.Array  # bool [9], actions.py encoding
 	weather: jax.Array  # int16 scalar; public WEATHER_NAMES ID
 	weather_turns: jax.Array  # float32 scalar; zero for permanent/clear
@@ -157,6 +159,7 @@ def observe(state, side, engine_tables) -> Observation:
 		opponent,
 		f(state.turn) / 1000,
 		f(jnp.arange(3) == request),
+		f(state.turn_stage > TURN_IDLE),
 		legal_actions(state, engine_tables)[side],
 		state.weather.astype(jnp.int16),
 		f(state.weather_turns),

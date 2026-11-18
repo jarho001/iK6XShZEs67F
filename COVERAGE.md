@@ -8,7 +8,7 @@ Showdown commit: `1242c1e2d9763ba5b85d33f13aecb89bae19ae3d`
 
 | Kind | Distinct | Supported | Supported occurrences |
 | --- | ---: | ---: | ---: |
-| Moves | 223 | 164 | 78.9% |
+| Moves | 223 | 170 | 82.2% |
 | Abilities | 126 | 0 | 0.0% |
 | Items | 44 | 0 | 0.0% |
 
@@ -27,7 +27,7 @@ Fully supported teams: 0.0%
 | swordsdance | Swords Dance | 5279 | 43.2% | yes |
 | protect | Protect | 4722 | 39.0% | yes |
 | scald | Scald | 4429 | 38.6% | yes |
-| uturn | U-turn | 4610 | 38.2% | no |
+| uturn | U-turn | 4610 | 38.2% | yes |
 | thunderbolt | Thunderbolt | 4445 | 37.6% | yes |
 | fireblast | Fire Blast | 4060 | 34.6% | yes |
 | superpower | Superpower | 4011 | 34.2% | yes |
@@ -46,7 +46,7 @@ Fully supported teams: 0.0%
 | nastyplot | Nasty Plot | 2502 | 22.7% | yes |
 | hydropump | Hydro Pump | 2367 | 22.1% | yes |
 | rest | Rest | 2117 | 19.6% | yes |
-| voltswitch | Volt Switch | 2000 | 18.9% | no |
+| voltswitch | Volt Switch | 2000 | 18.9% | yes |
 | psyshock | Psyshock | 1882 | 17.9% | no |
 | icepunch | Ice Punch | 1898 | 17.7% | yes |
 | spikes | Spikes | 1893 | 17.7% | yes |
@@ -130,7 +130,7 @@ Fully supported teams: 0.0%
 | sludgewave | Sludge Wave | 526 | 5.1% | yes |
 | fakeout | Fake Out | 494 | 4.9% | yes |
 | seedbomb | Seed Bomb | 483 | 4.8% | yes |
-| whirlwind | Whirlwind | 478 | 4.7% | no |
+| whirlwind | Whirlwind | 478 | 4.7% | yes |
 | aerialace | Aerial Ace | 472 | 4.7% | no |
 | overheat | Overheat | 476 | 4.7% | yes |
 | woodhammer | Wood Hammer | 473 | 4.7% | yes |
@@ -142,7 +142,7 @@ Fully supported teams: 0.0%
 | naturepower | Nature Power | 422 | 4.2% | no |
 | judgment | Judgment | 413 | 4.1% | no |
 | aquatail | Aqua Tail | 412 | 4.1% | yes |
-| roar | Roar | 372 | 3.7% | no |
+| roar | Roar | 372 | 3.7% | yes |
 | coil | Coil | 372 | 3.7% | yes |
 | lavaplume | Lava Plume | 371 | 3.7% | yes |
 | gunkshot | Gunk Shot | 374 | 3.7% | yes |
@@ -159,7 +159,7 @@ Fully supported teams: 0.0%
 | thunder | Thunder | 304 | 3.0% | yes |
 | explosion | Explosion | 299 | 3.0% | yes |
 | bugbite | Bug Bite | 291 | 2.9% | no |
-| circlethrow | Circle Throw | 290 | 2.9% | no |
+| circlethrow | Circle Throw | 290 | 2.9% | yes |
 | psychoboost | Psycho Boost | 273 | 2.7% | yes |
 | rockblast | Rock Blast | 274 | 2.7% | yes |
 | discharge | Discharge | 273 | 2.7% | yes |
@@ -177,7 +177,7 @@ Fully supported teams: 0.0%
 | glare | Glare | 235 | 2.3% | yes |
 | jumpkick | Jump Kick | 222 | 2.2% | yes |
 | shiftgear | Shift Gear | 217 | 2.2% | yes |
-| dragontail | Dragon Tail | 210 | 2.1% | no |
+| dragontail | Dragon Tail | 210 | 2.1% | yes |
 | switcheroo | Switcheroo | 210 | 2.1% | no |
 | firefang | Fire Fang | 198 | 2.0% | yes |
 | storedpower | Stored Power | 198 | 2.0% | no |

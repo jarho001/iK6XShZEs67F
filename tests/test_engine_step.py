@@ -10,18 +10,31 @@ import pytest
 
 from pokejax.engine.actions import legal_actions
 from pokejax.engine.data import build_engine_tables
+from pokejax.engine.observation import observe
 from pokejax.engine.order import action_order
 from pokejax.engine.randomness import (
 	ACTION_ORDER,
 	CRIT,
 	DAMAGE_ROLL,
+	DRAG_IN,
 	HIT,
 	ORDER,
 	SWITCH_IN_ORDER,
 	UNFORCED,
 )
 from pokejax.engine.reset import reset, teams_from_pool
-from pokejax.engine.state import CONFUSION, FLINCH, MOVE, NONE, ONGOING, SWITCH
+from pokejax.engine.state import (
+	CONFUSION,
+	FLINCH,
+	MOVE,
+	NONE,
+	ONGOING,
+	PARTIAL_TRAP_SOURCE,
+	PARTIALLY_TRAPPED,
+	SMACKDOWN,
+	SWITCH,
+	TURN_MOVES,
+)
 from pokejax.engine.step import step
 from pokejax.tables import load_tables
 from pokejax.teams import load_npz, load_team_pool
@@ -307,3 +320,180 @@ def test_jit_vmap_64_pool_battles_200_legal_steps(tables_and_state, battle_pool)
 	assert np.all(out.hp >= 0)
 	assert np.all(out.pp <= states.max_pp)
 	assert np.all((out.winner >= ONGOING) & (out.winner <= 1))
+
+
+def ordered_state(state):
+	return state._replace(stats=state.stats.at[0, 0, 5].set(200).at[1, 0, 5].set(100))
+
+
+def test_uturn_pauses_then_runs_the_saved_opponent_move(tables_and_state):
+	tables, t, s = tables_and_state
+	moves = s.moves.at[0, 0, 0].set(tables.moves.index["uturn"])
+	moves = moves.at[1, 0, 0].set(tables.moves.index["tackle"])
+	s = ordered_state(s)._replace(
+		moves=moves,
+	)
+	paused = play(s, t)
+	assert paused.request.tolist() == [SWITCH, NONE]
+	assert int(paused.turn_stage) == TURN_MOVES
+	assert int(paused.active[0]) == 0
+	assert int(paused.hp[1, 0]) < int(s.hp[1, 0])
+	assert int(paused.pp[1, 0, 0]) == 10
+	resumed = play(paused, t, actions=(4, 0))
+	assert resumed.request.tolist() == [MOVE, MOVE]
+	assert int(resumed.active[0]) == 1
+	assert int(resumed.pp[0, 1, 0]) == 10
+	assert int(resumed.pp[1, 0, 0]) == 9
+	assert int(resumed.hp[0, 1]) < int(s.hp[0, 1])
+	assert int(resumed.turn) == int(s.turn) + 1
+
+
+def test_uturn_does_not_pause_without_a_bench(tables_and_state):
+	tables, t, s = tables_and_state
+	s = ordered_state(s)._replace(
+		moves=s.moves.at[0, 0, 0].set(tables.moves.index["uturn"]),
+		hp=s.hp.at[0, 1:].set(0),
+	)
+	out = play(s, t)
+	assert out.request.tolist() == [MOVE, MOVE]
+	assert int(out.active[0]) == 0
+	assert int(out.turn_stage) == 0
+	assert int(out.pp[1, 0, 0]) == 9
+
+
+def test_uturn_switches_while_trapped_but_not_through_protect(tables_and_state):
+	tables, t, s = tables_and_state
+	s = ordered_state(s)._replace(
+		moves=s.moves.at[0, 0, 0].set(tables.moves.index["uturn"]),
+		volatiles=s.volatiles.at[0, PARTIALLY_TRAPPED].set(3).at[0, PARTIAL_TRAP_SOURCE].set(1),
+	)
+	paused = play(s, t)
+	assert paused.request.tolist() == [SWITCH, NONE]
+	resumed = play(paused, t, actions=(4, 0))
+	assert int(resumed.active[0]) == 1
+
+	moves = s.moves.at[0, 0, 0].set(tables.moves.index["uturn"])
+	moves = moves.at[1, 0, 0].set(tables.moves.index["protect"])
+	s = ordered_state(s)._replace(moves=moves)
+	protected = play(s, t)
+	assert protected.request.tolist() == [MOVE, MOVE]
+	assert int(protected.active[0]) == 0
+	assert int(protected.hp[1, 0]) == int(s.hp[1, 0])
+
+
+def test_volt_switch_ground_immunity_blocks_pivot(tables_and_state):
+	tables, t, s = tables_and_state
+	s = ordered_state(s)._replace(
+		moves=s.moves.at[0, 0, 0].set(tables.moves.index["voltswitch"]),
+		types=s.types.at[1, 0].set(jnp.array([tables.types.index["ground"], -1], jnp.int8)),
+	)
+	out = play(s, t)
+	assert out.request.tolist() == [MOVE, MOVE]
+	assert int(out.active[0]) == 0
+	assert int(out.hp[1, 0]) == 1000
+
+
+def test_smackdown_removes_flying_ground_immunity(tables_and_state):
+	tables, t, s = tables_and_state
+	s = ordered_state(s)._replace(
+		moves=s.moves.at[0, 0, 0].set(tables.moves.index["earthquake"]),
+		types=s.types.at[1, 0].set(jnp.array([tables.types.index["flying"], -1], jnp.int8)),
+	)
+	immune = play(s, t)
+	assert int(immune.hp[1, 0]) == 1000
+	s = s._replace(volatiles=s.volatiles.at[1, SMACKDOWN].set(1))
+	grounded = play(s, t)
+	assert int(grounded.hp[1, 0]) < 1000
+
+
+def test_uturn_ko_requests_pivot_before_faint_replacement(tables_and_state):
+	tables, t, s = tables_and_state
+	s = ordered_state(s)._replace(
+		moves=s.moves.at[0, 0, 0].set(tables.moves.index["uturn"]),
+		hp=s.hp.at[1, 0].set(1),
+	)
+	paused = play(s, t)
+	assert paused.request.tolist() == [SWITCH, NONE]
+	assert int(paused.hp[1, 0]) == 0
+	assert legal_actions(paused, t)[0, 4:].any()
+	assert legal_actions(paused, t)[1].tolist() == [True] + [False] * 8
+	replaced = play(paused, t, actions=(4, 0))
+	assert replaced.request.tolist() == [NONE, SWITCH]
+	assert int(replaced.active[0]) == 1
+	assert legal_actions(replaced, t)[0].tolist() == [True] + [False] * 8
+	assert legal_actions(replaced, t)[1, 4:].any()
+	final = play(replaced, t, actions=(0, 5))
+	assert final.request.tolist() == [MOVE, MOVE]
+	assert int(final.active[1]) == 2
+	assert int(final.pp[1, 2, 0]) == 10
+
+
+def test_roar_without_bench_and_dragon_tail_into_protect(tables_and_state):
+	tables, t, s = tables_and_state
+	s = ordered_state(s)._replace(
+		moves=s.moves.at[0, 0, 0].set(tables.moves.index["roar"]),
+		hp=s.hp.at[1, 1:].set(0),
+	)
+	out = play(s, t)
+	assert out.request.tolist() == [MOVE, MOVE]
+	assert int(out.active[1]) == 0
+	moves = s.moves.at[0, 0, 0].set(tables.moves.index["dragontail"])
+	moves = moves.at[1, 0, 0].set(tables.moves.index["protect"])
+	s = ordered_state(s)._replace(
+		moves=moves,
+		hp=jnp.full_like(s.hp, 1000),
+	)
+	forced = FORCED.at[HIT, 0, 0].set(1)
+	out = play(s, t, forced=forced)
+	assert out.request.tolist() == [MOVE, MOVE]
+	assert int(out.active[1]) == 0
+	assert int(out.hp[1, 0]) == 1000
+
+
+def test_dragged_member_takes_spikes_and_double_faint_requests_both(tables_and_state):
+	tables, t, s = tables_and_state
+	s = ordered_state(s)._replace(
+		moves=s.moves.at[0, 0, 0].set(tables.moves.index["dragontail"]),
+		hazards=s.hazards.at[1, 0].set(1),
+	)
+	forced = FORCED.at[HIT, 0, 0].set(1).at[DRAG_IN, 1, 0].set(2)
+	out = play(s, t, forced=forced)
+	assert int(out.active[1]) == 2
+	assert int(out.hp[1, 2]) == 875
+	moves = s.moves.at[0, 0, 0].set(tables.moves.index["explosion"])
+	s = ordered_state(s)._replace(
+		moves=moves,
+		hp=s.hp.at[:, 0].set(1),
+	)
+	out = play(s, t, forced=FORCED.at[HIT, 0, 0].set(1))
+	assert out.request.tolist() == [SWITCH, SWITCH]
+	assert int(out.winner) == ONGOING
+
+
+def test_drag_random_replacement_distribution_and_observation_no_leak(tables_and_state):
+	from pokejax.engine.switching import drag_in
+
+	_, t, s = tables_and_state
+	keys = jax.random.split(KEY, 2000)
+	choose = jax.jit(jax.vmap(lambda key: drag_in(s, 1, True, key, UNFORCED, t)[0].active[1]))
+	counts = np.bincount(np.asarray(choose(keys)), minlength=6)[1:]
+	assert np.all((counts > 300) & (counts < 500)), counts.tolist()
+	s = s._replace(
+		request=jnp.array([SWITCH, NONE]),
+		turn_stage=jnp.asarray(TURN_MOVES, jnp.int8),
+		turn_actions=jnp.array([0, 1], jnp.int8),
+		turn_moves=jnp.array([1, 2], jnp.int16),
+		turn_pending=jnp.array([False, True]),
+		turn_first=jnp.asarray(1, jnp.int8),
+	)
+	other_plan = s._replace(
+		turn_actions=jnp.array([3, 2], jnp.int8),
+		turn_moves=jnp.array([40, 50], jnp.int16),
+		turn_pending=jnp.array([True, False]),
+		turn_first=jnp.asarray(0, jnp.int8),
+	)
+	for side in (0, 1):
+		left = jax.tree.leaves(observe(s, side, t))
+		right = jax.tree.leaves(observe(other_plan, side, t))
+		for a, b in zip(left, right, strict=True):
+			np.testing.assert_array_equal(a, b)

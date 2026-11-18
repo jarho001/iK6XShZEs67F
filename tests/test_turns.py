@@ -106,7 +106,8 @@ def test_protect_samples_gen5_chances_through_the_two_to_32_cap(setup):
 	# At 256, Gen 5 switches to randomChance(1, 2**32): only a zero uint32 passes.
 	states, succeeded = sample_batch(state, [0, 1, 255, 256, 2**32 - 1])
 	assert np.array_equal(np.asarray(succeeded), [True, False, False, False, False])
-	assert np.asarray(states.volatiles[:, 0, STALL]).tolist() == [256, 0, 0, 0, 0]
+	# A failed Gen 5 stall attempt keeps the volatile until residual processing.
+	assert np.asarray(states.volatiles[:, 0, STALL]).tolist() == [256] * 5
 
 
 def test_fake_out_only_on_first_active_move_action(setup):

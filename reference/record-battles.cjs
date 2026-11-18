@@ -17,6 +17,8 @@
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-field.allowed.json --out tests/fixtures/diff-field.jsonl.gz
  * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-turns.allowed.json --out work/diff/turns.jsonl.gz
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-turns.allowed.json --out tests/fixtures/diff-turns.jsonl.gz
+ * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-resumable.allowed.json --out work/diff/resumable.jsonl.gz
+ * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-resumable.allowed.json --out tests/fixtures/diff-resumable.jsonl.gz
  *
  * JSONL schema v2: header {type, schemaVersion, showdownCommit, seed, count,
  * acceptedMoves, ...}; battle {type, index, seed (four uint16 words), policySeed,
@@ -103,6 +105,7 @@ const EXCEPTIONS = [
 	'empty-eachEvent-Update',
 	'empty-eachEvent-BeforeTurn',
 	'empty-switchIn-order',
+	'equal-speed-runSwitch-insertion',
 	'same-side-residual-order',
 ];
 
@@ -279,6 +282,15 @@ const OUTCOME_RULES = [
 		JSON.stringify(args[0]) === JSON.stringify(['brn', 'par', 'frz']),
 		address: scope => [scope.user.side.n, (scope.hitIndex * 2) + scope.occurrence - 1],
 		value: value => ['brn', 'par', 'frz'].indexOf(value) },
+	{ kind: 'drag_in', method: 'sample', matches: (scope, caller, args) =>
+		scope?.kind === 'drag' && caller === 'Battle.getRandomSwitchable' &&
+		Array.isArray(args[0]),
+		address: scope => [scope.side.n, 0],
+		value: (value, scope) => {
+			const slot = scope.fixed[scope.side.n].indexOf(value);
+			assert(slot >= 0, 'Dragged Pokemon is missing from its fixed team');
+			return slot;
+		} },
 	{ kind: 'hit_count', method: 'sample', matches: (scope, caller, args) =>
 		scope?.kind === 'hit_loop' && caller === 'BattleActions.hitStepMoveHitLoop' &&
 		Array.isArray(args[0]) && args[0].length === 20,
@@ -338,7 +350,8 @@ const OUTCOME_RULES = [
 		address: () => [0, 5], value: (value, list, start) => list[start].side.n },
 ];
 
-function instrument(battle, stats) {
+function instrument(battle, stats, fixedMembers) {
+	const fixed = fixedMembers || battle.sides.map(side => [...side.pokemon]);
 	let outcomes = null;
 	let addresses;
 	let scope = null;
@@ -384,8 +397,10 @@ function instrument(battle, stats) {
 		occurrence: scope?.kind === 'confusionDamage' ? 0 : Math.max(0, (battle.activeMove?.hit || 1) - 1),
 	}));
 	wrap(battle.queue, 'sort', () => ({ kind: 'queue' }));
+	wrap(battle.queue, 'insertChoice', choices => ({ kind: 'insertChoice', choices }));
 	wrap(battle, 'eachEvent', event => ({ kind: 'eachEvent', event }));
 	wrap(battle.actions, 'runSwitch', () => ({ kind: 'runSwitch' }));
+	wrap(battle, 'getRandomSwitchable', side => ({ kind: 'drag', side, fixed }));
 	wrap(battle, 'fieldEvent', event => ({ kind: event === 'Residual' ? 'residual' : 'fieldEvent' }));
 
 	const random = battle.prng.random;
@@ -414,6 +429,15 @@ function instrument(battle, stats) {
 	const battleRandom = battle.random;
 	battle.random = function (...args) {
 		const caller = directCaller();
+		if (caller === 'BattleQueue.insertChoice' && scope?.kind === 'insertChoice' &&
+			scope.choices?.choice === 'runSwitch') {
+			assert(args.length === 2 && Number.isInteger(args[0]) && Number.isInteger(args[1]) &&
+				args[1] - args[0] === 2, 'Unexpected runSwitch insertion tie');
+			const value = allow('equal-speed-runSwitch-insertion', () =>
+				battleRandom.apply(this, args));
+			stats.exceptions['equal-speed-runSwitch-insertion']++;
+			return value;
+		}
 		const statusScope = caller === 'Battle.onStart' &&
 			(this.effect?.effectType === 'Status' || ['confusion', 'lockedmove'].includes(this.effect?.id)) ?
 			{ kind: 'status', status: this.effect.id, target: this.effectState.target } : scope;
@@ -507,7 +531,7 @@ function instrument(battle, stats) {
 }
 
 function newStats() {
-	return { steps: 0, outcomes: { order: 0, hit: 0, crit: 0, damage_roll: 0 },
+	return { steps: 0, outcomes: { order: 0, hit: 0, crit: 0, damage_roll: 0, drag_in: 0 },
 		misses: 0, crits: 0, ties: 0, struggles: 0, doubleKOs: 0, forcedReplacements: 0,
 		prngDraws: 0, exceptions: Object.fromEntries(
 			EXCEPTIONS.filter(key => key !== 'same-side-residual-order').map(key => [key, 0])), };

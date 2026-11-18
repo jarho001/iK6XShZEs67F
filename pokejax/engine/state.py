@@ -74,6 +74,10 @@ WEATHER_NAMES = ("", "raindance", "sunnyday", "sandstorm", "hail")
 NUM_WEATHERS = len(WEATHER_NAMES)
 SPIKES, TOXIC_SPIKES = range(2)
 
+# Resumable turn stages. The stored values describe hidden queue work; only the
+# public request and the boolean ``turn_stage > 0`` are exposed to a policy.
+TURN_IDLE, TURN_MOVES, TURN_RESIDUAL, TURN_REPLACEMENT = range(4)
+
 
 class BattleState(NamedTuple):
 	"""Member axes [side, slot]; moves/stats/types add their final axis.
@@ -126,5 +130,10 @@ class BattleState(NamedTuple):
 	hazards: jax.Array  # int8 [2, 2]: Spikes, Toxic Spikes layers on each side
 	hazard_order: jax.Array  # int8 [2, 2]: relative creation order for switch-in handlers
 	request: jax.Array
+	turn_stage: jax.Array  # int8 scalar; idle, saved moves, residual, replacement
+	turn_actions: jax.Array  # int8 [2], original move slots for the saved queue
+	turn_moves: jax.Array  # int16 [2], resolved move IDs for the saved queue
+	turn_pending: jax.Array  # bool [2], queued actions that have not run
+	turn_first: jax.Array  # int8 scalar, first side in the fixed move order
 	turn: jax.Array
 	winner: jax.Array
