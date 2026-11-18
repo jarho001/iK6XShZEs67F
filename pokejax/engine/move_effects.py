@@ -1,6 +1,7 @@
 """Healing, Pain Split and temporary type effects from moves."""
 
 import jax.numpy as jnp
+from jax import lax
 
 from .actions import SIDES
 from .state import HP, NO_TYPE, NUM_VOLATILES, ROOST, TEAM_SLOTS
@@ -9,10 +10,11 @@ from .state import HP, NO_TYPE, NUM_VOLATILES, ROOST, TEAM_SLOTS
 def _heal_fraction(value, numerator, denominator, callback):
 	"""Heal fields use Math.round; weather-heal callbacks use modify's half-down rule."""
 	denominator = jnp.maximum(denominator.astype(jnp.int32), 1)
-	doubled = 2 * value * numerator.astype(jnp.int32)
-	math_round = (doubled + denominator) // (2 * denominator)
-	modify_round = (value * numerator.astype(jnp.int32) + denominator // 2 - 1) // denominator
-	return jnp.where(callback, modify_round, math_round)
+	bias = denominator // 2 - callback.astype(jnp.int32)
+	product = value * numerator.astype(jnp.int32)
+	# Unused healing rows can have a zero numerator. Both rounding paths
+	# still produce a zero heal once the caller applies its minimum amount.
+	return lax.div(jnp.maximum(product + bias, 0), denominator)
 
 
 def apply_healing_active(state, side, move, enabled, hit, active_hp, tables):

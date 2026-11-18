@@ -28,7 +28,7 @@ def switch_members(state, switch_mask, targets):
 
 	slots = jnp.arange(TEAM_SLOTS)
 	outgoing_mask = slots[None, :] == outgoing[:, None]
-	clear_fainted = switch_mask & (state.hp[SIDES, outgoing] == 0)
+	clear_fainted = switch_mask & (outgoing != targets) & (state.hp[SIDES, outgoing] == 0)
 	status_team = jnp.where(outgoing_mask & clear_fainted[:, None], 0, state.status)
 	status_counter_team = jnp.where(outgoing_mask & clear_fainted[:, None], 0, state.status_counter)
 	restore_roost = switch_mask & (state.volatiles[:, ROOST] > 0)
@@ -48,7 +48,6 @@ def switch_members(state, switch_mask, targets):
 	counter = jnp.where(target_status == TOXIC, 0, counter)
 	counter = jnp.where(target_status == SLEEP, state.sleep_start[SIDES, targets], counter)
 	target_mask = switch_mask[:, None] & (slots[None, :] == targets[:, None])
-	status_team = jnp.where(target_mask, target_status[:, None], status_team)
 	active_turns = jnp.where(target_mask, 0, state.active_turns)
 	status_counter_team = jnp.where(target_mask, counter[:, None], status_counter_team)
 	return state._replace(
@@ -77,7 +76,8 @@ def drag_in(state, side, enabled, key, forced, tables):
 	count = jnp.sum(eligible.astype(jnp.int32))
 	rank = integer(key, UNFORCED, DRAG_IN, side, 0, jnp.maximum(count, 1))
 	cumulative = jnp.cumsum(eligible.astype(jnp.int32))
-	sampled = jnp.argmax(eligible & (cumulative > rank))
+	selected = eligible & (cumulative == rank + 1)
+	sampled = jnp.sum(jnp.where(selected, slots, 0))
 	forced_slot = forced[DRAG_IN, side, 0].astype(jnp.int32)
 	target = jnp.where(forced_slot >= 0, forced_slot, sampled)
 	forced_valid = (forced_slot < 0) | eligible[jnp.clip(forced_slot, 0, TEAM_SLOTS - 1)]

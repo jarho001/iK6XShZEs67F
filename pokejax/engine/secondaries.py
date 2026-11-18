@@ -35,84 +35,64 @@ def apply_secondaries(state, side, move, first_hit, later_hits, key, forced, tab
 	first_pass = first_hit & chance(key, forced, SECONDARY, side, rows, chance_, 100)
 	apply = eligible & (first_pass | ((rows == 0) & any_later))
 	targets = jnp.where(tables.move_secondary_self[move], side, 1 - side)
-	slots = state.active[targets]
-	target_hp = state.hp[targets, slots]
+	by_side = targets[:, None] == SIDES
+	active = state.active
+	active_hp = state.hp[SIDES, active]
+	active_status = state.status[SIDES, active]
+	target_hp = active_hp[targets]
 
 	choices = tables.move_secondary_status_choices[move]
 	choice = integer(key, forced, SECONDARY_STATUS, side, rows, 3)
 	inflicted = jnp.where(
 		jnp.any(choices != 0, axis=1), choices[rows, choice], tables.move_secondary_status[move]
 	)
-	types = state.types[targets, slots]
+	types = state.types[SIDES, active][targets]
 	present = types >= 0
 	immune = jnp.any(
 		present & tables.status_immune[inflicted[:, None], jnp.maximum(types, 0)], axis=1
 	)
 	immune |= tables.weather_status_immune[state.weather, inflicted]
 	sleep_clause = jnp.any(
-		(state.status[targets] == SLEEP)
-		& (state.sleep_from_foe[targets] != 0)
-		& (state.hp[targets] > 0),
+		(state.status == SLEEP) & (state.sleep_from_foe != 0) & (state.hp > 0),
 		axis=1,
 	)
-	current_status = state.status[targets, slots]
-	can_inflict = apply & (target_hp > 0) & (inflicted != HEALTHY) & (current_status == HEALTHY)
-	can_inflict &= ~immune & ~((inflicted == SLEEP) & sleep_clause)
-	same_target = targets[0] == targets[1]
-	row1_status = jnp.where(same_target & can_inflict[0], inflicted[0], current_status[1])
-	can_inflict = can_inflict.at[1].set(can_inflict[1] & (row1_status == HEALTHY))
-	durations = (integer(key, forced, SLEEP_DURATION, targets, 0, 3) + 2).astype(jnp.int8)
-	active = state.active
-	active_status = state.status[SIDES, active]
-	active_counter = state.status_counter[SIDES, active]
-	active_sleep_start = state.sleep_start[SIDES, active]
-	active_sleep_source = state.sleep_from_foe[SIDES, active]
-	status_by_side = active_status
-	counter_by_side = active_counter
-	start_by_side = active_sleep_start
-	source_by_side = active_sleep_source
-	for row in range(SECONDARY_SLOTS):
-		by_side = targets[row] == SIDES
-		set_status = can_inflict[row] & by_side
-		status_by_side = jnp.where(set_status, inflicted[row], status_by_side)
-		counter_value = jnp.where(inflicted[row] == SLEEP, durations[row], 0)
-		counter_by_side = jnp.where(set_status, counter_value, counter_by_side)
-		start_by_side = jnp.where(
-			set_status & (inflicted[row] == SLEEP), durations[row], start_by_side
-		)
-		source_by_side = jnp.where(set_status, inflicted[row] == SLEEP, source_by_side)
+	can_inflict = apply & (target_hp > 0) & (inflicted != HEALTHY)
+	can_inflict &= (active_status[targets] == HEALTHY) & ~immune
+	can_inflict &= ~((inflicted == SLEEP) & sleep_clause[targets])
+	row0, row1 = can_inflict
+	row1 &= ~(row0 & (targets[0] == targets[1]))
+	status_effects = jnp.stack((row0, row1))[:, None] & by_side
+	inflicted_by_side = jnp.where(status_effects[0], inflicted[0], inflicted[1])
+	set_status = jnp.any(status_effects, axis=0)
+	set_sleep = set_status & (inflicted_by_side == SLEEP)
+	duration = (integer(key, forced, SLEEP_DURATION, SIDES, 0, 3) + 2).astype(jnp.int8)
 	member_mask = jnp.arange(TEAM_SLOTS)[None, :] == active[:, None]
-	status_array = jnp.where(member_mask, status_by_side[:, None], state.status)
-	counter_array = jnp.where(member_mask, counter_by_side[:, None], state.status_counter)
-	start_array = jnp.where(member_mask, start_by_side[:, None], state.sleep_start)
-	source_array = jnp.where(member_mask, source_by_side[:, None], state.sleep_from_foe)
+	status_mask = member_mask & set_status[:, None]
+	status_array = jnp.where(status_mask, inflicted_by_side[:, None], state.status)
+	counter_array = jnp.where(
+		status_mask, jnp.where(set_sleep, duration, 0)[:, None], state.status_counter
+	)
+	start_array = jnp.where(member_mask & set_sleep[:, None], duration[:, None], state.sleep_start)
+	source_array = jnp.where(status_mask, set_sleep[:, None], state.sleep_from_foe)
 
 	boosts = state.boosts
-	volatiles = state.volatiles
-	volatile_kind = tables.move_secondary_volatile[move]
+	hit_effects = (apply & (target_hp > 0))[:, None] & by_side
 	for row in range(SECONDARY_SLOTS):
-		by_side = targets[row] == SIDES
-		boost_enabled = apply[row] & (target_hp[row] > 0) & by_side
-		boost_delta = jnp.where(
-			by_side[:, None], tables.move_secondary_boosts[move, row], 0
-		).astype(jnp.int32)
-		boosts = jnp.clip(
-			boosts.astype(jnp.int32) + jnp.where(boost_enabled[:, None], boost_delta, 0), -6, 6
-		).astype(state.boosts.dtype)
-		confusion = apply[row] & (volatile_kind[row] == 1) & by_side
-		current_confusion = volatiles[:, CONFUSION]
-		confusion_duration = (integer(key, forced, CONFUSION_DURATION, SIDES, 0, 4) + 2).astype(
-			volatiles.dtype
-		)
-		new_confusion = (current_confusion == 0) & (state.hp[SIDES, active] > 0) & confusion
-		volatiles = volatiles.at[:, CONFUSION].set(
-			jnp.where(new_confusion, confusion_duration, current_confusion)
-		)
-		flinch = apply[row] & (volatile_kind[row] == 2) & by_side
-		flinch &= state.hp[SIDES, active] > 0
-		volatiles = volatiles.at[:, FLINCH].set(
-			jnp.where(flinch, jnp.asarray(1, volatiles.dtype), volatiles[:, FLINCH])
-		)
+		delta = jnp.where(hit_effects[row, :, None], tables.move_secondary_boosts[move, row], 0)
+		boosts = jnp.clip(boosts + delta, -6, 6)
+
+	volatile_kind = tables.move_secondary_volatile[move]
+	confusion = jnp.any(hit_effects & (volatile_kind == 1)[:, None], axis=0)
+	confusion &= state.volatiles[:, CONFUSION] == 0
+	confusion_duration = (integer(key, forced, CONFUSION_DURATION, SIDES, 0, 4) + 2).astype(
+		state.volatiles.dtype
+	)
+	flinch = jnp.any(hit_effects & (volatile_kind == 2)[:, None], axis=0)
+	columns = jnp.arange(state.volatiles.shape[1])
+	volatiles = jnp.where(
+		confusion[:, None] & (columns == CONFUSION), confusion_duration[:, None], state.volatiles
+	)
+	volatiles = jnp.where(flinch[:, None] & (columns == FLINCH), 1, volatiles)
 
 	return state._replace(
 		status=status_array,

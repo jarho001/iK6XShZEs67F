@@ -431,47 +431,48 @@ def clear_broken_choice_locks(state, tables):
 	return state._replace(volatiles=jnp.where(mask, 0, state.volatiles))
 
 
-def residual_item_hook(state, enabled, key, forced, tables, rows, order):
-	"""Run the held item's row at order 5 or 28 in the residual table."""
-	if order == 5:
-		hp = state.hp[SIDES, state.active].astype(jnp.int32)
-		maximum = state.stats[SIDES, state.active, HP].astype(jnp.int32)
-		types = state.types[SIDES, state.active]
-		poison_type = jnp.any(types == tables.poison_type, axis=1)
-		kind = rows.residual_kind
-		active = enabled & (hp > 0)
-		heal_hook = (kind == RESIDUAL_LEFTOVERS) | ((kind == RESIDUAL_BLACK_SLUDGE) & poison_type)
-		damage_hook = (kind == RESIDUAL_BLACK_SLUDGE) & ~poison_type
-		heal_trigger = active & heal_hook & (hp < maximum)
-		damage_trigger = active & damage_hook
-		heal_amount = jnp.maximum(maximum // 16, 1)
-		healed = jnp.minimum(maximum, hp + heal_amount)
-		member_mask = jnp.arange(TEAM_SLOTS)[None, :] == state.active[:, None]
-		hp_team = jnp.where(member_mask & heal_trigger[:, None], healed[:, None], state.hp)
-		state = state._replace(hp=hp_team.astype(state.hp.dtype))
-		state = reveal_active_items(state, heal_trigger | damage_trigger)
-		damage = jnp.where(damage_trigger, jnp.maximum(maximum // 8, 1), 0)
-		return state, damage.astype(jnp.int32)
-	if order == 29:
-		active = enabled & (state.hp[SIDES, state.active] > 0)
-		trigger = active & rows.boost_restore & jnp.any(state.boosts < 0, axis=1)
-		cleared = jnp.where(state.boosts < 0, 0, state.boosts)
-		state = state._replace(boosts=jnp.where(trigger[:, None], cleared, state.boosts))
-		return consume_active_items(state, trigger), jnp.zeros((2,), jnp.int32)
+def residual_hp_item(state, enabled, tables, rows):
+	"""Calculate Leftovers and Black Sludge effects for both holders."""
+	hp = state.hp[SIDES, state.active].astype(jnp.int32)
+	maximum = state.stats[SIDES, state.active, HP].astype(jnp.int32)
+	types = state.types[SIDES, state.active]
+	poison_type = jnp.any(types == tables.poison_type, axis=1)
+	kind = rows.residual_kind
+	active = enabled & (hp > 0)
+	sludge = kind == RESIDUAL_BLACK_SLUDGE
+	heal_hook = (kind == RESIDUAL_LEFTOVERS) | (sludge & poison_type)
+	heal = active & heal_hook & (hp < maximum)
+	damage = jnp.where(active & sludge & ~poison_type, jnp.maximum(maximum // 8, 1), 0)
+	healing = jnp.minimum(maximum - hp, jnp.maximum(maximum // 16, 1))
+	return jnp.where(heal, healing, 0), damage
 
-	# Toxic Orb and Flame Orb share the same row, with status immunity, active
-	# checks, and Sleep Clause semantics delegated to the existing status rule.
-	from .status import inflict_status
 
-	revealed = jnp.zeros((2,), jnp.bool_)
-	for side in (0, 1):
-		kind = rows.residual_kind[side]
-		status = jnp.where(kind == RESIDUAL_TOXIC_ORB, TOXIC, BURN).astype(jnp.int8)
-		attempt = enabled[side] & (state.hp[side, state.active[side]] > 0)
-		attempt &= (kind == RESIDUAL_TOXIC_ORB) | (kind == RESIDUAL_FLAME_ORB)
-		before = state.status[side, state.active[side]]
-		state = inflict_status(state, side, status, attempt, key, forced, tables)
-		applied = attempt & (before == HEALTHY) & (state.status[side, state.active[side]] == status)
-		revealed |= (SIDES == side) & applied
-	state = reveal_active_items(state, revealed)
-	return state, jnp.zeros((2,), jnp.int32)
+def apply_residual_white_herb(state, enabled, rows):
+	active = enabled & (state.hp[SIDES, state.active] > 0)
+	trigger = active & rows.boost_restore & jnp.any(state.boosts < 0, axis=1)
+	cleared = jnp.where(state.boosts < 0, 0, state.boosts)
+	state = state._replace(boosts=jnp.where(trigger[:, None], cleared, state.boosts))
+	return consume_active_items(state, trigger)
+
+
+def apply_residual_status_items(state, enabled, key, forced, tables, rows):
+	"""Apply Toxic and Flame Orbs together; their effects touch only the holder."""
+	del key, forced
+	kind = rows.residual_kind
+	toxic = kind == RESIDUAL_TOXIC_ORB
+	status = jnp.where(toxic, TOXIC, BURN).astype(state.status.dtype)
+	types = state.types[SIDES, state.active]
+	immune = jnp.any(
+		(types >= 0) & tables.status_immune[status[:, None], jnp.maximum(types, 0)], axis=1
+	)
+	immune |= tables.weather_status_immune[state.weather, status]
+	attempt = enabled & (state.hp[SIDES, state.active] > 0) & (toxic | (kind == RESIDUAL_FLAME_ORB))
+	applied = attempt & (state.status[SIDES, state.active] == HEALTHY) & ~immune
+	slots = jnp.arange(TEAM_SLOTS)[None, :] == state.active[:, None]
+	write = slots & applied[:, None]
+	state = state._replace(
+		status=jnp.where(write, status[:, None], state.status),
+		status_counter=jnp.where(write, 0, state.status_counter),
+		sleep_from_foe=jnp.where(write, 0, state.sleep_from_foe),
+	)
+	return reveal_active_items(state, applied)

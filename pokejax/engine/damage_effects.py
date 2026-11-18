@@ -1,15 +1,12 @@
 """Vectorized per-hit damage effects: drain, recoil, crash and self-faint."""
 
 import jax.numpy as jnp
+from jax import lax
 
 from .actions import SIDES
 from .damage import accuracy_hit, damage_for_hits, move_damage_bases
 from .field import effective_move_type
-from .items import (
-	CONTACT_ROCKY_HELMET,
-	DAMAGE_TAKEN_FOCUS_SASH,
-	update_item_state,
-)
+from .items import CONTACT_ROCKY_HELMET, DAMAGE_TAKEN_FOCUS_SASH, update_item_state
 from .move_effects import apply_healing_active
 from .randomness import hit_count
 from .state import ENDURE, HP
@@ -21,7 +18,7 @@ MAX_HITS = 5
 def _round_fraction(value, numerator, denominator):
 	"""Showdown's positive Math.round(value * numerator / denominator)."""
 	denominator = jnp.maximum(denominator.astype(jnp.int32), 1)
-	return (2 * value * numerator.astype(jnp.int32) + denominator) // (2 * denominator)
+	return lax.div(value * numerator.astype(jnp.int32) + denominator // 2, denominator)
 
 
 def apply_damage_effects(state, side, move, enabled, blocked, key, forced, tables, item_rows):
@@ -65,23 +62,13 @@ def apply_damage_effects(state, side, move, enabled, blocked, key, forced, table
 	)
 	cumulative = jnp.cumsum(raw_active_damage)
 	prior_damage = cumulative - raw_active_damage
-	capped = jnp.minimum(
-		raw_active_damage,
-		jnp.maximum(target_hp_before - 1 - prior_damage, 0),
-	)
-	raw_active_damage = jnp.where(endure, capped, raw_active_damage)
-	# Five static hit positions keep multi-hit damage branch-free.
-	damage_before = jnp.concatenate(
-		(jnp.zeros((1,), jnp.int32), jnp.cumsum(raw_active_damage)[:-1])
-	)
-	hp_before_hits = jnp.maximum(target_hp_before - damage_before, 0)
-	dealt = jnp.where(
-		active_hits & (hp_before_hits > 0),
-		jnp.minimum(raw_active_damage, hp_before_hits),
-		0,
-	)
+	# Endure retains one HP even after the raw prefix reaches the target's HP.
+	# Those later hits still land and can trigger contact effects.
+	minimum_hp = endure.astype(jnp.int32)
+	hp_before_hits = jnp.maximum(target_hp_before - prior_damage, minimum_hp)
+	dealt = jnp.minimum(raw_active_damage, hp_before_hits - minimum_hp)
 	hit_landed = active_hits & (hp_before_hits > 0)
-	total_damage = jnp.sum(dealt)
+	total_damage = jnp.minimum(cumulative[-1], jnp.maximum(target_hp_before - minimum_hp, 0))
 	success = total_damage > 0
 	drain_fraction = t.move_drain[move]
 	drain = _round_fraction(dealt, drain_fraction[0], drain_fraction[1])
@@ -107,15 +94,13 @@ def apply_damage_effects(state, side, move, enabled, blocked, key, forced, table
 	field_hit = effect_hit | (enabled & ~blocked & checked_hit & field_move)
 
 	recoil_fraction = t.move_recoil[move]
-	base_hp = state.stats[side, user, HP].astype(jnp.int32)
-	base_recoil = _round_fraction(base_hp, recoil_fraction[0], recoil_fraction[1])
-	dealt_recoil = _round_fraction(total_damage, recoil_fraction[0], recoil_fraction[1])
-	recoil = jnp.where(t.move_recoil_basehp[move], base_recoil, dealt_recoil)
+	recoil_base = jnp.where(t.move_recoil_basehp[move], user_max, total_damage)
+	recoil = _round_fraction(recoil_base, recoil_fraction[0], recoil_fraction[1])
 	recoil = jnp.where((total_damage > 0) & (recoil_fraction[0] > 0), jnp.maximum(recoil, 1), 0)
 	user_hp = jnp.maximum(user_hp - jnp.where(enabled, recoil, 0), 0)
 
 	crash = enabled & t.move_crash_damage[move] & ~effect_hit & (target_hp_before > 0)
-	crash_damage = jnp.maximum(1, base_hp // 2)
+	crash_damage = jnp.maximum(1, user_max // 2)
 	user_hp = jnp.maximum(user_hp - jnp.where(crash, crash_damage, 0), 0)
 	post_faint = enabled & (self_faint_kind == SELF_FAINT_ON_HIT) & effect_hit
 	user_hp = jnp.where(post_faint, 0, user_hp)

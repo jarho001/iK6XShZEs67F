@@ -32,40 +32,46 @@ def bench_slots(active):
 	return choices + (choices >= active[..., None])
 
 
-def legal_actions(state, engine_tables):
-	"""Match Pokemon.getMoveRequestData and Side.chooseSwitch without effects."""
-	request = jnp.where(state.winner == ONGOING, state.request, NONE)
+def move_availability(state, engine_tables):
+	"""Resolve move-slot usability and Choice lock for selection and execution."""
 	moves = state.moves[SIDES, state.active]
 	pp = state.pp[SIDES, state.active]
 	usable = (moves != 0) & (pp > 0)
-	usable = usable.at[:, 0].set(usable[:, 0] | ~jnp.any(usable, axis=1))
 	choice_move = state.volatiles[:, CHOICE_MOVE]
 	item = state.item[SIDES, state.active].astype(jnp.int32)
 	choice_item = engine_tables.item_hooks.rows[item, CHOICE] != 0
-	choice_active = choice_item & (choice_move > 0)
-	choice_active &= jnp.any(moves == choice_move[:, None], axis=1)
-	choice_usable = (moves == choice_move[:, None]) & (pp > 0)
+	matches_choice = moves == choice_move[:, None]
+	choice_active = choice_item & (choice_move > 0) & jnp.any(matches_choice, axis=1)
+	choice_usable = matches_choice & usable
+	return moves, usable, choice_active, choice_usable
+
+
+def legal_actions(state, engine_tables):
+	"""Match Pokemon.getMoveRequestData and Side.chooseSwitch without effects."""
+	request = jnp.where(state.winner == ONGOING, state.request, NONE)
+	_, usable, choice_active, choice_usable = move_availability(state, engine_tables)
+	only_first = jnp.arange(4)[None, :] == 0
+	usable |= only_first & ~jnp.any(usable, axis=1)[:, None]
 	choice_has_pp = jnp.any(choice_usable, axis=1)
-	choice_mask = jnp.where(choice_has_pp[:, None], choice_usable, jnp.arange(4)[None, :] == 0)
+	choice_mask = jnp.where(choice_has_pp[:, None], choice_usable, only_first)
 	forced = (
 		(state.volatiles[:, TWO_TURN_MOVE] > 0)
 		| (state.volatiles[:, LOCKED_MOVE] > 0)
 		| (state.volatiles[:, MUST_RECHARGE] > 0)
 	)
-	only_first = jnp.arange(4)[None, :] == 0
 	move_mask = (request[:, None] == MOVE) & jnp.where(forced[:, None], only_first, usable)
 	move_mask = jnp.where(
 		(request[:, None] == MOVE) & choice_active[:, None] & ~forced[:, None],
 		choice_mask,
 		move_mask,
 	)
-	move_mask = move_mask.at[:, 0].set(move_mask[:, 0] | (request == NONE))
+	move_mask |= only_first & (request == NONE)[:, None]
 	bench_alive = state.hp[SIDES[:, None], bench_slots(state.active)] > 0
 	can_switch = (request == SWITCH) | ((request == MOVE) & ~forced)
 	source_slot = state.volatiles[:, PARTIAL_TRAP_SOURCE].astype(jnp.int32) - 1
 	foe = 1 - SIDES
 	source_active = source_slot == state.active[foe]
-	source_alive = state.hp[foe, jnp.clip(source_slot, 0, 5)] > 0
+	source_alive = state.hp[foe, state.active[foe]] > 0
 	trapped = (state.volatiles[:, PARTIALLY_TRAPPED] > 0) & source_active & source_alive
 	can_switch &= ~trapped
 	can_switch |= request == SWITCH

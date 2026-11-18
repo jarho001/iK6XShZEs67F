@@ -6,7 +6,7 @@ masked arithmetic can evaluate unused outcomes without consuming randomness.
 
 import jax.numpy as jnp
 
-from .actions import SIDES
+from .actions import SIDES, move_availability
 from .boosts import apply_boosts
 from .damage_effects import SELF_FAINT_ALWAYS, apply_damage_effects
 from .field import apply_move_field_effects, apply_switch_hazards_ordered
@@ -240,7 +240,8 @@ def step(state, actions, key, forced, engine_tables):
 	# Fix the chosen actions, resolved moves, and queue order exactly once. Resume
 	# calls use these saved values and never recompute priority or speed order.
 	move_slots = jnp.minimum(actions, 3)
-	moves = state.moves[SIDES, state.active, move_slots]
+	active_moves, usable, choice_active, choice_usable = move_availability(state, t)
+	moves = active_moves[SIDES, move_slots]
 	charging = state.volatiles[:, TWO_TURN_MOVE]
 	locked = state.volatiles[:, LOCKED_MOVE]
 	recharge = state.volatiles[:, MUST_RECHARGE] > 0
@@ -248,17 +249,8 @@ def step(state, actions, key, forced, engine_tables):
 	moves = jnp.where(charging > 0, charging, moves)
 	moves = jnp.where(locked > 0, locked, moves)
 	moves = jnp.where(recharge, 0, moves)
-	usable = (state.moves[SIDES, state.active] != 0) & (state.pp[SIDES, state.active] > 0)
-	choice_move = state.volatiles[:, CHOICE_MOVE]
+	choice_has_pp = jnp.any(choice_usable, axis=1)
 	item_rows = gather_active_items(state, t)
-	choice_item = item_rows.choice
-	choice_active = choice_item & (choice_move > 0)
-	choice_active &= jnp.any(state.moves[SIDES, state.active] == choice_move[:, None], axis=1)
-	choice_has_pp = jnp.any(
-		(state.moves[SIDES, state.active] == choice_move[:, None])
-		& (state.pp[SIDES, state.active] > 0),
-		axis=1,
-	)
 	choice_struggle = choice_active & ~choice_has_pp & ~forced_move
 	moves = jnp.where(jnp.any(usable, axis=1) | forced_move, moves, t.struggle_id)
 	moves = jnp.where(choice_struggle, t.struggle_id, moves)
