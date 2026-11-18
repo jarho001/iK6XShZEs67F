@@ -9,6 +9,7 @@ from pokejax.tables import Tables
 
 from .abilities import ability_cures, berry_allowed, reveal_abilities, status_immunity
 from .modifiers import chain, modify
+from .move_data import read_move
 from .state import (
 	BURN,
 	CHOICE_MOVE,
@@ -360,6 +361,7 @@ def item_base_power_modifier(side, type_, gem_trigger, damage_kind, rows):
 
 def apply_after_move_items(state, side, move, enabled, move_hit, rows, tables, sheer=False):
 	"""Resolve White Herb and Life Orb after a move's normal hit effects."""
+	row = read_move(tables, move)
 	negative = jnp.any(state.boosts < 0, axis=1)
 	white_herb = enabled & rows.boost_restore & negative & (state.hp[SIDES, state.active] > 0)
 	cleared = jnp.where(state.boosts < 0, 0, state.boosts)
@@ -370,7 +372,7 @@ def apply_after_move_items(state, side, move, enabled, move_hit, rows, tables, s
 	# self-switch effect does not set source.forceSwitchFlag before this hook.
 	user_side = SIDES == side
 	recoil = user_side & enabled & move_hit & (rows.damage_kind == DAMAGE_LIFE_ORB)
-	recoil &= ~jnp.asarray(sheer) & (tables.move_category[move] != 2)
+	recoil &= ~jnp.asarray(sheer) & (row.move_category != 2)
 	user = state.active[side]
 	maximum = state.stats[side, user, HP].astype(jnp.int32)
 	hp = state.hp[side, user].astype(jnp.int32)
@@ -378,7 +380,7 @@ def apply_after_move_items(state, side, move, enabled, move_hit, rows, tables, s
 	new_hp = jnp.maximum(hp - jnp.where(recoil[side], damage, 0), 0)
 	active_mask = user_side[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == user)
 	state = state._replace(hp=jnp.where(active_mask, new_hp.astype(state.hp.dtype), state.hp))
-	return update_item_state(state, white_herb, recoil)
+	return state, white_herb, recoil
 
 
 def gather_active_update_hooks(state, tables):

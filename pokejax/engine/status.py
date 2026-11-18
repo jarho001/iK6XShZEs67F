@@ -7,11 +7,11 @@ from .abilities import (
 	active_abilities,
 	effective_weather,
 	has_hook,
-	reveal_abilities,
 	status_immunity,
 )
 from .actions import SIDES
 from .field import effective_move_type
+from .move_data import read_move
 from .randomness import FULL_PARALYSIS, SLEEP_DURATION, THAW, chance, integer
 from .state import (
 	FREEZE,
@@ -42,6 +42,7 @@ def switch_in(state, side, slot, enabled):
 
 
 def before_move(state, side, move, enabled, key, forced, tables, recharge=False):
+	row = read_move(tables, move)
 	started = enabled
 	was_charging = state.volatiles[side, TWO_TURN_MOVE] > 0
 	recharge_now = enabled & recharge
@@ -58,7 +59,7 @@ def before_move(state, side, move, enabled, key, forced, tables, recharge=False)
 	sleeping = enabled & (status == SLEEP)
 	counter = jnp.where(sleeping, counter - 1, counter)
 	wake = sleeping & (counter <= 0)
-	can_defrost = tables.move_defrost[move]
+	can_defrost = row.move_defrost
 	thaw = enabled & (status == FREEZE) & ~can_defrost & chance(key, forced, THAW, side, 0, 1, 5)
 	frozen = enabled & (status == FREEZE) & ~thaw & ~can_defrost
 	clear = wake | thaw
@@ -115,9 +116,10 @@ def inflict_status(state, side, inflicted, enabled, key, forced, tables):
 
 def apply_move(state, side, move, enabled, hit, key, forced, tables, abilities, weather):
 	"""Apply move status effects with dense team masks and one field write."""
+	row = read_move(tables, move)
 	foe = 1 - side
 	user, target = state.active[side], state.active[foe]
-	effect = tables.move_effect[move]
+	effect = row.move_effect
 	user_status = state.status[side, user]
 	target_status = state.status[foe, target]
 	team_slots = jnp.arange(TEAM_SLOTS)
@@ -125,11 +127,11 @@ def apply_move(state, side, move, enabled, hit, key, forced, tables, abilities, 
 	target_mask = (SIDES == foe)[:, None] & (team_slots == target)[None, :]
 	# ModifyMove cures a defrost move's user; DamagingHit thaws its target later,
 	# AFTER secondaries (BattleActions.spreadMoveHit, Gen 5+ event order).
-	self_thaw = enabled & (user_status == FREEZE) & tables.move_defrost[move]
+	self_thaw = enabled & (user_status == FREEZE) & row.move_defrost
 	status = jnp.where(user_mask & self_thaw, HEALTHY, state.status)
 	user_status = jnp.where(self_thaw, HEALTHY, user_status)
 	transfer = effect == TRANSFER
-	inflicted = jnp.where(transfer, user_status, tables.move_status[move])
+	inflicted = jnp.where(transfer, user_status, row.move_status)
 	types = state.types[foe, target]
 	immune = jnp.any((types >= 0) & tables.status_immune[inflicted, jnp.maximum(types, 0)])
 	immune |= tables.weather_status_immune[weather, inflicted]
@@ -137,12 +139,12 @@ def apply_move(state, side, move, enabled, hit, key, forced, tables, abilities, 
 	clause = jnp.any(
 		(state.status[foe] == SLEEP) & (state.sleep_from_foe[foe] != 0) & (state.hp[foe] > 0)
 	)
-	inflict = enabled & hit & ~tables.move_status_self[move]
+	inflict = enabled & hit & ~row.move_status_self
 	inflict &= (state.hp[foe, target] > 0) & (inflicted != HEALTHY)
 	inflict &= (target_status == HEALTHY) & ~immune & ~((inflicted == SLEEP) & clause)
 	reveal_target = inflict & ability_immune & ~transfer
 	own_tempo = has_hook(abilities[foe], OWN_TEMPO) & (state.hp[foe, target] > 0)
-	reveal_target |= enabled & hit & tables.move_confusion[move] & own_tempo
+	reveal_target |= enabled & hit & row.move_confusion & own_tempo
 	inflict &= ~ability_immune
 	duration = (integer(key, forced, SLEEP_DURATION, foe, 0, 3) + 2).astype(jnp.int8)
 	target_status_after = jnp.where(inflict, inflicted, target_status)
@@ -172,9 +174,8 @@ def apply_move(state, side, move, enabled, hit, key, forced, tables, abilities, 
 	)
 	sleep_immunity = status_immunity(abilities[side], SLEEP, weather)
 	permanent_sleep_immunity = status_immunity(abilities[side], SLEEP, 0)
-	state = reveal_abilities(
-		state,
-		((SIDES == foe) & reveal_target) | ((SIDES == side) & rest & permanent_sleep_immunity),
+	revealed = ((SIDES == foe) & reveal_target) | (
+		(SIDES == side) & rest & permanent_sleep_immunity
 	)
 	rest &= ~sleep_immunity
 	status = jnp.where(user_mask & rest, SLEEP, status)
@@ -188,16 +189,17 @@ def apply_move(state, side, move, enabled, hit, key, forced, tables, abilities, 
 		sleep_start=start,
 		sleep_from_foe=source,
 		hp=hp,
-	)
+	), revealed
 
 
 def after_hit(state, side, move, enabled, tables, weather=None):
+	row = read_move(tables, move)
 	foe = 1 - side
 	slot = state.active[foe]
 	status = state.status[foe, slot]
 	thaw = enabled & (state.hp[foe, slot] > 0) & (status == FREEZE)
 	thaw &= (
-		effective_move_type(state, move, tables, weather) == tables.fire_type
-	) | tables.move_thaws_target[move]
+		effective_move_type(state, row, tables, weather) == tables.fire_type
+	) | row.move_thaws_target
 	target_mask = (SIDES == foe)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == slot)
 	return state._replace(status=jnp.where(target_mask & thaw, HEALTHY, state.status))

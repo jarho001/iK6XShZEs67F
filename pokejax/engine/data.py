@@ -11,6 +11,7 @@ from pokejax.tables import Tables
 
 from .abilities import build_ability_hooks
 from .items import build_item_hook_table
+from .move_data import MOVE_FIELDS, MoveTable, build_move_table
 from .state import (
 	BURN,
 	FREEZE,
@@ -28,52 +29,13 @@ from .state import (
 from .status import PARTY_CURE, REFRESH, REST, TRANSFER
 
 
-class EngineTables(NamedTuple):
+class _EngineTables(NamedTuple):
 	species_base_stats: jax.Array
 	species_types: jax.Array
 	species_plain_types: jax.Array
 	species_shedinja: jax.Array
-	move_type: jax.Array
-	move_category: jax.Array
-	move_base_power: jax.Array
-	move_accuracy: jax.Array
-	move_always_hits: jax.Array
-	move_priority: jax.Array
-	move_crit_ratio: jax.Array
-	move_crit_always: jax.Array
-	move_drain: jax.Array
-	move_recoil: jax.Array
-	move_recoil_basehp: jax.Array
-	move_heal: jax.Array
-	move_heal_weather: jax.Array
-	move_damage_kind: jax.Array
-	move_fixed_damage: jax.Array
-	move_hit_min: jax.Array
-	move_hit_max: jax.Array
-	move_self_faint: jax.Array
-	move_crash_damage: jax.Array
-	move_pain_split: jax.Array
-	move_roost: jax.Array
 	move_max_pp: jax.Array
 	move_flags: jax.Array
-	move_status: jax.Array
-	move_status_self: jax.Array
-	move_effect: jax.Array
-	move_defrost: jax.Array
-	move_thaws_target: jax.Array
-	move_checks_immunity: jax.Array
-	move_boosts: jax.Array
-	move_boost_when: jax.Array
-	move_boost_target: jax.Array
-	move_boost_effect: jax.Array
-	move_confusion: jax.Array
-	move_secondary_chance: jax.Array
-	move_secondary_self: jax.Array
-	move_secondary_status: jax.Array
-	move_secondary_status_choices: jax.Array
-	move_secondary_boosts: jax.Array
-	move_secondary_volatile: jax.Array
-	move_secondary_user_species: jax.Array
 	status_immune: jax.Array
 	type_exponent: jax.Array
 	type_immune: jax.Array
@@ -84,48 +46,39 @@ class EngineTables(NamedTuple):
 	flying_type: jax.Array
 	ground_type: jax.Array
 	normal_type: jax.Array
-	move_weather: jax.Array
-	move_hazard: jax.Array
-	move_rapid_spin: jax.Array
-	move_weather_accuracy: jax.Array
-	move_weather_type: jax.Array
-	move_weather_power: jax.Array
-	move_weather_heal: jax.Array
 	weather_damage_by_type: jax.Array
 	weather_spdef_boost: jax.Array
 	weather_residual_immune: jax.Array
 	weather_status_immune: jax.Array
 	poison_type: jax.Array
-	move_stall_kind: jax.Array
-	move_volatile_status: jax.Array
-	move_self_volatile: jax.Array
-	move_breaks_protect: jax.Array
-	move_protects: jax.Array
-	move_charge: jax.Array
 	move_turn_volatile_ids: jax.Array
 	move_charge_semi: jax.Array
-	move_charge_boosts: jax.Array
-	move_charge_sun_skip: jax.Array
-	move_fakeout: jax.Array
-	move_target_foe: jax.Array
-	move_spread: jax.Array
-	move_hits_semi: jax.Array
-	move_semi_power: jax.Array
-	move_weather_power_scale: jax.Array
-	move_magnitude: jax.Array
-	move_self_switch: jax.Array
-	move_force_switch: jax.Array
-	move_contact: jax.Array
 	species_nfe: jax.Array
 	species_num: jax.Array
 	item_hooks: object
 	ability_hooks: jax.Array
-	move_punch: jax.Array
-	move_sheer_force: jax.Array
 	ice_type: jax.Array
 	fighting_type: jax.Array
 	captivate_id: jax.Array
 	anticipation_type: jax.Array
+	move_table: MoveTable
+
+
+class EngineTables(_EngineTables):
+	__slots__ = ()
+
+	def __getattr__(self, name):
+		if name in MOVE_FIELDS:
+			return self.move_table.column(name)
+		raise AttributeError(name)
+
+	def _replace(self, **changes):
+		# Keep column-based overrides consistent with the packed lookup.
+		columns = {name: changes.pop(name) for name in MOVE_FIELDS if name in changes}
+		if columns:
+			table = changes.get("move_table", self.move_table)
+			changes["move_table"] = table.replace_columns(columns)
+		return super()._replace(**changes)
 
 
 def build_engine_tables(tables: Tables) -> EngineTables:
@@ -330,110 +283,108 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 	immunities = np.pad(tables.types.immune, ((0, 0), (1, 0)))
 	anticipation_type = (exponents[:, :, None] + exponents[:, None, :]) > 0
 	anticipation_type &= ~(immunities[:, :, None] | immunities[:, None, :])
-	return EngineTables(
-		*map(
-			jnp.asarray,
-			(
-				tables.species.base_stats,
-				tables.species.types,
-				plain_types,
-				np.asarray(tables.species.ids) == "shedinja",
-				moves.type,
-				moves.category,
-				moves.base_power,
-				moves.accuracy,
-				moves.always_hits,
-				moves.priority,
-				moves.crit_ratio,
-				moves.crit_always,
-				moves.drain,
-				moves.recoil,
-				moves.recoil_basehp,
-				moves.heal,
-				moves.heal_weather,
-				moves.damage_kind,
-				moves.fixed_damage,
-				moves.hit_min,
-				moves.hit_max,
-				moves.self_faint,
-				moves.crash_damage,
-				moves.pain_split,
-				moves.roost,
-				max_pp,
-				moves.flags,
-				status,
-				np.asarray(moves.ids) == "rest",
-				effect,
-				defrost,
-				thaws_target,
-				np.asarray(moves.ids) == "thunderwave",
-				boosts,
-				when,
-				boost_target,
-				boost_effect,
-				moves.confusion & np.isin(moves.ids, tuple(CONFUSION_MOVES)),
-				secondary_chance,
-				moves.secondary_self,
-				moves.secondary_status,
-				moves.secondary_status_choices,
-				moves.secondary_boosts,
-				moves.secondary_volatile,
-				user_species,
-				immune,
-				tables.types.exponent,
-				tables.types.immune,
-				tables.natures.multipliers,
-				np.asarray(moves.index["struggle"], dtype=np.int32),
-				np.asarray(tables.abilities.index["multitype"], dtype=np.int32),
-				np.asarray(tables.types.index["fire"], dtype=np.int32),
-				np.asarray(tables.types.index["flying"], dtype=np.int32),
-				np.asarray(tables.types.index["ground"], dtype=np.int32),
-				np.asarray(tables.types.index["normal"], dtype=np.int32),
-				weather_moves,
-				hazards,
-				np.asarray(moves.ids) == "rapidspin",
-				weather_accuracy,
-				weather_type,
-				weather_power,
-				weather_heal,
-				weather_damage,
-				weather_spdef,
-				weather_immune,
-				weather_status_immune,
-				np.asarray(tables.types.index["poison"], dtype=np.int32),
-				stall_kind,
-				moves.volatile_status,
-				moves.self_volatile,
-				moves.breaks_protect,
-				moves.flags[:, moves.flag_names.index("protect")],
-				charge,
-				move_turn_volatile_ids,
-				charge_semi,
-				charge_boosts,
-				np.asarray(moves.ids) == "solarbeam",
-				np.asarray(moves.ids) == "fakeout",
-				target_foe,
-				spread,
-				hits_semi,
-				semi_power,
-				weather_power_scale,
-				np.asarray(moves.ids) == "magnitude",
-				np.isin(np.asarray(moves.ids), ("uturn", "voltswitch")),
-				np.isin(
-					np.asarray(moves.ids),
-					("roar", "whirlwind", "dragontail", "circlethrow"),
-				),
-				moves.flags[:, moves.flag_names.index("contact")],
-				tables.species.nfe,
-				tables.species.num,
-			),
+	move_table = build_move_table(
+		move_type=moves.type,
+		move_category=moves.category,
+		move_base_power=moves.base_power,
+		move_accuracy=moves.accuracy,
+		move_always_hits=moves.always_hits,
+		move_priority=moves.priority,
+		move_crit_ratio=moves.crit_ratio,
+		move_crit_always=moves.crit_always,
+		move_drain=moves.drain,
+		move_recoil=moves.recoil,
+		move_recoil_basehp=moves.recoil_basehp,
+		move_heal=moves.heal,
+		move_heal_weather=moves.heal_weather,
+		move_damage_kind=moves.damage_kind,
+		move_fixed_damage=moves.fixed_damage,
+		move_hit_min=moves.hit_min,
+		move_hit_max=moves.hit_max,
+		move_self_faint=moves.self_faint,
+		move_crash_damage=moves.crash_damage,
+		move_pain_split=moves.pain_split,
+		move_roost=moves.roost,
+		move_status=status,
+		move_status_self=np.asarray(moves.ids) == "rest",
+		move_effect=effect,
+		move_defrost=defrost,
+		move_thaws_target=thaws_target,
+		move_checks_immunity=np.asarray(moves.ids) == "thunderwave",
+		move_boosts=boosts,
+		move_boost_when=when,
+		move_boost_target=boost_target,
+		move_boost_effect=boost_effect,
+		move_confusion=moves.confusion & np.isin(moves.ids, tuple(CONFUSION_MOVES)),
+		move_secondary_chance=secondary_chance,
+		move_secondary_self=moves.secondary_self,
+		move_secondary_status=moves.secondary_status,
+		move_secondary_status_choices=moves.secondary_status_choices,
+		move_secondary_boosts=moves.secondary_boosts,
+		move_secondary_volatile=moves.secondary_volatile,
+		move_secondary_user_species=user_species,
+		move_weather=weather_moves,
+		move_hazard=hazards,
+		move_rapid_spin=np.asarray(moves.ids) == "rapidspin",
+		move_weather_accuracy=weather_accuracy,
+		move_weather_type=weather_type,
+		move_weather_power=weather_power,
+		move_weather_heal=weather_heal,
+		move_stall_kind=stall_kind,
+		move_volatile_status=moves.volatile_status,
+		move_self_volatile=moves.self_volatile,
+		move_breaks_protect=moves.breaks_protect,
+		move_protects=moves.flags[:, moves.flag_names.index("protect")],
+		move_charge=charge,
+		move_charge_boosts=charge_boosts,
+		move_charge_sun_skip=np.asarray(moves.ids) == "solarbeam",
+		move_fakeout=np.asarray(moves.ids) == "fakeout",
+		move_target_foe=target_foe,
+		move_spread=spread,
+		move_hits_semi=hits_semi,
+		move_semi_power=semi_power,
+		move_weather_power_scale=weather_power_scale,
+		move_magnitude=np.asarray(moves.ids) == "magnitude",
+		move_self_switch=np.isin(np.asarray(moves.ids), ("uturn", "voltswitch")),
+		move_force_switch=np.isin(
+			np.asarray(moves.ids),
+			("roar", "whirlwind", "dragontail", "circlethrow"),
 		),
+		move_contact=moves.flags[:, moves.flag_names.index("contact")],
+		move_punch=moves.flags[:, moves.flag_names.index("punch")],
+		move_sheer_force=np.any(moves.secondary_chance > 0, axis=1),
+	)
+	return EngineTables(
+		species_base_stats=jnp.asarray(tables.species.base_stats),
+		species_types=jnp.asarray(tables.species.types),
+		species_plain_types=jnp.asarray(plain_types),
+		species_shedinja=jnp.asarray(np.asarray(tables.species.ids) == "shedinja"),
+		move_max_pp=jnp.asarray(max_pp),
+		move_flags=jnp.asarray(moves.flags),
+		status_immune=jnp.asarray(immune),
+		type_exponent=jnp.asarray(tables.types.exponent),
+		type_immune=jnp.asarray(tables.types.immune),
+		nature_multipliers=jnp.asarray(tables.natures.multipliers),
+		struggle_id=jnp.asarray(np.asarray(moves.index["struggle"], dtype=np.int32)),
+		multitype_id=jnp.asarray(np.asarray(tables.abilities.index["multitype"], dtype=np.int32)),
+		fire_type=jnp.asarray(np.asarray(tables.types.index["fire"], dtype=np.int32)),
+		flying_type=jnp.asarray(np.asarray(tables.types.index["flying"], dtype=np.int32)),
+		ground_type=jnp.asarray(np.asarray(tables.types.index["ground"], dtype=np.int32)),
+		normal_type=jnp.asarray(np.asarray(tables.types.index["normal"], dtype=np.int32)),
+		weather_damage_by_type=jnp.asarray(weather_damage),
+		weather_spdef_boost=jnp.asarray(weather_spdef),
+		weather_residual_immune=jnp.asarray(weather_immune),
+		weather_status_immune=jnp.asarray(weather_status_immune),
+		poison_type=jnp.asarray(np.asarray(tables.types.index["poison"], dtype=np.int32)),
+		move_turn_volatile_ids=jnp.asarray(move_turn_volatile_ids),
+		move_charge_semi=jnp.asarray(charge_semi),
+		species_nfe=jnp.asarray(tables.species.nfe),
+		species_num=jnp.asarray(tables.species.num),
 		item_hooks=build_item_hook_table(tables),
 		ability_hooks=build_ability_hooks(tables),
-		move_punch=jnp.asarray(moves.flags[:, moves.flag_names.index("punch")]),
-		move_sheer_force=jnp.asarray(np.any(moves.secondary_chance > 0, axis=1)),
 		ice_type=jnp.asarray(tables.types.index["ice"], jnp.int32),
 		fighting_type=jnp.asarray(tables.types.index["fighting"], jnp.int32),
 		captivate_id=jnp.asarray(moves.index["captivate"], jnp.int32),
 		anticipation_type=jnp.asarray(anticipation_type),
+		move_table=move_table,
 	)

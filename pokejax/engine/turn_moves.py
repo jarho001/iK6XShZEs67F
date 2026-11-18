@@ -4,6 +4,7 @@ import jax.numpy as jnp
 
 from .abilities import LEVITATE, NO_GUARD, apply_boost_delta, has_hook
 from .actions import SIDES
+from .move_data import read_move
 from .randomness import LOCK_DURATION, STALL_SUCCESS, TRAP_DURATION, integer
 from .state import (
 	ENDURE,
@@ -35,32 +36,36 @@ def set_active_volatile(state, side, column, value):
 
 def target_move_guards(state, side, move, tables, abilities):
 	"""Protect, Quick Guard, Wide Guard and semi-invulnerability checks."""
+	row = read_move(tables, move)
 	foe = 1 - side
-	targeted = tables.move_target_foe[move]
-	protects = tables.move_protects[move]
-	priority = tables.move_priority[move] > 0
+	targeted = row.move_target_foe
+	protects = row.move_protects
+	priority = row.move_priority > 0
 	guarded = (
 		targeted
 		& protects
 		& (
 			(state.volatiles[foe, PROTECT] > 0)
 			| ((state.volatiles[foe, QUICK_GUARD] > 0) & priority)
-			| ((state.volatiles[foe, WIDE_GUARD] > 0) & tables.move_spread[move])
+			| ((state.volatiles[foe, WIDE_GUARD] > 0) & row.move_spread)
 		)
 	)
 	charge = jnp.maximum(state.volatiles[foe, TWO_TURN_MOVE], 0)
 	semi = tables.move_charge_semi[charge].astype(jnp.int32)
-	invulnerable = targeted & (semi > 0) & ~tables.move_hits_semi[move, semi]
+	invulnerable = targeted & (semi > 0) & ~row.move_hits_semi[semi]
 	return guarded, invulnerable & ~jnp.any(has_hook(abilities, NO_GUARD))
 
 
 def try_stalling_move(state, side, move, enabled, will_act, key, forced, tables):
 	"""Resolve the Gen 5 shared Protect-family counter and guard volatile."""
-	kind = tables.move_stall_kind[move]
+	row = read_move(tables, move)
+	kind = row.move_stall_kind
 	counter = state.volatiles[side, STALL].astype(jnp.int32)
-	denominator = jnp.maximum(counter, 1).astype(jnp.uint32)
+	# The engine initializes the stall counter at two and doubles it to 256.
+	# A power-of-two denominator has exactly the same low-bit remainder.
+	mask = jnp.maximum(counter - 1, 0).astype(jnp.uint32)
 	bits = key[STALL_SUCCESS, side, 0]
-	sample = jnp.where(counter >= 256, bits == 0, bits % denominator == 0)
+	sample = jnp.where(counter >= 256, bits == 0, (bits & mask) == 0)
 	forced_value = forced[STALL_SUCCESS, side, 0]
 	passed = jnp.where(forced_value >= 0, forced_value != 0, sample)
 	succeeded = enabled & will_act & (kind > 0) & ((counter == 0) | passed)
@@ -132,7 +137,8 @@ def locked_move(state, side):
 
 def apply_charge_boosts(state, side, move, enabled, tables, abilities):
 	"""Apply a charge-turn stat boost, such as Skull Bash's Defense rise."""
-	delta = tables.move_charge_boosts[move].astype(jnp.int32)
+	row = read_move(tables, move)
+	delta = row.move_charge_boosts.astype(jnp.int32)
 	changed = apply_boost_delta(
 		state.boosts, jnp.broadcast_to(delta, state.boosts.shape), abilities, False
 	)
@@ -142,10 +148,11 @@ def apply_charge_boosts(state, side, move, enabled, tables, abilities):
 
 def apply_move_volatiles(state, side, move, hit, key, forced, tables, abilities):
 	"""Apply table-declared trap, lock and recharge volatiles after a hit."""
+	row = read_move(tables, move)
 	foe = 1 - side
 	target = state.active[foe]
 	volatiles = state.volatiles
-	trap = (tables.move_volatile_status[move] == 3) & hit
+	trap = (row.move_volatile_status == 3) & hit
 	trap &= (volatiles[foe, PARTIALLY_TRAPPED] == 0) & (state.hp[foe, target] > 0)
 	trap_time = (integer(key, forced, TRAP_DURATION, side, 0, 2) + 5).astype(volatiles.dtype)
 	columns = jnp.arange(NUM_VOLATILES)
@@ -156,13 +163,13 @@ def apply_move_volatiles(state, side, move, hit, key, forced, tables, abilities)
 		trap_mask & (columns[None, :] == PARTIAL_TRAP_SOURCE), trap_source, volatiles
 	)
 
-	lock_move = (tables.move_self_volatile[move] == 1) & hit
+	lock_move = (row.move_self_volatile == 1) & hit
 	new_lock = lock_move & (volatiles[side, LOCKED_MOVE] == 0)
-	continue_lock = lock_move & (volatiles[side, LOCKED_MOVE] == move)
+	continue_lock = lock_move & (volatiles[side, LOCKED_MOVE] == row.id)
 	true_duration = (integer(key, forced, LOCK_DURATION, side, 0, 2) + 2).astype(volatiles.dtype)
 	lock_mask = (SIDES == side)[:, None] & new_lock
 	volatiles = jnp.where(
-		lock_mask & (columns[None, :] == LOCKED_MOVE), move.astype(volatiles.dtype), volatiles
+		lock_mask & (columns[None, :] == LOCKED_MOVE), row.id.astype(volatiles.dtype), volatiles
 	)
 	volatiles = jnp.where(
 		lock_mask & (columns[None, :] == LOCKED_REMAINING),
@@ -179,7 +186,7 @@ def apply_move_volatiles(state, side, move, hit, key, forced, tables, abilities)
 		volatiles,
 	)
 
-	recharge = (tables.move_self_volatile[move] == 2) & hit
+	recharge = (row.move_self_volatile == 2) & hit
 	volatiles = jnp.where(
 		(SIDES == side)[:, None] & recharge & (columns[None, :] == MUST_RECHARGE),
 		jnp.asarray(1, volatiles.dtype),
@@ -189,7 +196,7 @@ def apply_move_volatiles(state, side, move, hit, key, forced, tables, abilities)
 	target_is_flying = jnp.any(target_types == tables.flying_type)
 	target_charge = jnp.maximum(volatiles[foe, TWO_TURN_MOVE], 0).astype(jnp.int32)
 	target_semi = tables.move_charge_semi[target_charge]
-	smackdown = (tables.move_volatile_status[move] == 4) & hit
+	smackdown = (row.move_volatile_status == 4) & hit
 	smackdown &= (state.hp[foe, target] > 0) & (
 		target_is_flying | (target_semi == 1) | has_hook(abilities[foe], LEVITATE)
 	)

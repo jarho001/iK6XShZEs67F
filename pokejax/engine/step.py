@@ -14,6 +14,7 @@ from .abilities import (
 	effective_weather,
 	has_hook,
 	move_abilities,
+	reveal_abilities,
 )
 from .actions import SIDES, move_availability
 from .boosts import apply_boosts
@@ -25,7 +26,9 @@ from .items import (
 	gather_active_items,
 	gather_active_update_hooks,
 	update_active_items,
+	update_item_state,
 )
+from .move_data import read_move
 from .order import action_order
 from .randomness import random_bits
 from .residual import residual
@@ -70,9 +73,8 @@ def _move(
 	state,
 	side,
 	action,
-	move,
+	row,
 	enabled,
-	charged_at_start,
 	first,
 	opponent_pending,
 	key,
@@ -85,10 +87,8 @@ def _move(
 	item_rows = gather_active_items(state, tables)
 	rows = move_abilities(ability_rows, side)
 	weather = effective_weather(state, rows)
-	sheer = has_hook(rows[side], SHEER_FORCE) & tables.move_sheer_force[move]
+	sheer = has_hook(rows[side], SHEER_FORCE) & row.move_sheer_force
 	enabled &= (state.hp[side, user] > 0) & alive_before[foe] & (state.winner == ONGOING)
-	charge_canceled = charged_at_start & (state.volatiles[side, TWO_TURN_MOVE] == 0)
-	enabled &= ~charge_canceled
 	started = enabled
 	charging = state.volatiles[side, TWO_TURN_MOVE] > 0
 	locked = state.volatiles[side, LOCKED_MOVE] > 0
@@ -101,19 +101,19 @@ def _move(
 		FAKE_OUT_USED,
 		jnp.where(started, 1, state.volatiles[side, FAKE_OUT_USED]),
 	)
-	state, enabled = before_move(state, side, move, enabled, key, forced, tables, recharge=recharge)
+	state, enabled = before_move(state, side, row, enabled, key, forced, tables, recharge=recharge)
 	move_enabled = enabled
 	choice_start = move_enabled & item_rows.choice[side]
 	choice_start &= state.volatiles[side, CHOICE_MOVE] == 0
 	choice_start &= ~continuation & ~recharge
-	choice_start &= move != 0
+	choice_start &= row.id != 0
 	state = set_active_volatile(
 		state,
 		side,
 		CHOICE_MOVE,
-		jnp.where(choice_start, move, state.volatiles[side, CHOICE_MOVE]),
+		jnp.where(choice_start, row.id, state.volatiles[side, CHOICE_MOVE]),
 	)
-	struggle = move == tables.struggle_id
+	struggle = row.id == tables.struggle_id
 	slot = jnp.minimum(action, 3)
 	pp = state.pp[side, user, slot].astype(jnp.int32)
 	consume_pp = enabled & ~recharge & ~continuation & ~struggle
@@ -131,39 +131,39 @@ def _move(
 		revealed_moves=jnp.where(selected_move, revealed, state.revealed_moves),
 	)
 	will_act = (side == first) & opponent_pending
-	state, stalled = try_stalling_move(state, side, move, enabled, will_act, key, forced, tables)
-	stall_kind = tables.move_stall_kind[move]
+	state, stalled = try_stalling_move(state, side, row, enabled, will_act, key, forced, tables)
+	stall_kind = row.move_stall_kind
 	move_allowed = enabled & ((stall_kind == 0) | stalled)
-	fakeout_fails = tables.move_fakeout[move] & fakeout_used
+	fakeout_fails = row.move_fakeout & fakeout_used
 	move_allowed &= ~fakeout_fails
-	solar_skip = tables.move_charge_sun_skip[move] & (weather == SUN)
-	charge_start = move_allowed & tables.move_charge[move] & ~charging & ~solar_skip
-	charge_attack = ~tables.move_charge[move] | charging | solar_skip
+	solar_skip = row.move_charge_sun_skip & (weather == SUN)
+	charge_start = move_allowed & row.move_charge & ~charging & ~solar_skip
+	charge_attack = ~row.move_charge | charging | solar_skip
 	attack_allowed = move_allowed & ~charge_start & charge_attack & ~recharge
 	state = set_active_volatile(
 		state,
 		side,
 		TWO_TURN_MOVE,
-		jnp.where(charge_start, move, state.volatiles[side, TWO_TURN_MOVE]),
+		jnp.where(charge_start, row.id, state.volatiles[side, TWO_TURN_MOVE]),
 	)
-	state = apply_charge_boosts(state, side, move, charge_start, tables, rows)
+	state = apply_charge_boosts(state, side, row, charge_start, tables, rows)
 	state = set_active_volatile(
 		state,
 		side,
 		TWO_TURN_MOVE,
 		jnp.where(
-			charging & (move_enabled | (started & ~move_enabled)),
+			charging & started,
 			-jnp.abs(state.volatiles[side, TWO_TURN_MOVE]),
 			state.volatiles[side, TWO_TURN_MOVE],
 		),
 	)
-	breaks_guard = attack_allowed & tables.move_breaks_protect[move]
+	breaks_guard = attack_allowed & row.move_breaks_protect
 	state = clear_broken_guards(state, side, breaks_guard)
-	guarded, invulnerable = target_move_guards(state, side, move, tables, rows)
-	state, success, hit, hit_landed, field_hit = apply_damage_effects(
+	guarded, invulnerable = target_move_guards(state, side, row, tables, rows)
+	state, result = apply_damage_effects(
 		state,
 		side,
-		move,
+		row,
 		attack_allowed,
 		guarded,
 		invulnerable,
@@ -176,21 +176,27 @@ def _move(
 		sheer,
 		~will_act,
 	)
-	state = apply_move(state, side, move, attack_allowed, hit, key, forced, tables, rows, weather)
-	state = apply_boosts(state, side, move, attack_allowed & ~sheer, hit, success, tables, rows)
+	hit = result.hit
+	state, status_reveals = apply_move(
+		state, side, row, attack_allowed, hit, key, forced, tables, rows, weather
+	)
+	state = reveal_abilities(state, result.ability_reveals | status_reveals)
+	state = apply_boosts(
+		state, side, row, attack_allowed & ~sheer, hit, result.success, tables, rows
+	)
 	state = confuse(
 		state,
 		foe,
-		attack_allowed & hit & tables.move_confusion[move] & ~has_hook(rows[foe], OWN_TEMPO),
+		attack_allowed & hit & row.move_confusion & ~has_hook(rows[foe], OWN_TEMPO),
 		key,
 		forced,
 	)
-	state = apply_secondaries(
+	state, lum_between_hits = apply_secondaries(
 		state,
 		side,
-		move,
-		hit_landed[0],
-		hit_landed[1:],
+		row,
+		result.landed[0],
+		result.landed[1:],
 		key,
 		forced,
 		tables,
@@ -199,15 +205,23 @@ def _move(
 		sheer,
 		item_rows,
 	)
-	state = after_hit(state, side, move, attack_allowed & success, tables, weather)
+	state = after_hit(state, side, row, attack_allowed & result.success, tables, weather)
 	state = apply_move_field_effects(
-		state, side, move, attack_allowed, field_hit, hit, key, forced, tables, item_rows
+		state, side, row, attack_allowed, result.field_hit, hit, key, forced, tables, item_rows
 	)
 	state = apply_move_volatiles(
-		state, side, move, attack_allowed & field_hit, key, forced, tables, ability_rows
+		state, side, row, attack_allowed & result.field_hit, key, forced, tables, ability_rows
 	)
 	user_alive_before_after_move_item = state.hp[side, user] > 0
-	state = apply_after_move_items(state, side, move, move_enabled, hit, item_rows, tables, sheer)
+	state, herb, life_orb = apply_after_move_items(
+		state, side, row, move_enabled, hit, item_rows, tables, sheer
+	)
+	# Every event still refers to the same two item holders until a drag.
+	state = update_item_state(
+		state,
+		result.item_consumptions | lum_between_hits | herb,
+		result.item_reveals | life_orb,
+	)
 	lock_continuation = locked & move_enabled
 	lock_remaining = state.volatiles[side, LOCKED_REMAINING]
 	lock_ends = lock_continuation & (lock_remaining == 1)
@@ -237,21 +251,15 @@ def _move(
 	user_alive = state.hp[side, user] > 0
 	target_alive = state.hp[foe, state.active[foe]] > 0
 	bench_alive = (state.hp[side] > 0) & (jnp.arange(TEAM_SLOTS) != state.active[side])
-	pivot = enabled & tables.move_self_switch[move] & hit & user_alive
+	pivot = enabled & row.move_self_switch & hit & user_alive
 	pivot &= jnp.any(bench_alive)
-	drag = (
-		enabled
-		& tables.move_force_switch[move]
-		& hit
-		& user_alive_before_after_move_item
-		& target_alive
-	)
+	drag = enabled & row.move_force_switch & hit & user_alive_before_after_move_item & target_alive
 	state, dragged, ability_rows = drag_in(state, foe, drag, key, forced, tables, side)
 	# A final hit can run Update before the queue declares the winner.
 	# Fatigue confusion starts later, so only an ongoing game can cure it here.
 	alive_after = jnp.any(state.hp > 0, axis=1)
 	terminal = ~jnp.all(alive_after)
-	update = started & (state.winner == ONGOING) & (~terminal | jnp.any(hit_landed))
+	update = started & (state.winner == ONGOING) & (~terminal | jnp.any(result.landed))
 	ignore_confusion = (SIDES == side) & terminal & fatigue_only
 	state = update_active_items(
 		state,
@@ -265,15 +273,11 @@ def _move(
 	return state._replace(boosts=boosts), pivot, dragged, ability_rows, alive_after
 
 
-def _resolve_action_winner(state, alive_before, alive, side, move, tables):
+def _resolve_action_winner(state, alive_before, alive, side, row):
 	"""Resolve a move's faint result before the next queued Showdown action."""
 	newly_dead = alive_before & ~alive
-	last_faint = jnp.where(tables.move_self_faint[move] == SELF_FAINT_ALWAYS, 1 - side, side)
-	last_faint = jnp.where(
-		jnp.any(newly_dead) & (jnp.sum(newly_dead) == 1),
-		jnp.argmax(newly_dead.astype(jnp.int32)),
-		last_faint,
-	)
+	last_faint = jnp.where(row.move_self_faint == SELF_FAINT_ALWAYS, 1 - side, side)
+	last_faint = jnp.where(newly_dead[0] != newly_dead[1], newly_dead[1], last_faint)
 	winner = jnp.where(~alive[0], 1, 0)
 	winner = jnp.where(~jnp.any(alive), last_faint, winner)
 	winner = jnp.where(jnp.all(alive), ONGOING, winner).astype(state.winner.dtype)
@@ -353,19 +357,17 @@ def step(state, actions, key, forced, engine_tables):
 	first = state.turn_first.astype(jnp.int32)
 
 	def execute(index, carry):
-		state, abilities, pivot_sides = carry
+		state, abilities, pivot_sides, alive_before = carry
 		side = first ^ index
 		enabled = run_moves & state.turn_pending[side] & ~jnp.any(pivot_sides)
 		enabled &= state.winner == ONGOING
-		alive_before = jnp.any(state.hp > 0, axis=1)
-		move = state.turn_moves[side]
+		row = read_move(t, state.turn_moves[side])
 		state, pivot, dragged, abilities, alive = _move(
 			state,
 			side,
 			state.turn_actions[side],
-			move,
+			row,
 			enabled,
-			state.volatiles[side, TWO_TURN_MOVE] > 0,
 			first,
 			state.turn_pending[1 - side],
 			key,
@@ -377,8 +379,8 @@ def step(state, actions, key, forced, engine_tables):
 		pivot_sides |= (SIDES == side) & pivot & (state.winner == ONGOING)
 		pending = state.turn_pending & ~((SIDES == side) & enabled) & ~dragged
 		state = state._replace(turn_pending=pending)
-		state = _resolve_action_winner(state, alive_before, alive, side, move, t)
-		return state, abilities, pivot_sides
+		state = _resolve_action_winner(state, alive_before, alive, side, row)
+		return state, abilities, pivot_sides, alive
 
 	# GPU unrolling lets XLA fuse the two slots into the surrounding rollout.
 	# The compact loop keeps the CPU PPO compile tractable. The backend choice
@@ -386,8 +388,8 @@ def step(state, actions, key, forced, engine_tables):
 	def run_queue(carry, *, unroll=False):
 		return lax.fori_loop(0, 2, execute, carry, unroll=unroll)
 
-	state, ability_rows, pivot_sides = lax.platform_dependent(
-		(state, ability_rows, jnp.zeros((2,), jnp.bool_)),
+	state, ability_rows, pivot_sides, _ = lax.platform_dependent(
+		(state, ability_rows, jnp.zeros((2,), jnp.bool_), jnp.any(state.hp > 0, axis=1)),
 		cuda=lambda carry: run_queue(carry, unroll=True),
 		default=run_queue,
 	)

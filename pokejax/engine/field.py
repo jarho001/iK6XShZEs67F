@@ -14,6 +14,7 @@ from .abilities import (
 	suppresses_weather,
 )
 from .actions import SIDES
+from .move_data import read_move
 from .randomness import WEATHER_CHANGE_ORDER, WEATHER_ORDER, first_side
 from .state import (
 	BOOST_SPE,
@@ -40,10 +41,11 @@ WEATHER_DURATION = 5
 
 def effective_move_type(state, move, tables, weather=None):
 	"""Return the move-table type after its weather type override."""
-	weather_type = tables.move_weather_type[
-		move, state.weather if weather is None else weather
-	].astype(jnp.int32)
-	return jnp.where(weather_type >= 0, weather_type, tables.move_type[move].astype(jnp.int32))
+	row = read_move(tables, move)
+	weather_type = row.move_weather_type[state.weather if weather is None else weather].astype(
+		jnp.int32
+	)
+	return jnp.where(weather_type >= 0, weather_type, row.move_type.astype(jnp.int32))
 
 
 def set_weather(state, weather, enabled, duration, ability=False):
@@ -62,8 +64,9 @@ def apply_move_field_effects(
 	state, side, move, enabled, field_hit, hit, key, forced, tables, item_rows
 ):
 	"""Apply weather, hazards, and Rapid Spin through per-move table columns."""
+	row = read_move(tables, move)
 	apply = enabled & field_hit
-	weather = tables.move_weather[move].astype(state.weather.dtype)
+	weather = row.move_weather.astype(state.weather.dtype)
 	# Field.setWeather emits WeatherChange even when the weather field was clear.
 	_ = first_side(key, forced, WEATHER_CHANGE_ORDER)
 	weather_rock = item_rows.weather_kind[side] == weather
@@ -73,7 +76,7 @@ def apply_move_field_effects(
 	state, _ = set_weather(state, weather, apply, duration)
 
 	foe = 1 - side
-	hazard = tables.move_hazard[move]
+	hazard = row.move_hazard
 	spikes = state.hazards[foe, SPIKES].astype(jnp.int32)
 	toxic_spikes = state.hazards[foe, TOXIC_SPIKES].astype(jnp.int32)
 	add_spikes = apply & (hazard == 1) & (spikes < 3)
@@ -81,7 +84,7 @@ def apply_move_field_effects(
 	hazard_layers = state.hazards.astype(jnp.int32)
 	adds = jnp.stack((add_spikes, add_toxic_spikes)).astype(jnp.int32)
 	hazards = hazard_layers + (SIDES == foe)[:, None] * adds[None, :]
-	clear = enabled & hit & tables.move_rapid_spin[move]
+	clear = enabled & hit & row.move_rapid_spin
 	hazards = jnp.where((SIDES == side)[:, None] & clear, 0, hazards)
 
 	order = state.hazard_order.astype(jnp.int32)
@@ -102,7 +105,9 @@ def _active_member_mask(slots):
 	return jnp.arange(TEAM_SLOTS)[None, :] == slots[:, None]
 
 
-def apply_active_switch_hazards(state, slots, enabled, first, tables, rows, weather, entrants=None):
+def apply_active_switch_hazards(
+	state, slots, enabled, first, tables, rows, weather, entrants=None, *, single=False
+):
 	"""Evaluate each hazard once per side, then commit in switch-in order."""
 	types = state.types[SIDES, slots]
 	grounded = ~jnp.any(types == tables.flying_type, axis=1) | (state.volatiles[:, SMACKDOWN] > 0)
@@ -126,8 +131,9 @@ def apply_active_switch_hazards(state, slots, enabled, first, tables, rows, weat
 	# A battle-ending Spikes KO stops the other switch-in. Toxic Spikes can
 	# still run on the fainting side if its callback precedes Spikes.
 	first_side = SIDES == first
-	active &= first_side | ~jnp.any(first_side & last_member_faints)
-	after = jnp.where(active, after, before)
+	if not single:
+		active &= first_side | ~jnp.any(first_side & last_member_faints)
+		after = jnp.where(active, after, before)
 	toxic_active = active & (toxic_layers > 0) & (toxic_first | (after > 0))
 	poison_type = jnp.any(types == tables.poison_type, axis=1)
 	absorb = toxic_active & poison_type
@@ -213,10 +219,11 @@ def weather_residual(state, enabled, key, forced, tables, rows=None, speed=None)
 	damage = jnp.where(can_damage, jnp.maximum(maximum // 16, 1), 0)
 	old_hp = state.hp[sides, active_slots].astype(jnp.int32)
 	new_hp = jnp.maximum(old_hp - damage, 0)
-	hp = state.hp.at[sides, active_slots].set(new_hp.astype(state.hp.dtype))
+	member_mask = _active_member_mask(active_slots)
+	hp = jnp.where(member_mask, new_hp[:, None].astype(state.hp.dtype), state.hp)
 
 	newly_dead = (old_hp > 0) & (new_hp == 0) & can_damage
-	alive = jnp.any(hp > 0, axis=1)
+	alive = jnp.any((state.hp > 0) & ~member_mask, axis=1) | (new_hp > 0)
 	double_end = ~alive[0] & ~alive[1]
 	last_faint = jnp.where(
 		newly_dead[0] & newly_dead[1],

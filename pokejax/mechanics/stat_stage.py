@@ -11,6 +11,18 @@ field selection, or apply stat modifiers.
 
 import jax.numpy as jnp
 
+# 840 is divisible by every denominator in the stage ratios (2 through 8).
+_STAGE_DENOMINATOR = 840
+_STAGE_FACTORS = jnp.asarray(
+	[
+		2 * _STAGE_DENOMINATOR // (2 - stage)
+		if stage < 0
+		else (2 + stage) * _STAGE_DENOMINATOR // 2
+		for stage in range(-6, 7)
+	],
+	jnp.int32,
+)
+
 
 def _as_int32(value, name):
 	input_dtype = getattr(value, "dtype", None)
@@ -27,11 +39,9 @@ def scale_stat_stage(stored_stat, stage):
 
 	For stage s >= 0, return floor(stat * (2 + s) / 2). For s < 0,
 	return floor(stat * 2 / (2 - s)). Integer operations preserve the exact
-	floor behavior; int32 intermediates are bounded by 65535 * 8.
+	floor behavior; the common denominator keeps the product within int32.
 	"""
 	stat = _as_int32(stored_stat, "stored_stat")
 	boost = jnp.clip(_as_int32(stage, "stage"), -6, 6)
-	is_positive = boost >= 0
-	numerator = jnp.where(is_positive, stat * (2 + boost), stat * 2)
-	denominator = jnp.where(is_positive, 2, 2 - boost)
-	return (numerator // denominator).astype(jnp.int32)
+	factor = _STAGE_FACTORS[boost + 6]
+	return (stat * factor) // _STAGE_DENOMINATOR

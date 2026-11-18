@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .modifiers import chain, modify
+from .move_data import read_move
 from .state import (
 	ATK,
 	BURN,
@@ -309,15 +310,16 @@ def ability_cures(state, rows):
 	return status_cure, confusion_cure
 
 
-def absorption(state, side, row, type_, exponent, immune, enabled, move, tables):
+def absorption(state, side, ability, type_, exponent, immune, enabled, move, tables):
 	"""TryHit runs after natural type immunity and protection, before accuracy."""
+	row = read_move(tables, move)
 	foe = 1 - side
-	kind = row[ABSORB]
-	user_move = tables.move_target_foe[move]
+	kind = ability[ABSORB]
+	user_move = row.move_target_foe
 	eligible = enabled & user_move & ~immune & (state.hp[foe, state.active[foe]] > 0)
-	wonder = (kind == ABSORB_WONDER) & (tables.move_category[move] != 2)
-	wonder &= (move != tables.struggle_id) & (exponent <= 0)
-	match = (kind > 0) & (kind != ABSORB_WONDER) & (row[ABSORB_TYPE] == type_)
+	wonder = (kind == ABSORB_WONDER) & (row.move_category != 2)
+	wonder &= (row.id != tables.struggle_id) & (exponent <= 0)
+	match = (kind > 0) & (kind != ABSORB_WONDER) & (ability[ABSORB_TYPE] == type_)
 	return eligible & (match | wonder)
 
 
@@ -380,13 +382,13 @@ def accuracy_modifier(rows, side, physical, target_confused, weather):
 def base_power_modifier(
 	rows, side, move, power, modifier, physical, status, fire, sheer, analytic, tables
 ):
+	row = read_move(tables, move)
 	source = rows[side, BASE_POWER]
 	dry_skin = (rows[1 - side, BASE_POWER] == POWER_DRY_SKIN) & fire
 	reckless = (source == POWER_RECOIL) & (
-		((tables.move_recoil[move, 0] > 0) & (move != tables.struggle_id))
-		| tables.move_crash_damage[move]
+		((row.move_recoil[0] > 0) & (row.id != tables.struggle_id)) | row.move_crash_damage
 	)
-	fist = (source == POWER_PUNCH) & tables.move_punch[move]
+	fist = (source == POWER_PUNCH) & row.move_punch
 	toxic = (source == POWER_TOXIC) & physical & ((status == POISON) | (status == TOXIC))
 	analytic &= source == POWER_ANALYTIC
 	# Higher-priority ability hooks come before Dry Skin, then move/item hooks.

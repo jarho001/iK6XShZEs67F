@@ -1,6 +1,7 @@
 """Gen 5 damage calculation with shared move math and per-hit crit/rolls."""
 
 import jax.numpy as jnp
+from jax import lax
 
 from pokejax.mechanics.damage_roll import apply_damage_roll
 from pokejax.mechanics.neutral_damage import neutral_damage_before_roll
@@ -39,6 +40,7 @@ from .items import (
 	item_base_power_modifier,
 )
 from .modifiers import chain, modify
+from .move_data import read_move
 from .randomness import CRIT, DAMAGE_ROLL, HIT, MAGNITUDE, SECONDARY, chance, integer
 from .secondaries import secondary_chances
 from .state import (
@@ -60,6 +62,7 @@ LEVEL_DAMAGE, HALF_CURRENT_DAMAGE, CONSTANT_DAMAGE = 1, 2, 3
 
 def accuracy_hit(state, side, move, key, forced, tables, rows=None, weather=None):
 	"""Sample the single move accuracy check before a multi-hit sequence."""
+	row = read_move(tables, move)
 	if rows is None:
 		rows = active_abilities(state, tables)
 	if weather is None:
@@ -74,11 +77,11 @@ def accuracy_hit(state, side, move, key, forced, tables, rows=None, weather=None
 		-6,
 		6,
 	)
-	accuracy = tables.move_accuracy[move].astype(jnp.int32)
-	weather_accuracy = tables.move_weather_accuracy[move, weather].astype(jnp.int32)
+	accuracy = row.move_accuracy.astype(jnp.int32)
+	weather_accuracy = row.move_weather_accuracy[weather].astype(jnp.int32)
 	accuracy = jnp.where(weather_accuracy >= 0, weather_accuracy, accuracy)
-	category = tables.move_category[move]
-	targeted = tables.move_target_foe[move]
+	category = row.move_category
+	targeted = row.move_target_foe
 	wonder = targeted & (rows[1 - side, ACCURACY_HOOK] == ACCURACY_WONDER) & (category == 2)
 	accuracy = modify(
 		jnp.where(wonder, 50, accuracy),
@@ -90,11 +93,12 @@ def accuracy_hit(state, side, move, key, forced, tables, rows=None, weather=None
 			weather,
 		),
 	)
-	accuracy = jnp.where(
-		boost >= 0, accuracy * (3 + boost) // 3, accuracy * 3 // jnp.maximum(3 - boost, 1)
-	)
+	positive = boost >= 0
+	numerator = accuracy * jnp.where(positive, 3 + boost, 3)
+	denominator = jnp.where(positive, 3, 3 - boost)
+	accuracy = lax.div(numerator, denominator)
 	return (
-		tables.move_always_hits[move]
+		row.move_always_hits
 		| has_hook(rows[side], NO_GUARD)
 		| (targeted & has_hook(rows[1 - side], NO_GUARD))
 		| (weather_accuracy == WEATHER_ACCURACY_ALWAYS)
@@ -140,23 +144,24 @@ def move_damage_bases(
 	analytic=False,
 ):
 	"""Compute the non-crit and crit pre-roll damage bases once per move."""
+	row = read_move(tables, move)
 	if rows is None:
 		rows = active_abilities(state, tables)
 	if weather is None:
 		weather = effective_weather(state, rows)
 	if type_ is None:
-		type_ = effective_move_type(state, move, tables, weather)
+		type_ = effective_move_type(state, row, tables, weather)
 	if immune is None:
-		immune, exponent, _ = type_matchup(state, side, move, type_, tables, rows)
+		immune, exponent, _ = type_matchup(state, side, row.id, type_, tables, rows)
 	t = tables
 	foe = 1 - side
 	user, target = state.active[side], state.active[foe]
-	struggle = move == t.struggle_id
+	struggle = row.id == t.struggle_id
 	item_type = jnp.where(struggle, -1, type_)
 	target_types = state.types[foe, target]
 	present = target_types >= 0
 	safe_types = jnp.maximum(target_types, 0)
-	physical = t.move_category[move] == 0
+	physical = row.move_category == 0
 	attack_index = jnp.where(physical, 1, 3)
 	defense_index = jnp.where(physical, 2, 4)
 	atk_boost = state.boosts[side, attack_index - 1].astype(jnp.int32)
@@ -193,11 +198,9 @@ def move_damage_bases(
 	# In the supported move table Twineedle is the multi-hit move that can
 	# inflict a status during the sequence. Its first poison can change Def
 	# before hit two, unless the target's Lum Berry activates between hits.
-	poison = (t.move_hit_max[move] > 1) & (t.move_secondary_status[move, 0] == POISON)
+	poison = (row.move_hit_max > 1) & (row.move_secondary_status[0] == POISON)
 	poison &= ~jnp.asarray(sheer) & ~jnp.any(present & t.status_immune[POISON, safe_types])
-	poison &= chance(
-		key, forced, SECONDARY, side, 0, secondary_chances(t, move, rows[side])[0], 100
-	)
+	poison &= chance(key, forced, SECONDARY, side, 0, secondary_chances(t, row, rows[side])[0], 100)
 	poison &= ~((item_rows.berry_kind[foe] == BERRY_LUM) & berry_allowed(state, rows)[foe])
 	marvel_later = marvel & ~statused & poison
 	defense_eff = apply_stat_modifier(
@@ -205,7 +208,7 @@ def move_damage_bases(
 	)
 	defense_later = apply_stat_modifier(defense_effective, foe, defense_index, item_rows, 6144)
 	level = state.level[side, user].astype(jnp.int32)
-	power = t.move_base_power[move].astype(jnp.int32)
+	power = row.move_base_power.astype(jnp.int32)
 	magnitude = integer(key, forced, MAGNITUDE, side, 0, 100)
 	magnitude_power = jnp.where(
 		magnitude < 5,
@@ -224,18 +227,18 @@ def move_damage_bases(
 			),
 		),
 	)
-	power = jnp.where(t.move_magnitude[move], magnitude_power, power)
-	power *= t.move_weather_power[move, weather].astype(jnp.int32)
+	power = jnp.where(row.move_magnitude, magnitude_power, power)
+	power *= row.move_weather_power[weather].astype(jnp.int32)
 
 	item_modifier = item_base_power_modifier(
-		side, item_type, gem_trigger, t.move_damage_kind[move], item_rows
+		side, item_type, gem_trigger, row.move_damage_kind, item_rows
 	)
 	power_modifier = base_power_modifier(
 		rows,
 		side,
-		move,
+		row,
 		power,
-		chain(t.move_weather_power_scale[move, weather], item_modifier),
+		chain(row.move_weather_power_scale[weather], item_modifier),
 		physical,
 		user_status,
 		fire,
@@ -254,19 +257,19 @@ def move_damage_bases(
 	late_bases = modify(later_scenarios, weather_modifier)
 	base_normal = modify(base_scenarios[0], weather_modifier)
 	base_crit = modify(base_scenarios[1], weather_modifier) * 2
-	damage_kind = t.move_damage_kind[move]
+	damage_kind = row.move_damage_kind
 	fixed = jnp.where(
 		damage_kind == LEVEL_DAMAGE,
 		level,
 		jnp.where(
 			damage_kind == HALF_CURRENT_DAMAGE,
 			jnp.maximum(1, state.hp[foe, target].astype(jnp.int32) // 2),
-			t.move_fixed_damage[move].astype(jnp.int32),
+			row.move_fixed_damage.astype(jnp.int32),
 		),
 	)
 	has_power = (power > 0) | (damage_kind > 0)
-	can_damage = ~immune & has_power & (t.move_category[move] != 2)
-	can_effect = ~immune | ~t.move_checks_immunity[move]
+	can_damage = ~immune & has_power & (row.move_category != 2)
+	can_effect = ~immune | ~row.move_checks_immunity
 	return (
 		base_normal,
 		base_crit,
@@ -286,6 +289,7 @@ def damage_for_hits(
 	state, side, move, hit_indices, bases, key, forced, tables, item_rows, rows, type_
 ):
 	"""Apply each hit's crit and roll to the shared damage bases."""
+	row = read_move(tables, move)
 	(
 		base_normal,
 		base_crit,
@@ -301,9 +305,7 @@ def damage_for_hits(
 	) = bases
 	stick_bonus = jnp.where(item_rows.stat_species[side], item_rows.crit_bonus[side], 0)
 	ratio = jnp.clip(
-		tables.move_crit_ratio[move].astype(jnp.int32)
-		+ stick_bonus
-		+ has_hook(rows[side], CRIT_BONUS),
+		row.move_crit_ratio.astype(jnp.int32) + stick_bonus + has_hook(rows[side], CRIT_BONUS),
 		0,
 		5,
 	)
@@ -313,7 +315,7 @@ def damage_for_hits(
 	burned = (state.status[side, user] == BURN) & ~skip_burn(rows[side])
 
 	crit_roll = chance(key, forced, CRIT, side, hit_indices, 1, denominator)
-	critical = tables.move_crit_always[move] | ((ratio > 0) & crit_roll)
+	critical = row.move_crit_always | ((ratio > 0) & crit_roll)
 	critical &= ~has_hook(rows[1 - side], CRIT_BLOCK)
 	roll = integer(key, forced, DAMAGE_ROLL, side, hit_indices, 16)
 	pre_roll = jnp.where(critical, base_crit, base_normal)
@@ -332,7 +334,7 @@ def damage_for_hits(
 	damage = jnp.where(shift > 0, boosted, resisted)
 	target_charge = jnp.maximum(state.volatiles[1 - side, TWO_TURN_MOVE], 0)
 	target_semi = tables.move_charge_semi[target_charge].astype(jnp.int32)
-	semi_power = tables.move_semi_power[move, target_semi]
+	semi_power = row.move_semi_power[target_semi]
 	damage *= jnp.where(semi_power, 2, 1).astype(jnp.int32)
 	damage = jnp.where(damage == 0, 1, damage) & 65535
 	modifier = jnp.where(

@@ -19,7 +19,7 @@ from .abilities import (
 	reveal_abilities,
 	suppresses_weather,
 )
-from .actions import SIDES, bench_slots
+from .actions import SIDES
 from .field import apply_active_switch_hazards, set_weather
 from .items import reveal_active_items, update_item_state
 from .order import active_speed
@@ -89,7 +89,7 @@ def switch_members(state, switch_mask, targets):
 def switch_actions(state, actions, switch_mask):
 	"""Translate action IDs 4..8 to fixed team slots and switch both sides."""
 	choices = jnp.clip(actions - 4, 0, 4)
-	targets = bench_slots(state.active)[SIDES, choices]
+	targets = choices + (choices >= state.active)
 	return switch_members(state, switch_mask, targets)
 
 
@@ -107,7 +107,7 @@ def drag_in(state, side, enabled, key, forced, tables, source=None):
 	forced_valid = (forced_slot < 0) | eligible[jnp.clip(forced_slot, 0, TEAM_SLOTS - 1)]
 	active = enabled & (count > 0) & forced_valid
 	switch_mask = (SIDES == side) & active
-	targets = jnp.where(SIDES == side, target, state.active)
+	targets = jnp.where(switch_mask, target, state.active)
 	state = switch_members(state, switch_mask, targets)
 	state, rows = run_switch_in(state, switch_mask, side, tables, source)
 	return (state, switch_mask) if source is None else (state, switch_mask, rows)
@@ -139,7 +139,10 @@ def run_switch_in(state, switchers, first, tables, mold_source=None, previous=No
 		first_weather = jnp.where(suppresses_weather(first_rows, first_alive), 0, state.weather)
 		weather = jnp.where(early, first_weather, weather)
 
-	hazard_rows = rows if mold_source is None else move_abilities(rows, mold_source)
+	# A drag has a single entrant. Only simultaneous switch-ins can change
+	# the other entrant's hazard weather or terminate its pending callbacks.
+	single = mold_source is not None
+	hazard_rows = move_abilities(rows, mold_source) if single else rows
 	state = apply_active_switch_hazards(
 		state,
 		state.active,
@@ -148,10 +151,13 @@ def run_switch_in(state, switchers, first, tables, mold_source=None, previous=No
 		tables,
 		hazard_rows,
 		weather,
-		rows,
+		None if single else rows,
+		single=single,
 	)
 	alive = state.hp[SIDES, state.active] > 0
-	starts = switchers & alive & ongoing & (faster | (state.winner == ONGOING))
+	starts = switchers & alive & ongoing
+	if not single:
+		starts &= faster | (state.winner == ONGOING)
 	start = rows[:, START]
 	if previous is not None:
 		old_start = starts & early & old_alive[::-1]
@@ -178,9 +184,11 @@ def run_switch_in(state, switchers, first, tables, mold_source=None, previous=No
 		old_alive = alive
 		old = state
 	# The faster grouped handler can see the slower entrant before its hazards.
-	grouped = jnp.all(switchers) & ~jnp.any(early)
-	foe_alive = jnp.where(grouped & faster, before[::-1], alive[::-1])
-	foe_alive = jnp.where(early, old_alive[::-1], foe_alive)
+	foe_alive = alive[::-1]
+	if not single:
+		grouped = jnp.all(switchers) & ~jnp.any(early)
+		foe_alive = jnp.where(grouped & faster, before[::-1], foe_alive)
+		foe_alive = jnp.where(early, old_alive[::-1], foe_alive)
 	intimidate = starts & foe_alive & (start == START_INTIMIDATE)
 	download = starts & foe_alive & (start == START_DOWNLOAD)
 	frisk = starts & foe_alive & (start == START_FRISK)
@@ -223,9 +231,12 @@ def run_switch_in(state, switchers, first, tables, mold_source=None, previous=No
 	anticipation = starts & foe_alive & (start == START_ANTICIPATION) & jnp.any(strong, axis=1)
 
 	weather = rows[:, WEATHER]
-	last = 1 - first
 	state, first_changed = set_weather(state, weather[first], starts[first], 0, ability=True)
-	state, last_changed = set_weather(state, weather[last], starts[last], 0, ability=True)
+	weather_changed = faster & first_changed
+	if not single:
+		last = 1 - first
+		state, last_changed = set_weather(state, weather[last], starts[last], 0, ability=True)
+		weather_changed |= ~faster & last_changed
 	revealed = (
 		(starts & (start == START_ANNOUNCE))
 		| intimidate
@@ -234,5 +245,5 @@ def run_switch_in(state, switchers, first, tables, mold_source=None, previous=No
 		| frisk
 		| anticipation
 	)
-	revealed |= jnp.where(SIDES == first, first_changed, last_changed)
+	revealed |= weather_changed
 	return reveal_abilities(state, revealed), rows

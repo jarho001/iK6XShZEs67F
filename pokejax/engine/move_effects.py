@@ -4,6 +4,7 @@ import jax.numpy as jnp
 from jax import lax
 
 from .actions import SIDES
+from .move_data import read_move
 from .state import HP, NO_TYPE, NUM_VOLATILES, ROOST, TEAM_SLOTS
 
 
@@ -19,25 +20,24 @@ def _heal_fraction(value, numerator, denominator, callback):
 
 def apply_healing_active(state, side, move, enabled, hit, active_hp, tables, weather=None):
 	"""Apply table-driven recovery to active HP and update Roost's type fields."""
+	row = read_move(tables, move)
 	t = tables
 	foe = 1 - side
 	user, target = state.active[side], state.active[foe]
 	maximum = state.stats[side, user, HP].astype(jnp.int32)
 	hp = active_hp[side]
-	numerator, denominator = t.move_weather_heal[
-		move, state.weather if weather is None else weather
-	]
+	numerator, denominator = row.move_weather_heal[state.weather if weather is None else weather]
 	can_heal = enabled & hit & (numerator > 0) & (hp > 0) & (hp < maximum)
 	amount = jnp.maximum(
 		1,
-		_heal_fraction(maximum, numerator, denominator, t.move_heal_weather[move] > 0),
+		_heal_fraction(maximum, numerator, denominator, row.move_heal_weather > 0),
 	)
 	healed_hp = jnp.minimum(maximum, hp + amount)
 	healed = can_heal & (healed_hp > hp)
 
 	target_hp = active_hp[foe]
 	average = jnp.maximum((hp + target_hp) // 2, 1)
-	pain_split = enabled & hit & t.move_pain_split[move] & (hp > 0) & (target_hp > 0)
+	pain_split = enabled & hit & row.move_pain_split & (hp > 0) & (target_hp > 0)
 	target_max = state.stats[foe, target, HP].astype(jnp.int32)
 	user_hp = jnp.where(can_heal, healed_hp, hp)
 	user_hp = jnp.where(pain_split, jnp.minimum(maximum, average), user_hp)
@@ -45,7 +45,7 @@ def apply_healing_active(state, side, move, enabled, hit, active_hp, tables, wea
 	active_hp = jnp.where(SIDES == side, user_hp, active_hp)
 	active_hp = jnp.where(SIDES == foe, jnp.where(pain_split, target_new_hp, target_hp), active_hp)
 
-	roost = healed & t.move_roost[move]
+	roost = healed & row.move_roost
 	old_types = state.types[side, user]
 	new_types = jnp.where(old_types == t.flying_type, NO_TYPE, old_types)
 	new_types = jnp.where(

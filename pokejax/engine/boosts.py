@@ -4,6 +4,7 @@ import jax.numpy as jnp
 
 from .abilities import active_abilities, apply_boost_delta, move_abilities
 from .actions import SIDES
+from .move_data import read_move
 from .state import BOOST_ATK, TEAM_SLOTS
 
 STATUS_BOOST, ATTACK_DROP = 1, 2
@@ -11,16 +12,17 @@ HAZE, CLEAR_SMOG, BELLY_DRUM = 1, 2, 3
 
 
 def apply_boosts(state, side, move, enabled, hit, success, tables, rows=None):
+	row = read_move(tables, move)
 	if rows is None:
 		rows = move_abilities(active_abilities(state, tables), side)
 	foe = 1 - side
 	user = state.active[side]
-	kind = tables.move_boost_effect[move]
-	when = tables.move_boost_when[move]
-	target = jnp.where(tables.move_boost_target[move] == 0, side, foe)
+	kind = row.move_boost_effect
+	when = row.move_boost_when
+	target = jnp.where(row.move_boost_target == 0, side, foe)
 	status_hit = (target == side) | hit
 	apply = enabled & (((when == STATUS_BOOST) & status_hit) | ((when == ATTACK_DROP) & success))
-	delta = jnp.where(((SIDES == target) & apply)[:, None], tables.move_boosts[move], 0)
+	delta = jnp.where(((SIDES == target) & apply)[:, None], row.move_boosts, 0)
 	boosts = apply_boost_delta(state.boosts, delta, rows, SIDES != side)
 	boosts = jnp.where(enabled & (kind == HAZE), 0, boosts)
 	boosts = jnp.where(
