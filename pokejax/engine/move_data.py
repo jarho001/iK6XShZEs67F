@@ -79,6 +79,14 @@ class MoveRow(NamedTuple):
 	move_weather_power: jax.Array
 	move_weather_power_scale: jax.Array
 	move_weather_type: jax.Array
+	move_bp_rule: jax.Array
+	move_bp_double: jax.Array
+	move_bp_partner: jax.Array
+	move_type_rule: jax.Array
+	move_stat_rule: jax.Array
+	move_success_rule: jax.Array
+	move_autotomize: jax.Array
+	move_steal_berry: jax.Array
 
 
 MOVE_FIELDS = MoveRow._fields[1:]

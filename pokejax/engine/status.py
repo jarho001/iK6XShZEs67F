@@ -206,7 +206,18 @@ def apply_move(state, side, move, enabled, hit, key, forced, tables, abilities, 
 	inflict = enabled & hit & ~row.move_status_self
 	inflict &= (state.hp[foe, target] > 0) & (inflicted != HEALTHY)
 	inflict &= (target_status == HEALTHY) & ~immune & ~((inflicted == SLEEP) & clause)
-	reveal_target = inflict & ability_immune & ~transfer
+	# The target's ability handler runs before Sleep Clause, so the immunity still shows.
+	blocked_by_ability = (
+		enabled
+		& hit
+		& ~row.move_status_self
+		& (state.hp[foe, target] > 0)
+		& (inflicted != HEALTHY)
+		& (target_status == HEALTHY)
+		& ~immune
+		& ability_immune
+	)
+	reveal_target = blocked_by_ability & ~transfer
 	own_tempo = has_hook(abilities[foe], OWN_TEMPO) & (state.hp[foe, target] > 0)
 	reveal_target |= enabled & hit & row.move_confusion & own_tempo
 	inflict &= ~ability_immune
@@ -265,7 +276,7 @@ def after_hit(state, side, move, enabled, tables, weather=None):
 	status = state.status[foe, slot]
 	thaw = enabled & (state.hp[foe, slot] > 0) & (status == FREEZE)
 	thaw &= (
-		effective_move_type(state, row, tables, weather) == tables.fire_type
+		effective_move_type(state, side, row, tables, weather) == tables.fire_type
 	) | row.move_thaws_target
 	target_mask = (SIDES == foe)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == slot)
 	return state._replace(status=jnp.where(target_mask & thaw, HEALTHY, state.status))

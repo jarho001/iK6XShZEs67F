@@ -73,3 +73,10 @@ def test_none_ability_needs_support(synthetic_pool, tables, monkeypatch):
 	monkeypatch.setattr(support, "SUPPORTED_ITEMS", frozenset({"leftovers"}))
 	synthetic_pool.ability[0] = 0
 	assert not support.team_supported(synthetic_pool, tables).any()
+
+
+def test_moves12_match_allowed_file():
+	allowed = json.loads(Path("tests/fixtures/diff-moves12.allowed.json").read_text())
+	assert allowed["moves"] == sorted(allowed["moves"])
+	assert set(allowed["moves"]) <= support.SUPPORTED_MOVES
+	assert set(allowed["moves"]) == set(support.VARIABLE_MOVES)

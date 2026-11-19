@@ -13,6 +13,8 @@ from .abilities import (
 from .abilities import (
 	ACCURACY_WONDER,
 	ADAPTABILITY,
+	CONTACT,
+	CONTACT_WEAK_ARMOR,
 	CRIT_BLOCK,
 	CRIT_BONUS,
 	DEFENSE,
@@ -56,12 +58,22 @@ from .state import (
 	SMACKDOWN,
 	TWO_TURN_MOVE,
 )
+from .variable_moves import (
+	DOUBLE_TARGET_SWITCHING,
+	RETURNED_DAMAGE,
+	STAT_DEFENSE_DEF,
+	STAT_TARGET_ATTACK,
+	base_power,
+	returned_damage,
+)
 
 CRIT_DENOMINATORS = jnp.asarray([1, 16, 8, 4, 3, 2], jnp.int32)
 LEVEL_DAMAGE, HALF_CURRENT_DAMAGE, CONSTANT_DAMAGE = 1, 2, 3
 
 
-def accuracy_hit(state, side, move, key, forced, tables, rows=None, weather=None):
+def accuracy_hit(
+	state, side, move, key, forced, tables, rows=None, weather=None, switching_foe=False
+):
 	"""Sample the single move accuracy check before a multi-hit sequence."""
 	row = read_move(tables, move)
 	if rows is None:
@@ -98,8 +110,11 @@ def accuracy_hit(state, side, move, key, forced, tables, rows=None, weather=None
 	numerator = accuracy * jnp.where(positive, 3 + boost, 3)
 	denominator = jnp.where(positive, 3, 3 - boost)
 	accuracy = lax.div(numerator, denominator)
+	# Pursuit never misses a target that is leaving (onModifyMove sets accuracy true).
+	pursuit_hits = (row.move_bp_double == DOUBLE_TARGET_SWITCHING) & switching_foe
 	return (
 		row.move_always_hits
+		| pursuit_hits
 		| has_hook(rows[side], NO_GUARD)
 		| (targeted & has_hook(rows[1 - side], NO_GUARD))
 		| (weather_accuracy == WEATHER_ACCURACY_ALWAYS)
@@ -143,6 +158,7 @@ def move_damage_bases(
 	exponent=None,
 	sheer=False,
 	analytic=False,
+	switching_foe=False,
 ):
 	"""Compute the non-crit and crit pre-roll damage bases once per move."""
 	row = read_move(tables, move)
@@ -151,7 +167,7 @@ def move_damage_bases(
 	if weather is None:
 		weather = effective_weather(state, rows)
 	if type_ is None:
-		type_ = effective_move_type(state, row, tables, weather)
+		type_ = effective_move_type(state, side, row, tables, weather)
 	if immune is None:
 		immune, exponent, _ = type_matchup(state, side, row.id, type_, tables, rows)
 	t = tables
@@ -163,15 +179,20 @@ def move_damage_bases(
 	present = target_types >= 0
 	safe_types = jnp.maximum(target_types, 0)
 	physical = row.move_category == 0
+	defends_with_defense = physical | (row.move_stat_rule == STAT_DEFENSE_DEF)
+	foul_play = row.move_stat_rule == STAT_TARGET_ATTACK
 	attack_index = jnp.where(physical, 1, 3)
-	defense_index = jnp.where(physical, 2, 4)
-	atk_boost = state.boosts[side, attack_index - 1].astype(jnp.int32)
+	defense_index = jnp.where(defends_with_defense, 2, 4)
+	# Foul Play uses the target's Attack and stage; the user's modifiers still apply.
+	attacker = jnp.where(foul_play, foe, side)
+	attacker_slot = state.active[attacker]
+	atk_boost = state.boosts[attacker, attack_index - 1].astype(jnp.int32)
 	def_boost = state.boosts[foe, defense_index - 1].astype(jnp.int32)
 	atk_boost = jnp.where(has_hook(rows[foe], IGNORE_BOOSTS), 0, atk_boost)
 	def_boost = jnp.where(has_hook(rows[side], IGNORE_BOOSTS), 0, def_boost)
 	crit_atk_boost = jnp.where(atk_boost < 0, 0, atk_boost)
 	crit_def_boost = jnp.where(def_boost > 0, 0, def_boost)
-	attack = state.stats[side, user, attack_index].astype(jnp.int32)
+	attack = state.stats[attacker, attacker_slot, attack_index].astype(jnp.int32)
 	defense = state.stats[foe, target, defense_index].astype(jnp.int32)
 	attack_stages = jnp.stack((atk_boost, crit_atk_boost))
 	defense_stages = jnp.stack((def_boost, crit_def_boost))
@@ -202,8 +223,10 @@ def move_damage_bases(
 		attack_effective, side, attack_index, item_rows, attack_modifier
 	)
 	weather_spdef = jnp.any(present & t.weather_spdef_boost[weather, safe_types])
-	defense_effective = modify(defense_effective, jnp.where(~physical & weather_spdef, 6144, 4096))
-	marvel = physical & (rows[foe, DEFENSE] == DEFENSE_MARVEL_SCALE)
+	defense_effective = modify(
+		defense_effective, jnp.where(~defends_with_defense & weather_spdef, 6144, 4096)
+	)
+	marvel = defends_with_defense & (rows[foe, DEFENSE] == DEFENSE_MARVEL_SCALE)
 	statused = state.status[foe, target] != HEALTHY
 	# In the supported move table Twineedle is the multi-hit move that can
 	# inflict a status during the sequence. Its first poison can change Def
@@ -218,7 +241,7 @@ def move_damage_bases(
 	)
 	defense_later = apply_stat_modifier(defense_effective, foe, defense_index, item_rows, 6144)
 	level = state.level[side, user].astype(jnp.int32)
-	power = row.move_base_power.astype(jnp.int32)
+	power = base_power(state, side, row, t, switching_foe, rows, item_rows, gem_trigger)
 	magnitude = integer(key, forced, MAGNITUDE, side, 0, 100)
 	magnitude_power = jnp.where(
 		magnitude < 5,
@@ -257,8 +280,23 @@ def move_damage_bases(
 		t,
 	)
 	power = modify(power, power_modifier)
+	# Weak Armor lowers Defense one stage after each damaging hit, so hit k uses
+	# stage - k on the five-hit axis. Other targets keep the same stage for every hit.
+	weak_armor = (rows[foe, CONTACT] == CONTACT_WEAK_ARMOR) & (row.move_category == 0)
+	hit_steps = jnp.arange(5, dtype=jnp.int32)[:, None] * weak_armor.astype(jnp.int32)
+	weak_stages = jnp.clip(defense_stages[None, :] - hit_steps, -6, 6)
+	weak_defense = apply_stat_modifier(
+		scale_stat_stage(defense, weak_stages), foe, defense_index, item_rows, 4096
+	)
+	weak_scenarios = neutral_damage_before_roll(
+		level, jnp.maximum(power, 1), attack_effective, weak_defense
+	)
 	base_scenarios = neutral_damage_before_roll(
 		level, jnp.maximum(power, 1), attack_effective, defense_eff
+	)
+	base_scenarios = (
+		jnp.where(weak_armor, weak_scenarios[:, 0], base_scenarios[0]),
+		jnp.where(weak_armor, weak_scenarios[:, 1], base_scenarios[1]),
 	)
 	weather_modifier = t.weather_damage_by_type[weather, type_]
 	later_scenarios = neutral_damage_before_roll(
@@ -277,6 +315,7 @@ def move_damage_bases(
 			row.move_fixed_damage.astype(jnp.int32),
 		),
 	)
+	fixed = jnp.where(damage_kind == RETURNED_DAMAGE, returned_damage(state, side, row), fixed)
 	has_power = (power > 0) | (damage_kind > 0)
 	can_damage = ~immune & has_power & (row.move_category != 2)
 	can_effect = ~immune | ~row.move_checks_immunity

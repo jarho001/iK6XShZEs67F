@@ -65,12 +65,14 @@ VOLATILE_NAMES = (
 	"truant",
 	"disable",
 	"curse",
+	"autotomize",
 )
 FLASH_FIRE = 20
 UNBURDEN, TRUANT, DISABLE_MOVE, DISABLE_REMAINING = range(21, 25)
 SLOW_START = 25
 CURSE = 26
-NUM_VOLATILES = 27
+AUTOTOMIZE = 27
+NUM_VOLATILES = 28
 HP, ATK, DEF, SPA, SPD, SPE = range(NUM_STATS)
 BOOST_ATK, BOOST_DEF, BOOST_SPA, BOOST_SPD, BOOST_SPE, ACCURACY, EVASION = range(NUM_BOOSTS)
 EMPTY = 0
@@ -155,3 +157,9 @@ class BattleState(NamedTuple):
 	turn_first: jax.Array  # int8 scalar, first side in the fixed move order
 	turn: jax.Array
 	winner: jax.Array
+	turn_damage: jax.Array  # int16 [2, 3]: last any, physical, special damage taken this turn
+	turn_hit: jax.Array  # bool [2]: took a damaging move hit this turn (Metal Burst)
+	focus_lost: jax.Array  # bool [2]: hit by a damaging move this turn (Focus Punch)
+	last_success: jax.Array  # int16 scalar: last successful move ID this turn (Fusion Bolt/Flare)
+	fainted_last: jax.Array  # bool [2]: a member fainted in the previous turn (Retaliate)
+	alive_mark: jax.Array  # bool [2, 6]: members alive at the last turn end

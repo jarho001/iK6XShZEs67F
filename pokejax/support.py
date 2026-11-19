@@ -284,6 +284,49 @@ MOVE_EFFECT_MOVES = frozenset(
 )
 SUPPORTED_MOVES |= MOVE_EFFECT_MOVES
 
+# Variable-power, stat-source and conditional moves (task 12). Each rule is a column
+# of the move table; see engine/variable_moves.py for the code paths.
+VARIABLE_MOVES = frozenset(
+	[
+		"acrobatics",
+		"aerialace",
+		"aurasphere",
+		"autotomize",
+		"brickbreak",
+		"bugbite",
+		"counter",
+		"dragonpulse",
+		"drillpeck",
+		"eruption",
+		"facade",
+		"focuspunch",
+		"foulplay",
+		"fusionbolt",
+		"fusionflare",
+		"grassknot",
+		"gyroball",
+		"heavyslam",
+		"hiddenpower",
+		"judgment",
+		"lowkick",
+		"memento",
+		"metalburst",
+		"mirrorcoat",
+		"payback",
+		"pluck",
+		"psyshock",
+		"psystrike",
+		"pursuit",
+		"retaliate",
+		"return",
+		"secretsword",
+		"storedpower",
+		"suckerpunch",
+		"waterspout",
+	]
+)
+SUPPORTED_MOVES |= VARIABLE_MOVES
+
 # Pressure and Dry Skin include the hooks modeled in ability group 1.
 SUPPORTED_ABILITIES: frozenset[str] = frozenset(
 	{

@@ -108,6 +108,26 @@ class ActiveItemUpdateHooks(NamedTuple):
 	boost_restore: jnp.ndarray  # [2]
 
 
+PLATE_TYPES = {
+	"dracoplate": "dragon",
+	"dreadplate": "dark",
+	"earthplate": "ground",
+	"fistplate": "fighting",
+	"flameplate": "fire",
+	"icicleplate": "ice",
+	"insectplate": "bug",
+	"ironplate": "steel",
+	"meadowplate": "grass",
+	"mindplate": "psychic",
+	"skyplate": "flying",
+	"splashplate": "water",
+	"stoneplate": "rock",
+	"spookyplate": "ghost",
+	"toxicplate": "poison",
+	"zapplate": "electric",
+}
+
+
 def build_item_hook_table(tables: Tables) -> ItemHookTable:
 	"""Resolve item names and type hooks into compact, per-item columns."""
 	item_count = len(tables.items.ids)
@@ -158,24 +178,7 @@ def build_item_hook_table(tables: Tables) -> ItemHookTable:
 	set_stat("eviolite", 2, 6144)
 	set_stat("eviolite", 4, 6144)
 
-	plate_types = {
-		"dracoplate": "dragon",
-		"dreadplate": "dark",
-		"earthplate": "ground",
-		"fistplate": "fighting",
-		"flameplate": "fire",
-		"icicleplate": "ice",
-		"insectplate": "bug",
-		"ironplate": "steel",
-		"meadowplate": "grass",
-		"mindplate": "psychic",
-		"skyplate": "flying",
-		"splashplate": "water",
-		"stoneplate": "rock",
-		"spookyplate": "ghost",
-		"toxicplate": "poison",
-		"zapplate": "electric",
-	}
+	plate_types = PLATE_TYPES
 	for item, type_name in {
 		"silkscarf": "normal",
 		"blackglasses": "dark",

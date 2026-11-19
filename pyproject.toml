@@ -24,7 +24,7 @@ include = ["pokejax*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Parallel workers; run with -n 0 for a single process (e.g. to debug).
-addopts = "-n 8"
+addopts = "-n 4"
 
 [tool.ruff]
 line-length = 100

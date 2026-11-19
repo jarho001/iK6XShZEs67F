@@ -161,6 +161,12 @@ def reset(key, teams: Teams, engine_tables: EngineTables, forced=UNFORCED) -> Ba
 		turn_first=jnp.asarray(0, jnp.int8),
 		turn=jnp.asarray(FIRST_TURN, jnp.int32),
 		winner=jnp.asarray(ONGOING, jnp.int8),
+		turn_damage=jnp.zeros((NUM_SIDES, 3), jnp.int16),
+		turn_hit=jnp.zeros(NUM_SIDES, jnp.bool_),
+		focus_lost=jnp.zeros(NUM_SIDES, jnp.bool_),
+		last_success=jnp.asarray(0, jnp.int16),
+		fainted_last=jnp.zeros(NUM_SIDES, jnp.bool_),
+		alive_mark=jnp.ones(stats.shape[:2], jnp.bool_),
 	)
 	items = gather_active_items(state, t)
 	rows = active_abilities(state, t)

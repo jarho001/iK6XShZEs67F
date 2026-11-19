@@ -21,6 +21,7 @@ from pokejax.engine.data import build_engine_tables
 from pokejax.engine.randomness import UNFORCED, forced_from_records
 from pokejax.engine.reset import check_teams, reset, teams_from_pool
 from pokejax.engine.state import (
+	AUTOTOMIZE,
 	CHOICE_MOVE,
 	CONFUSION,
 	CURSE,
@@ -118,6 +119,7 @@ def comparable(state, tables):
 				state.volatiles[..., TRUANT_VOLATILE, None] > 0,
 				state.volatiles[..., DISABLE_REMAINING, None] > 0,
 				state.volatiles[..., CURSE, None] > 0,
+				state.volatiles[..., AUTOTOMIZE, None] > 0,
 			),
 			axis=-1,
 		),

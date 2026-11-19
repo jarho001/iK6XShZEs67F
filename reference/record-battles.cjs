@@ -26,6 +26,9 @@
  * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-abilities2.allowed.json --out work/diff/abilities2.jsonl.gz
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-abilities2.allowed.json --out tests/fixtures/diff-abilities2.jsonl.gz
  *
+ * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-moves12.allowed.json --out work/diff/moves12.jsonl.gz
+ * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-moves12.allowed.json --out tests/fixtures/diff-moves12.jsonl.gz
+ *
  * JSONL schema v2: header {type, schemaVersion, showdownCommit, seed, count,
  * acceptedMoves, ...}; battle {type, index, seed (four uint16 words), policySeed,
  * poolIndices, profile, teams (exact constructor inputs), initialOverrides: [],
@@ -119,6 +122,11 @@ const SWITCH_START_ABILITIES = new Set([
 	'turboblaze', 'unnerve',
 ]);
 const WEATHER_START_ABILITIES = new Set(['drizzle', 'drought', 'sandstream', 'snowwarning']);
+// Turn-scoped bookkeeping that Showdown stores as volatiles for one turn (queued
+// Pursuit, Focus Punch charge, Counter and Mirror Coat slots). They are removed
+// at the turn end and are not public conditions; the engine keeps their effects
+// in per-side turn fields and compares those through damage, HP and actions.
+const TURN_INTERNAL_VOLATILES = new Set(['pursuit', 'focuspunch', 'counter', 'mirrorcoat']);
 
 function isolationBattle(seed) {
 	return new Battle({ formatid: 'gen5randombattle', seed });
@@ -222,7 +230,7 @@ function trackPublicAbilities(battle) {
 		const id = dex.toID(name);
 		if (!dex.abilities.get(id).exists) return;
 		const source = tags.find(tag => tag.startsWith('[of] '))?.slice(5);
-		const holders = [target, source].flatMap(ref => this.sides.flatMap(side => side.pokemon)
+		const holders = (event === '-damage' && source ? [source, target] : [target, source]).flatMap(ref => this.sides.flatMap(side => side.pokemon)
 			.filter(p => p === ref || String(p) === ref));
 		const holder = holders.find(p => p.ability === id);
 		if (holder) revealed.set(holder, id);
@@ -250,7 +258,7 @@ function snapshot(battle, fixed, publicAbilities) {
 			itemConsumed: !side.active[0].item && Boolean(side.active[0].lastItem) &&
 				!side.active[0].itemKnockedOff,
 			itemKnockedOff: side.active[0].itemKnockedOff,
-			volatiles: side.active[0].fainted ? null : Object.keys(side.active[0].volatiles).sort(),
+			volatiles: side.active[0].fainted ? null : Object.keys(side.active[0].volatiles).filter(name => !TURN_INTERNAL_VOLATILES.has(name)).sort(),
 			...(!side.active[0].fainted && (side.active[0].volatiles.confusion ||
 				side.active[0].volatiles.disable || side.active[0].abilityState.counter) ? {
 				volatileCounters: {
@@ -597,7 +605,7 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 				'mustrecharge', 'twoturnmove', 'fly', 'dig', 'bounce', 'dive', 'shadowforce', 'disable',
 				'skullbash', 'skyattack', 'razorwind', 'solarbeam', 'freezeshock', 'iceburn', 'roost',
 				'leftovers', 'blacksludge', 'toxicorb', 'flameorb', 'whiteherb', 'gem',
-				'hydration', 'shedskin', 'speedboost', 'baddreams', 'slowstart', 'harvest',
+				'hydration', 'shedskin', 'speedboost', 'baddreams', 'slowstart', 'harvest', 'counter', 'mirrorcoat', 'focuspunch', 'pursuit',
 			].includes(h.effect.id)),
 			`Unexpected residual tie: ${tied.map(h => `${h.effect.id}:${h.effectHolder.side.n}`)}`);
 			const sides = new Set(tied.map(h => h.effectHolder.side.n));

@@ -42,19 +42,17 @@ from .state import (
 	TWO_TURN_MOVE,
 )
 from .turn_moves import clear_partial_trap
+from .variable_moves import move_type_id
 
 WEATHER_ACCURACY_ALWAYS = -2
 WEATHER_ACCURACY_BASE = -1
 WEATHER_DURATION = 5
 
 
-def effective_move_type(state, move, tables, weather=None):
-	"""Return the move-table type after its weather type override."""
+def effective_move_type(state, side, move, tables, weather=None):
+	"""Return the move's type after Weather Ball, Hidden Power and plate overrides."""
 	row = read_move(tables, move)
-	weather_type = row.move_weather_type[state.weather if weather is None else weather].astype(
-		jnp.int32
-	)
-	return jnp.where(weather_type >= 0, weather_type, row.move_type.astype(jnp.int32))
+	return move_type_id(state, side, row, tables, state.weather if weather is None else weather)
 
 
 def set_weather(state, weather, enabled, duration, ability=False):

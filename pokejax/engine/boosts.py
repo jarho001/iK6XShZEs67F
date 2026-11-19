@@ -5,6 +5,7 @@ import jax.numpy as jnp
 from .abilities import (
 	BOOST_EVENT,
 	BOOST_EVENT_DEFIANT,
+	DROP,
 	active_abilities,
 	apply_boost_delta,
 	boost_delta,
@@ -36,6 +37,11 @@ def apply_boosts(state, side, move, enabled, hit, success, tables, rows=None):
 	delta = jnp.where(((SIDES == target) & apply)[:, None], row.move_boosts, 0)
 	actual_delta = boost_delta(delta, rows, SIDES != side)
 	boosts = apply_boost_delta(state.boosts, delta, rows, SIDES != side)
+	# Clear Body and similar holders reveal when they block a foe's drop.
+	drop_blocked = jnp.any(
+		((rows[:, DROP][:, None] & (1 << jnp.arange(7))) != 0) & (delta < 0), axis=-1
+	)
+	state = reveal_abilities(state, drop_blocked & (SIDES != side))
 	defiant = rows[:, BOOST_EVENT] == BOOST_EVENT_DEFIANT
 	defiant &= (SIDES != side) & jnp.any(actual_delta < 0, axis=-1)
 	defiant &= boosts[:, 0] > state.boosts[:, 0]

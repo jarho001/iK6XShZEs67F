@@ -66,6 +66,7 @@ from .state import (
 	TEAM_SLOTS,
 )
 from .status import inflict_status, synchronize_status
+from .variable_moves import record_damage_taken
 
 NO_SELF_FAINT, SELF_FAINT_ALWAYS, SELF_FAINT_ON_HIT = 0, 1, 2
 MAX_HITS = 5
@@ -147,7 +148,7 @@ def _apply_contact_statuses(state, side, foe, row, hit_landed, key, forced, tabl
 	)
 	source_status_applied &= apply_status
 	state = synchronize_status(
-		state, foe, side, inflicted, source_status_applied, key, forced, tables, rows
+		state, side, foe, inflicted, source_status_applied, key, forced, tables, rows
 	)
 	curse = target_hook == CONTACT_CURSED_BODY
 	curse_trigger = jnp.any(hit_landed & curse & defender_roll)
@@ -215,6 +216,7 @@ def apply_damage_effects(
 	weather,
 	sheer,
 	analytic,
+	switching_foe=False,
 ):
 	"""Resolve a fixed five-hit axis with one move-level damage calculation."""
 	row = read_move(tables, move)
@@ -226,7 +228,9 @@ def apply_damage_effects(
 	pre_faint = enabled & (self_faint_kind == SELF_FAINT_ALWAYS)
 
 	blocked = guarded | invulnerable
-	checked_hit = accuracy_hit(state, side, row, key, forced, t, rows, weather)
+	checked_hit = accuracy_hit(
+		state, side, row, key, forced, t, rows, weather, switching_foe=switching_foe
+	)
 	count = hit_count(
 		key,
 		forced,
@@ -235,7 +239,7 @@ def apply_damage_effects(
 		row.move_hit_max.astype(jnp.int32),
 	)
 	count = jnp.where(has_hook(rows[side], SKILL_LINK), row.move_hit_max, count)
-	type_ = effective_move_type(state, row, t, weather)
+	type_ = effective_move_type(state, side, row, t, weather)
 	immune, exponent, levitate = type_matchup(state, side, row.id, type_, t, rows)
 	immune_for_move = immune & ((row.move_category != 2) | row.move_checks_immunity)
 	absorbed = absorption(
@@ -271,6 +275,7 @@ def apply_damage_effects(
 		exponent,
 		sheer,
 		analytic,
+		switching_foe=switching_foe,
 	)
 	hit_indices = jnp.arange(MAX_HITS, dtype=jnp.int32)
 	damage, can_damage = damage_for_hits(
@@ -340,6 +345,8 @@ def apply_damage_effects(
 	contact_self_damage = contact_ability_damage + jnp.where(helm_trigger, helm_damage, 0)
 	contact_self_damage += aftermath_damage + liquid_damage
 	user_hp = jnp.maximum(user_hp - contact_self_damage, 0)
+	# Moxie checks the user after contact damage; a later recoil faint still boosts.
+	moxie_user_alive = user_hp > 0
 
 	self_heal = (row.move_heal[0] > 0) | row.move_pain_split
 	target_effect = jnp.where(row.move_category == 2, bases[5], bases[4])
@@ -398,7 +405,7 @@ def apply_damage_effects(
 	justified_count = jnp.sum(hit_landed & justified).astype(jnp.int32)
 	target_fainted = (target_hp_before > 0) & (target_hp_after_move == 0)
 	moxie = (rows[side, BOOST_EVENT] == BOOST_EVENT_MOXIE) & target_fainted
-	moxie &= user_hp > 0
+	moxie &= moxie_user_alive
 	delta = jnp.zeros((2, state.boosts.shape[-1]), state.boosts.dtype)
 	stats = jnp.arange(state.boosts.shape[-1])
 	target_delta = jnp.where(
@@ -428,7 +435,7 @@ def apply_damage_effects(
 		((target_hook == CONTACT_ROUGH_SKIN) | (target_hook == CONTACT_IRON_BARBS))
 		& (contact_hits > 0)
 	)
-	contact_reveals |= (SIDES == foe) & (aftermath | liquid_ooze)
+	contact_reveals |= (SIDES == foe) & ((aftermath & (aftermath_damage > 0)) | liquid_ooze)
 	contact_reveals |= (SIDES == foe) & weak_reveals
 	contact_reveals |= (SIDES == foe) & justified_reveals
 	contact_reveals |= (SIDES == side) & moxie_reveals
@@ -437,6 +444,7 @@ def apply_damage_effects(
 	state = reveal_abilities(state, contact_reveals)
 	item_consumptions = (SIDES == side) & gem_trigger
 	item_consumptions |= (SIDES == foe) & sash_trigger
+	state = record_damage_taken(state, side, row, hit_landed, dealt)
 	return state, HitResult(
 		success,
 		effect_hit,

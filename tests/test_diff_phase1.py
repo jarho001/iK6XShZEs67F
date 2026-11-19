@@ -43,6 +43,7 @@ def test_fixtures(fixture):
 		"items",
 		"abilities1",
 		"abilities2",
+		"moves12",
 	],
 )
 def test_large_recording(name):

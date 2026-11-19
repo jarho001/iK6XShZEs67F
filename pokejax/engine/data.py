@@ -8,9 +8,10 @@ import numpy as np
 
 from pokejax.support import CONFUSION_MOVES, SECONDARY_MOVES
 from pokejax.tables import Tables
+from pokejax.teams import HIDDEN_POWER_TYPES
 
 from .abilities import build_ability_hooks
-from .items import build_item_hook_table
+from .items import PLATE_TYPES, build_item_hook_table
 from .move_data import MOVE_FIELDS, MoveTable, build_move_table
 from .state import (
 	BURN,
@@ -27,6 +28,32 @@ from .state import (
 	TOXIC,
 )
 from .status import PARTY_CURE, REFRESH, REST, TRANSFER
+from .variable_moves import (
+	BP_GYRO_BALL,
+	BP_HIDDEN_POWER,
+	BP_RETURN,
+	BP_STORED_POWER,
+	BP_TARGET_WEIGHT,
+	BP_USER_HP,
+	BP_WEIGHT_RATIO,
+	DOUBLE_FAINTED_LAST_TURN,
+	DOUBLE_PARTNER,
+	DOUBLE_TARGET_MOVED,
+	DOUBLE_TARGET_SWITCHING,
+	DOUBLE_USER_NO_ITEM,
+	DOUBLE_USER_STATUS,
+	RETURNED_DAMAGE,
+	STAT_DEFENSE_DEF,
+	STAT_TARGET_ATTACK,
+	SUCCESS_AUTOTOMIZE,
+	SUCCESS_COUNTER,
+	SUCCESS_FOCUS_PUNCH,
+	SUCCESS_METAL_BURST,
+	SUCCESS_MIRROR_COAT,
+	SUCCESS_SUCKER_PUNCH,
+	TYPE_HIDDEN_POWER,
+	TYPE_PLATE,
+)
 
 
 class _EngineTables(NamedTuple):
@@ -68,6 +95,10 @@ class _EngineTables(NamedTuple):
 	fighting_type: jax.Array
 	captivate_id: jax.Array
 	anticipation_type: jax.Array
+	species_weight_hg: jax.Array
+	hidden_power_type: jax.Array
+	plate_type: jax.Array
+	pursuit_id: jax.Array
 	move_table: MoveTable
 
 
@@ -138,6 +169,8 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 		"swagger",
 		"flatter",
 		"curse",
+		"memento",
+		"autotomize",
 	)
 	drop_moves = (
 		"closecombat",
@@ -290,6 +323,8 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 	)
 	pressure_target = target_foe | (
 		(np.asarray(moves.target_names)[moves.target] == "all")
+		# Counter, Mirror Coat and Metal Burst pick the foe as a scripted target.
+		| (np.asarray(moves.target_names)[moves.target] == "scripted")
 		| moves.flags[:, moves.flag_names.index("mustpressure")]
 	)
 	spread = np.isin(
@@ -300,6 +335,28 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 	immunities = np.pad(tables.types.immune, ((0, 0), (1, 0)))
 	anticipation_type = (exponents[:, :, None] + exponents[:, None, :]) > 0
 	anticipation_type &= ~(immunities[:, :, None] | immunities[:, None, :])
+
+	def rule_column(dtype, rules):
+		"""One column of move ids per rule value; unlisted moves keep zero."""
+		column = np.zeros(len(moves.ids), dtype)
+		for value, names in rules:
+			column[[moves.index[name] for name in names]] = value
+		return column
+
+	bp_partner = np.zeros(len(moves.ids), np.int16)
+	bp_partner[moves.index["fusionflare"]] = moves.index["fusionbolt"]
+	bp_partner[moves.index["fusionbolt"]] = moves.index["fusionflare"]
+	# Counter, Mirror Coat and Metal Burst deal back the damage they took.
+	damage_kind = moves.damage_kind.copy()
+	damage_kind[[moves.index[name] for name in ("counter", "mirrorcoat", "metalburst")]] = (
+		RETURNED_DAMAGE
+	)
+	plate_types = np.full(len(tables.items.ids), -1, np.int32)
+	for item, type_name in PLATE_TYPES.items():
+		plate_types[tables.items.index[item]] = tables.types.index[type_name]
+	hidden_power_types = np.asarray(
+		[tables.types.index[name] for name in HIDDEN_POWER_TYPES], np.int32
+	)
 	move_table = build_move_table(
 		move_type=moves.type,
 		move_category=moves.category,
@@ -314,7 +371,7 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 		move_recoil_basehp=moves.recoil_basehp,
 		move_heal=moves.heal,
 		move_heal_weather=moves.heal_weather,
-		move_damage_kind=moves.damage_kind,
+		move_damage_kind=damage_kind,
 		move_fixed_damage=moves.fixed_damage,
 		move_hit_min=moves.hit_min,
 		move_hit_max=moves.hit_max,
@@ -372,6 +429,54 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 		move_contact=moves.flags[:, moves.flag_names.index("contact")],
 		move_punch=moves.flags[:, moves.flag_names.index("punch")],
 		move_sheer_force=np.any(moves.secondary_chance > 0, axis=1),
+		move_bp_rule=rule_column(
+			np.uint8,
+			(
+				(BP_HIDDEN_POWER, ("hiddenpower",)),
+				(BP_RETURN, ("return",)),
+				(BP_TARGET_WEIGHT, ("grassknot", "lowkick")),
+				(BP_WEIGHT_RATIO, ("heavyslam",)),
+				(BP_GYRO_BALL, ("gyroball",)),
+				(BP_USER_HP, ("eruption", "waterspout")),
+				(BP_STORED_POWER, ("storedpower",)),
+			),
+		),
+		move_bp_double=rule_column(
+			np.uint8,
+			(
+				(DOUBLE_USER_STATUS, ("facade",)),
+				(DOUBLE_USER_NO_ITEM, ("acrobatics",)),
+				(DOUBLE_FAINTED_LAST_TURN, ("retaliate",)),
+				(DOUBLE_PARTNER, ("fusionflare", "fusionbolt")),
+				(DOUBLE_TARGET_MOVED, ("payback",)),
+				(DOUBLE_TARGET_SWITCHING, ("pursuit",)),
+			),
+		),
+		move_bp_partner=bp_partner,
+		move_type_rule=rule_column(
+			np.uint8,
+			((TYPE_HIDDEN_POWER, ("hiddenpower",)), (TYPE_PLATE, ("judgment",))),
+		),
+		move_stat_rule=rule_column(
+			np.uint8,
+			(
+				(STAT_DEFENSE_DEF, ("psyshock", "psystrike", "secretsword")),
+				(STAT_TARGET_ATTACK, ("foulplay",)),
+			),
+		),
+		move_success_rule=rule_column(
+			np.uint8,
+			(
+				(SUCCESS_SUCKER_PUNCH, ("suckerpunch",)),
+				(SUCCESS_FOCUS_PUNCH, ("focuspunch",)),
+				(SUCCESS_COUNTER, ("counter",)),
+				(SUCCESS_MIRROR_COAT, ("mirrorcoat",)),
+				(SUCCESS_METAL_BURST, ("metalburst",)),
+				(SUCCESS_AUTOTOMIZE, ("autotomize",)),
+			),
+		),
+		move_autotomize=rule_column(np.bool_, ((True, ("autotomize",)),)),
+		move_steal_berry=rule_column(np.bool_, ((True, ("bugbite", "pluck")),)),
 	)
 	return EngineTables(
 		species_base_stats=jnp.asarray(tables.species.base_stats),
@@ -412,5 +517,9 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 		fighting_type=jnp.asarray(tables.types.index["fighting"], jnp.int32),
 		captivate_id=jnp.asarray(moves.index["captivate"], jnp.int32),
 		anticipation_type=jnp.asarray(anticipation_type),
+		species_weight_hg=jnp.asarray(tables.species.weight_hg),
+		hidden_power_type=jnp.asarray(hidden_power_types),
+		plate_type=jnp.asarray(plate_types),
+		pursuit_id=jnp.asarray(np.asarray(moves.index["pursuit"], dtype=np.int32)),
 		move_table=move_table,
 	)
