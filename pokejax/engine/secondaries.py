@@ -5,13 +5,17 @@ import jax.numpy as jnp
 from pokejax.tables import SECONDARY_SLOTS
 
 from .abilities import (
+	BOOST_EVENT,
+	BOOST_EVENT_DEFIANT,
 	INNER_FOCUS,
 	OWN_TEMPO,
 	SERENE_GRACE,
 	SHIELD_DUST,
 	apply_boost_delta,
 	berry_allowed,
+	boost_delta,
 	has_hook,
+	reveal_abilities,
 	status_immunity,
 )
 from .actions import SIDES
@@ -27,6 +31,7 @@ from .randomness import (
 	integer,
 )
 from .state import CONFUSION, FLINCH, HEALTHY, POISON, SLEEP, TEAM_SLOTS
+from .status import synchronize_status
 
 
 def secondary_chances(tables, move, source):
@@ -81,12 +86,12 @@ def apply_secondaries(
 	)
 	types = state.types[SIDES, active][targets]
 	present = types >= 0
-	immune = jnp.any(
+	type_immune = jnp.any(
 		present & tables.status_immune[inflicted[:, None], jnp.maximum(types, 0)], axis=1
 	)
-	immune |= tables.weather_status_immune[weather, inflicted] | status_immunity(
-		abilities[targets], inflicted, weather
-	)
+	weather_immune = tables.weather_status_immune[weather, inflicted]
+	ability_immune = status_immunity(abilities[targets], inflicted, weather)
+	immune = type_immune | weather_immune | ability_immune
 	sleep_clause = jnp.any(
 		(state.status == SLEEP) & (state.sleep_from_foe != 0) & (state.hp > 0),
 		axis=1,
@@ -119,10 +124,16 @@ def apply_secondaries(
 	source_array = jnp.where(status_mask, set_sleep[:, None], state.sleep_from_foe)
 
 	boosts = state.boosts
+	defiant_revealed = jnp.zeros((2,), jnp.bool_)
 	hit_effects = (apply & (target_hp > 0))[:, None] & by_side
 	for index in range(SECONDARY_SLOTS):
 		delta = jnp.where(hit_effects[index, :, None], row.move_secondary_boosts[index], 0)
+		actual_delta = boost_delta(delta, abilities, SIDES != side)
+		before_attack = boosts[:, 0]
 		boosts = apply_boost_delta(boosts, delta, abilities, SIDES != side)
+		defiant = abilities[:, BOOST_EVENT] == BOOST_EVENT_DEFIANT
+		defiant &= (SIDES != side) & jnp.any(actual_delta < 0, axis=-1)
+		defiant_revealed |= defiant & (boosts[:, 0] > before_attack)
 
 	volatile_kind = row.move_secondary_volatile
 	confusion = jnp.any(hit_effects & (volatile_kind == 1)[:, None], axis=0)
@@ -140,11 +151,26 @@ def apply_secondaries(
 	)
 	volatiles = jnp.where(flinch[:, None] & (columns == FLINCH), 1, volatiles)
 
-	return state._replace(
+	state = state._replace(
 		status=status_array,
 		status_counter=counter_array,
 		sleep_start=start_array,
 		sleep_from_foe=source_array,
 		boosts=boosts,
 		volatiles=volatiles,
-	), (SIDES == foe) & lum_between_hits
+	)
+	for index in range(SECONDARY_SLOTS):
+		sync_trigger = can_inflict[index] & (targets[index] != side)
+		state = synchronize_status(
+			state,
+			targets[index],
+			side,
+			inflicted[index],
+			sync_trigger,
+			key,
+			forced,
+			tables,
+			abilities,
+		)
+	state = reveal_abilities(state, defiant_revealed)
+	return state, (SIDES == foe) & lum_between_hits

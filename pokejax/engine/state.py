@@ -61,9 +61,16 @@ VOLATILE_NAMES = (
 	"smackdown",
 	"choicelock",
 	"flashfire",
+	"unburden",
+	"truant",
+	"disable",
+	"curse",
 )
 FLASH_FIRE = 20
-NUM_VOLATILES = 21
+UNBURDEN, TRUANT, DISABLE_MOVE, DISABLE_REMAINING = range(21, 25)
+SLOW_START = 25
+CURSE = 26
+NUM_VOLATILES = 27
 HP, ATK, DEF, SPA, SPD, SPE = range(NUM_STATS)
 BOOST_ATK, BOOST_DEF, BOOST_SPA, BOOST_SPD, BOOST_SPE, ACCURACY, EVASION = range(NUM_BOOSTS)
 EMPTY = 0
@@ -106,6 +113,7 @@ class BattleState(NamedTuple):
 	species: jax.Array
 	level: jax.Array
 	types: jax.Array
+	base_types: jax.Array
 	roost_types: jax.Array
 	stats: jax.Array
 	hp: jax.Array

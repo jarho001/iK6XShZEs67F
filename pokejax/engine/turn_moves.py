@@ -7,6 +7,7 @@ from .actions import SIDES
 from .move_data import read_move
 from .randomness import LOCK_DURATION, STALL_SUCCESS, TRAP_DURATION, integer
 from .state import (
+	CURSE,
 	ENDURE,
 	LOCKED_MOVE,
 	LOCKED_REMAINING,
@@ -20,6 +21,7 @@ from .state import (
 	SMACKDOWN,
 	STALL,
 	STALL_USED,
+	TEAM_SLOTS,
 	TWO_TURN_MOVE,
 	WIDE_GUARD,
 )
@@ -38,7 +40,9 @@ def target_move_guards(state, side, move, tables, abilities):
 	"""Protect, Quick Guard, Wide Guard and semi-invulnerability checks."""
 	row = read_move(tables, move)
 	foe = 1 - side
-	targeted = row.move_target_foe
+	user_types = state.types[side, state.active[side]]
+	curse_self = (row.move_volatile_status == 5) & ~jnp.any(user_types == tables.ghost_type)
+	targeted = row.move_target_foe & ~curse_self
 	protects = row.move_protects
 	priority = row.move_priority > 0
 	guarded = (
@@ -162,6 +166,21 @@ def apply_move_volatiles(state, side, move, hit, key, forced, tables, abilities)
 	volatiles = jnp.where(
 		trap_mask & (columns[None, :] == PARTIAL_TRAP_SOURCE), trap_source, volatiles
 	)
+	user_slot = state.active[side]
+	user_types = state.types[side, user_slot]
+	ghost_curse = (row.move_volatile_status == 5) & jnp.any(user_types == tables.ghost_type)
+	curse_new = ghost_curse & hit & (state.hp[foe, target] > 0) & (volatiles[foe, CURSE] == 0)
+	volatiles = jnp.where(
+		(SIDES == foe)[:, None] & (columns[None, :] == CURSE) & curse_new,
+		jnp.asarray(1, volatiles.dtype),
+		volatiles,
+	)
+	maximum = state.stats[side, user_slot, 0].astype(jnp.int32)
+	user_hp = state.hp[side, user_slot].astype(jnp.int32)
+	cost = jnp.maximum(maximum // 2, 1)
+	user_hp = jnp.maximum(user_hp - jnp.where(curse_new, cost, 0), 0)
+	member_mask = (SIDES == side)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == user_slot)
+	hp = jnp.where(member_mask, user_hp.astype(state.hp.dtype), state.hp)
 
 	lock_move = (row.move_self_volatile == 1) & hit
 	new_lock = lock_move & (volatiles[side, LOCKED_MOVE] == 0)
@@ -210,4 +229,4 @@ def apply_move_volatiles(state, side, move, hit, key, forced, tables, abilities)
 		jnp.asarray(0, volatiles.dtype),
 		volatiles,
 	)
-	return state._replace(volatiles=volatiles)
+	return state._replace(hp=hp, volatiles=volatiles)

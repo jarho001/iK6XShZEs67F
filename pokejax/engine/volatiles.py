@@ -8,7 +8,9 @@ import jax.numpy as jnp
 
 from pokejax.mechanics.stat_stage import scale_stat_stage
 
+from .abilities import reveal_abilities
 from .actions import SIDES
+from .items import DAMAGE_TAKEN_KIND, damage_survival, update_item_state
 from .randomness import (
 	CONFUSION_DAMAGE_ROLL,
 	CONFUSION_DURATION,
@@ -88,7 +90,7 @@ def advance_active_turns(state, enabled):
 	return state._replace(active_turns=values.astype(state.active_turns.dtype))
 
 
-def before_move(state, side, enabled, key, forced):
+def before_move(state, side, enabled, key, forced, tables, ability_row):
 	enabled &= state.volatiles[side, FLINCH] == 0
 	counter = state.volatiles[side, CONFUSION]
 	confused = enabled & (counter > 0)
@@ -96,7 +98,17 @@ def before_move(state, side, enabled, key, forced):
 	self_hit = confused & (counter > 0) & chance(key, forced, CONFUSION_HIT, side, 0, 1, 2)
 	slot = state.active[side]
 	damage = jnp.where(self_hit, confusion_damage(state, side, key, forced), 0)
-	hp = jnp.maximum(state.hp[side, slot].astype(jnp.int32) - damage, 0)
+	old_hp = state.hp[side, slot].astype(jnp.int32)
+	maximum = state.stats[side, slot, 0].astype(jnp.int32)
+	item = state.item[side, slot].astype(jnp.int32)
+	item_kind = tables.item_hooks.rows[item, DAMAGE_TAKEN_KIND]
+	lethal = self_hit & (damage >= old_hp)
+	endure = state.volatiles[side, ENDURE] > 0
+	sturdy, sash = damage_survival(lethal & (old_hp == maximum), endure, ability_row, item_kind)
+	hp = jnp.where(sturdy | sash | (lethal & endure), 1, jnp.maximum(old_hp - damage, 0))
+	consume = (SIDES == side) & sash
+	state = update_item_state(state, consume, jnp.zeros((2,), jnp.bool_), tables)
+	state = reveal_abilities(state, (SIDES == side) & sturdy)
 	active_slot = (SIDES == side)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == slot)
 	columns = jnp.arange(NUM_VOLATILES)
 	confusion_column = (SIDES == side)[:, None] & (columns[None, :] == CONFUSION)

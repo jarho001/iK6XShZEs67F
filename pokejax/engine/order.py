@@ -4,15 +4,37 @@ import jax.numpy as jnp
 
 from pokejax.mechanics.stat_stage import scale_stat_stage
 
-from .abilities import SPEED, SPEED_QUICK_FEET, active_abilities, berry_allowed, effective_weather
+from .abilities import (
+	ORDER,
+	ORDER_PRANKSTER,
+	SPEED,
+	SPEED_QUICK_FEET,
+	SPEED_SLOW_START,
+	SPEED_UNBURDEN,
+	active_abilities,
+	berry_allowed,
+	effective_weather,
+)
 from .actions import SIDES
 from .items import (
 	BERRY_CUSTAP,
 	apply_active_stat_modifiers,
 	consume_active_items,
 )
+from .modifiers import chain
 from .randomness import ACTION_ORDER, SWITCH_IN_ORDER, first_side
-from .state import BOOST_SPE, HEALTHY, MOVE, MUST_RECHARGE, ONGOING, PARALYSIS, SPE, TURN_IDLE
+from .state import (
+	BOOST_SPE,
+	HEALTHY,
+	MOVE,
+	MUST_RECHARGE,
+	ONGOING,
+	PARALYSIS,
+	SLOW_START,
+	SPE,
+	TURN_IDLE,
+	UNBURDEN,
+)
 
 
 def action_order(state, actions, moves, replacement, key, forced, rows, tables, abilities=None):
@@ -25,6 +47,9 @@ def action_order(state, actions, moves, replacement, key, forced, rows, tables, 
 	priority = jnp.where(switch, 0, tables.move_priority[moves]).astype(jnp.int32)
 	if abilities is None:
 		abilities = active_abilities(state, tables)
+	status_move = tables.move_category[moves] == 2
+	prankster = (abilities[:, ORDER] == ORDER_PRANKSTER) & status_move & ~switch
+	priority += prankster.astype(jnp.int32)
 	speed = active_speed(state, rows, abilities)
 	hp = state.hp[SIDES, state.active].astype(jnp.int32)
 	maximum = state.stats[SIDES, state.active, 0].astype(jnp.int32)
@@ -33,7 +58,7 @@ def action_order(state, actions, moves, replacement, key, forced, rows, tables, 
 	custap &= state.volatiles[:, MUST_RECHARGE] == 0
 	custap &= berry_allowed(state, abilities)
 	custap &= (rows.berry_kind == BERRY_CUSTAP) & (4 * hp <= maximum) & (maximum > 0)
-	state = consume_active_items(state, custap)
+	state = consume_active_items(state, custap, tables)
 	priority = priority * 10 + custap.astype(jnp.int32)
 	context = jnp.where(replacement, SWITCH_IN_ORDER, ACTION_ORDER)
 	tie = first_side(key, forced, context)
@@ -60,6 +85,10 @@ def active_speed(state, items, abilities):
 		8192,
 		jnp.where(quick_feet & (status != HEALTHY), 6144, 4096),
 	)
+	unburden = (hook == SPEED_UNBURDEN) & (state.volatiles[SIDES, UNBURDEN] > 0)
+	unburden &= state.item[SIDES, state.active] == 0
+	slow_start = (hook == SPEED_SLOW_START) & (state.volatiles[SIDES, SLOW_START] > 0)
+	modifier = chain(modifier, jnp.where(unburden, 8192, jnp.where(slow_start, 2048, 4096)))
 	speed = apply_active_stat_modifiers(speed, SPE, items, modifier)
 	speed = jnp.where((status == PARALYSIS) & ~quick_feet, speed // 4, speed)
 	return jnp.minimum(speed, 10000) & 8191

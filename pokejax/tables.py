@@ -266,7 +266,13 @@ def _build_moves(rows, types, target_names, flag_names):
 		"self_volatile": np.zeros(count, dtype=np.uint8),
 		"breaks_protect": np.zeros(count, dtype=np.bool_),
 	}
-	volatile_statuses = {"protect": 1, "endure": 2, "partiallytrapped": 3, "smackdown": 4}
+	volatile_statuses = {
+		"protect": 1,
+		"endure": 2,
+		"partiallytrapped": 3,
+		"smackdown": 4,
+		"curse": 5,
+	}
 	self_volatiles = {"lockedmove": 1, "mustrecharge": 2}
 	for row, move in enumerate(rows, start=1):
 		columns["confusion"][row] = move.get("volatileStatus") == "confusion"

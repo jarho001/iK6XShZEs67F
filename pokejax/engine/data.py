@@ -43,6 +43,13 @@ class _EngineTables(NamedTuple):
 	struggle_id: jax.Array
 	multitype_id: jax.Array
 	fire_type: jax.Array
+	ghost_type: jax.Array
+	grass_type: jax.Array
+	bug_type: jax.Array
+	water_type: jax.Array
+	dark_type: jax.Array
+	steel_type: jax.Array
+	mummy_id: jax.Array
 	flying_type: jax.Array
 	ground_type: jax.Array
 	normal_type: jax.Array
@@ -130,6 +137,7 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 		"workup",
 		"swagger",
 		"flatter",
+		"curse",
 	)
 	drop_moves = (
 		"closecombat",
@@ -143,10 +151,15 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 	boosts = np.zeros_like(moves.boosts)
 	when = np.zeros(len(moves.ids), np.int8)
 	boost_target = np.zeros(len(moves.ids), np.int8)
+	curse = moves.index["curse"]
 	for name in boost_moves:
 		idx = moves.index[name]
 		boosts[idx], when[idx] = moves.boosts[idx], 1
 		boost_target[idx] = moves.target[idx] != moves.target_names.index("self")
+	# Showdown changes Curse's target to self for non-Ghost users.
+	boosts[curse, (0, 1, 4)] = (1, 1, -1)
+	when[curse] = 1
+	boost_target[curse] = 0
 	for name in drop_moves:
 		idx = moves.index[name]
 		boosts[idx], when[idx] = moves.self_boosts[idx], 2
@@ -275,6 +288,10 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 		np.asarray(moves.target_names)[moves.target],
 		("normal", "any", "randomNormal", "allAdjacent", "allAdjacentFoes"),
 	)
+	pressure_target = target_foe | (
+		(np.asarray(moves.target_names)[moves.target] == "all")
+		| moves.flags[:, moves.flag_names.index("mustpressure")]
+	)
 	spread = np.isin(
 		np.asarray(moves.target_names)[moves.target], ("allAdjacent", "allAdjacentFoes")
 	)
@@ -340,6 +357,7 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 		move_charge_sun_skip=np.asarray(moves.ids) == "solarbeam",
 		move_fakeout=np.asarray(moves.ids) == "fakeout",
 		move_target_foe=target_foe,
+		move_pressure_target=pressure_target,
 		move_spread=spread,
 		move_hits_semi=hits_semi,
 		move_semi_power=semi_power,
@@ -350,6 +368,7 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 			np.asarray(moves.ids),
 			("roar", "whirlwind", "dragontail", "circlethrow"),
 		),
+		move_future=moves.flags[:, moves.flag_names.index("futuremove")],
 		move_contact=moves.flags[:, moves.flag_names.index("contact")],
 		move_punch=moves.flags[:, moves.flag_names.index("punch")],
 		move_sheer_force=np.any(moves.secondary_chance > 0, axis=1),
@@ -368,6 +387,13 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 		struggle_id=jnp.asarray(np.asarray(moves.index["struggle"], dtype=np.int32)),
 		multitype_id=jnp.asarray(np.asarray(tables.abilities.index["multitype"], dtype=np.int32)),
 		fire_type=jnp.asarray(np.asarray(tables.types.index["fire"], dtype=np.int32)),
+		ghost_type=jnp.asarray(np.asarray(tables.types.index["ghost"], dtype=np.int32)),
+		grass_type=jnp.asarray(np.asarray(tables.types.index["grass"], dtype=np.int32)),
+		bug_type=jnp.asarray(np.asarray(tables.types.index["bug"], dtype=np.int32)),
+		water_type=jnp.asarray(np.asarray(tables.types.index["water"], dtype=np.int32)),
+		dark_type=jnp.asarray(np.asarray(tables.types.index["dark"], dtype=np.int32)),
+		steel_type=jnp.asarray(np.asarray(tables.types.index["steel"], dtype=np.int32)),
+		mummy_id=jnp.asarray(np.asarray(tables.abilities.index["mummy"], dtype=np.int32)),
 		flying_type=jnp.asarray(np.asarray(tables.types.index["flying"], dtype=np.int32)),
 		ground_type=jnp.asarray(np.asarray(tables.types.index["ground"], dtype=np.int32)),
 		normal_type=jnp.asarray(np.asarray(tables.types.index["normal"], dtype=np.int32)),

@@ -5,11 +5,18 @@ import jax.numpy as jnp
 from pokejax.mechanics.stat_stage import scale_stat_stage
 
 from .abilities import (
+	MAGIC_GUARD,
+	RESIDUAL,
+	RESIDUAL_DRY_SKIN,
+	RESIDUAL_ICE_BODY,
+	RESIDUAL_RAIN_DISH,
 	WEATHER,
 	WEATHER_IMMUNITY,
 	active_abilities,
 	effective_weather,
 	grounded_ability,
+	has_hook,
+	reveal_abilities,
 	status_immunity,
 	suppresses_weather,
 )
@@ -23,10 +30,12 @@ from .state import (
 	ONGOING,
 	PARALYSIS,
 	POISON,
+	RAIN,
 	SAND,
 	SMACKDOWN,
 	SPE,
 	SPIKES,
+	SUN,
 	TEAM_SLOTS,
 	TOXIC,
 	TOXIC_SPIKES,
@@ -122,6 +131,7 @@ def apply_active_switch_hazards(
 	maximum = state.stats[SIDES, slots, 0].astype(jnp.int32)
 	numerator = jnp.where(spikes == 1, 3, jnp.where(spikes == 2, 4, 6))
 	damage = jnp.maximum(maximum * numerator // 24, 1)
+	damage = jnp.where(has_hook(rows, MAGIC_GUARD), 0, damage)
 	after = jnp.maximum(before - jnp.where(active & (spikes > 0), damage, 0), 0)
 	faint = active & (after == 0)
 	member_mask = _active_member_mask(slots)
@@ -217,12 +227,33 @@ def weather_residual(state, enabled, key, forced, tables, rows=None, speed=None)
 	can_damage &= ~immune & (state.hp[sides, active_slots] > 0)
 	maximum = state.stats[sides, active_slots, 0].astype(jnp.int32)
 	damage = jnp.where(can_damage, jnp.maximum(maximum // 16, 1), 0)
+	dry_skin = rows[:, RESIDUAL] == RESIDUAL_DRY_SKIN
+	ice_body = rows[:, RESIDUAL] == RESIDUAL_ICE_BODY
+	rain_dish = rows[:, RESIDUAL] == RESIDUAL_RAIN_DISH
+	weather_ability_live = callback & (state.hp[sides, active_slots] > 0)
+	heal_dry = weather_ability_live & dry_skin & (weather == RAIN)
+	heal_ice = weather_ability_live & ice_body & (weather == HAIL)
+	heal_rain = weather_ability_live & rain_dish & (weather == RAIN)
+	dry_damage = weather_ability_live & dry_skin & (weather == SUN)
+	healing = jnp.where(
+		heal_dry,
+		jnp.maximum(maximum // 8, 1),
+		jnp.where(heal_ice | heal_rain, jnp.maximum(maximum // 16, 1), 0),
+	)
+	ability_damage = jnp.where(dry_damage, jnp.maximum(maximum // 8, 1), 0)
+	healing = jnp.where(
+		has_hook(rows, MAGIC_GUARD) | (state.hp[sides, active_slots] == 0), 0, healing
+	)
+	ability_damage = jnp.where(has_hook(rows, MAGIC_GUARD), 0, ability_damage)
+	damage = jnp.where(has_hook(rows, MAGIC_GUARD), 0, damage) + ability_damage
 	old_hp = state.hp[sides, active_slots].astype(jnp.int32)
-	new_hp = jnp.maximum(old_hp - damage, 0)
+	healed_hp = jnp.minimum(maximum, old_hp + healing)
+	new_hp = jnp.where(healing > 0, healed_hp, old_hp)
+	new_hp = jnp.maximum(new_hp - damage, 0)
 	member_mask = _active_member_mask(active_slots)
 	hp = jnp.where(member_mask, new_hp[:, None].astype(state.hp.dtype), state.hp)
 
-	newly_dead = (old_hp > 0) & (new_hp == 0) & can_damage
+	newly_dead = (old_hp > 0) & (new_hp == 0) & (damage > 0)
 	alive = jnp.any((state.hp > 0) & ~member_mask, axis=1) | (new_hp > 0)
 	double_end = ~alive[0] & ~alive[1]
 	last_faint = jnp.where(
@@ -232,6 +263,8 @@ def weather_residual(state, enabled, key, forced, tables, rows=None, speed=None)
 	)
 	winner = jnp.where(double_end, last_faint, jnp.where(~alive[0], 1, 0))
 	ended = callback & ~jnp.all(alive) & (state.winner == ONGOING)
+	weather_ability = heal_dry | heal_ice | heal_rain | dry_damage
+	state = reveal_abilities(state, weather_ability & (new_hp != old_hp))
 	return state._replace(
 		hp=hp,
 		weather=new_weather.astype(state.weather.dtype),

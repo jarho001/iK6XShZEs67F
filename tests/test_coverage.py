@@ -16,6 +16,7 @@ def section_rows(markdown, title):
 
 def test_counts_and_sorting(synthetic_pool, tables, monkeypatch):
 	monkeypatch.setattr(support, "SUPPORTED_MOVES", frozenset())
+	monkeypatch.setattr(support, "SUPPORTED_ABILITIES", frozenset())
 	monkeypatch.setattr(support, "SUPPORTED_ITEMS", frozenset())
 	output = render_coverage(synthetic_pool, tables)
 	assert output.splitlines()[0] == (

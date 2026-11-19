@@ -16,7 +16,7 @@ def test_initial_support(synthetic_pool, tables):
 	result = support.team_supported(synthetic_pool, tables)
 	assert result.shape == (3,)
 	assert result.dtype == np.bool_
-	np.testing.assert_array_equal(result, [False, False, False])
+	np.testing.assert_array_equal(result, [True, True, True])
 
 
 def test_secondary_group_matches_allowed_file():
@@ -33,7 +33,16 @@ def test_effects2_moves_match_allowed_file():
 
 def test_abilities_match_allowed_file():
 	allowed = json.loads(Path("tests/fixtures/diff-abilities1.allowed.json").read_text())
-	assert allowed["abilities"] == sorted(support.SUPPORTED_ABILITIES)
+	assert allowed["abilities"] == sorted(allowed["abilities"])
+	assert set(allowed["abilities"]) <= support.SUPPORTED_ABILITIES
+
+
+def test_abilities2_match_allowed_file():
+	allowed = json.loads(Path("tests/fixtures/diff-abilities2.allowed.json").read_text())
+	assert allowed["abilities"] == sorted(allowed["abilities"])
+	assert set(allowed["abilities"]) <= support.SUPPORTED_ABILITIES
+	assert allowed["moves"] == ["curse"]
+	assert set(allowed["moves"]) <= support.SUPPORTED_MOVES
 
 
 def test_items_match_allowed_file():

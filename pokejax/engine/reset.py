@@ -10,7 +10,7 @@ from pokejax.mechanics.stats import derive_stored_stats
 from pokejax.tables import Tables
 from pokejax.teams import TeamPool
 
-from .abilities import active_abilities
+from .abilities import RESIDUAL, RESIDUAL_SLOW_START, active_abilities
 from .data import EngineTables
 from .items import gather_active_items, update_active_items
 from .randomness import UNFORCED
@@ -23,6 +23,7 @@ from .state import (
 	NUM_STATS,
 	NUM_VOLATILES,
 	ONGOING,
+	SLOW_START,
 	TEAM_SLOTS,
 	BattleState,
 )
@@ -110,10 +111,15 @@ def reset(key, teams: Teams, engine_tables: EngineTables, forced=UNFORCED) -> Ba
 		t.species_types[teams.species],
 		t.species_plain_types[teams.species],
 	)
+	lead_rows = t.ability_hooks[teams.ability[:, 0].astype(jnp.int32)]
+	lead_slow_start = lead_rows[:, RESIDUAL] == RESIDUAL_SLOW_START
+	initial_volatiles = jnp.zeros((NUM_SIDES, NUM_VOLATILES), jnp.int16)
+	initial_volatiles = initial_volatiles.at[:, SLOW_START].set(5 * lead_slow_start)
 	state = BattleState(
 		species=teams.species.astype(jnp.int16),
 		level=teams.level.astype(jnp.uint8),
 		types=initial_types,
+		base_types=initial_types,
 		roost_types=initial_types,
 		stats=stats,
 		hp=stats[..., 0],
@@ -142,7 +148,7 @@ def reset(key, teams: Teams, engine_tables: EngineTables, forced=UNFORCED) -> Ba
 		active=jnp.zeros(NUM_SIDES, jnp.int8),
 		active_turns=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.uint8).at[:, 0].set(1),
 		boosts=jnp.zeros((NUM_SIDES, NUM_BOOSTS), jnp.int8),
-		volatiles=jnp.zeros((NUM_SIDES, NUM_VOLATILES), jnp.int16),
+		volatiles=initial_volatiles,
 		weather=jnp.asarray(0, jnp.int8),
 		weather_turns=jnp.asarray(0, jnp.int8),
 		hazards=jnp.zeros((NUM_SIDES, 2), jnp.int8),
@@ -160,4 +166,4 @@ def reset(key, teams: Teams, engine_tables: EngineTables, forced=UNFORCED) -> Ba
 	rows = active_abilities(state, t)
 	first = switch_handler_first(state, key, forced, items, rows)
 	state, _ = run_switch_in(state, jnp.ones(NUM_SIDES, jnp.bool_), first, t, rows=rows)
-	return update_active_items(state, True, items, rows)
+	return update_active_items(state, True, items, rows, tables=t)

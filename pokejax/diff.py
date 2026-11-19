@@ -23,6 +23,9 @@ from pokejax.engine.reset import check_teams, reset, teams_from_pool
 from pokejax.engine.state import (
 	CHOICE_MOVE,
 	CONFUSION,
+	CURSE,
+	DISABLE_MOVE,
+	DISABLE_REMAINING,
 	ENDURE,
 	FLASH_FIRE,
 	FLINCH,
@@ -37,6 +40,7 @@ from pokejax.engine.state import (
 	PROTECT,
 	QUICK_GUARD,
 	ROOST,
+	SLOW_START,
 	SMACKDOWN,
 	STALL,
 	STATUS_NAMES,
@@ -44,9 +48,13 @@ from pokejax.engine.state import (
 	TIE,
 	TURN_IDLE,
 	TWO_TURN_MOVE,
+	UNBURDEN,
 	VOLATILE_NAMES,
 	WEATHER_NAMES,
 	WIDE_GUARD,
+)
+from pokejax.engine.state import (
+	TRUANT as TRUANT_VOLATILE,
 )
 from pokejax.engine.step import step
 from pokejax.tables import load_tables
@@ -106,6 +114,10 @@ def comparable(state, tables):
 				smackdown[..., None],
 				choice_lock[..., None],
 				state.volatiles[..., FLASH_FIRE, None] > 0,
+				state.volatiles[..., UNBURDEN, None] > 0,
+				state.volatiles[..., TRUANT_VOLATILE, None] > 0,
+				state.volatiles[..., DISABLE_REMAINING, None] > 0,
+				state.volatiles[..., CURSE, None] > 0,
 			),
 			axis=-1,
 		),
@@ -117,6 +129,9 @@ def comparable(state, tables):
 			axis=-1,
 		),
 		"confusionCounter": state.volatiles[..., CONFUSION],
+		"disableMove": state.volatiles[..., DISABLE_MOVE],
+		"disableCounter": state.volatiles[..., DISABLE_REMAINING],
+		"slowStartCounter": state.volatiles[..., SLOW_START],
 		"request": state.request,
 		"midTurn": state.turn_stage > TURN_IDLE,
 		"hp": state.hp,
@@ -194,6 +209,18 @@ def recorded_state(snapshot, tables):
 		),
 		"confusionCounter": np.asarray(
 			[side.get("volatileCounters", {}).get("confusion", 0) for side in sides]
+		),
+		"disableCounter": np.asarray(
+			[side.get("volatileCounters", {}).get("disable", 0) for side in sides]
+		),
+		"slowStartCounter": np.asarray(
+			[side.get("volatileCounters", {}).get("slowstart", 0) for side in sides]
+		),
+		"disableMove": np.asarray(
+			[
+				tables.moves.index.get(side.get("volatileMoves", {}).get("disable", ""), 0)
+				for side in sides
+			]
 		),
 		"request": np.asarray([REQUESTS[side["request"]] for side in sides]),
 		"midTurn": np.asarray(any(side["request"] == "switch" for side in sides)),
@@ -429,7 +456,15 @@ def replay_file(path, *, recording=None) -> ReplayResult:
 					{
 						name: value
 						for name, value in side.get("volatileCounters", {}).items()
-						if name != "confusion"
+						if name not in ("confusion", "disable", "slowstart")
+					},
+				)
+				extra[f"sides[{side_index}].volatileMoves"] = (
+					{},
+					{
+						name: value
+						for name, value in side.get("volatileMoves", {}).items()
+						if name != "disable"
 					},
 				)
 				extra[f"sides[{side_index}].sideConditions"] = (

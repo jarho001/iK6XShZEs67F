@@ -8,9 +8,20 @@ as a no-op. Finished battles behave as NONE for both sides.
 
 import jax.numpy as jnp
 
+from .abilities import (
+	LEVITATE,
+	TRAP,
+	TRAP_ARENA,
+	TRAP_MAGNET,
+	TRAP_SHADOW,
+	active_abilities,
+	has_hook,
+)
 from .items import CHOICE
 from .state import (
 	CHOICE_MOVE,
+	DISABLE_MOVE,
+	DISABLE_REMAINING,
 	LOCKED_MOVE,
 	MOVE,
 	MUST_RECHARGE,
@@ -18,6 +29,7 @@ from .state import (
 	ONGOING,
 	PARTIAL_TRAP_SOURCE,
 	PARTIALLY_TRAPPED,
+	SMACKDOWN,
 	SWITCH,
 	TWO_TURN_MOVE,
 )
@@ -37,6 +49,9 @@ def move_availability(state, engine_tables):
 	moves = state.moves[SIDES, state.active]
 	pp = state.pp[SIDES, state.active]
 	usable = (moves != 0) & (pp > 0)
+	usable &= (state.volatiles[:, DISABLE_REMAINING] == 0)[:, None] | (
+		moves != state.volatiles[:, DISABLE_MOVE, None]
+	)
 	choice_move = state.volatiles[:, CHOICE_MOVE]
 	item = state.item[SIDES, state.active].astype(jnp.int32)
 	choice_item = engine_tables.item_hooks.rows[item, CHOICE] != 0
@@ -74,6 +89,21 @@ def legal_actions(state, engine_tables):
 	source_alive = state.hp[foe, state.active[foe]] > 0
 	trapped = (state.volatiles[:, PARTIALLY_TRAPPED] > 0) & source_active & source_alive
 	can_switch &= ~trapped
+	abilities = active_abilities(state, engine_tables)
+	foe_ability = abilities[foe, TRAP]
+	types = state.types[SIDES, state.active]
+	smackdown = state.volatiles[:, SMACKDOWN] > 0
+	grounded = ~jnp.any(types == engine_tables.flying_type, axis=-1) | smackdown
+	grounded &= ~has_hook(abilities, LEVITATE) | smackdown
+	steel = jnp.any(types == engine_tables.steel_type, axis=-1)
+	foe_alive = state.hp[foe, state.active[foe]] > 0
+	shadow_user = abilities[:, TRAP] == TRAP_SHADOW
+	trapped_by_ability = foe_alive & (
+		((foe_ability == TRAP_ARENA) & grounded)
+		| ((foe_ability == TRAP_SHADOW) & ~shadow_user)
+		| ((foe_ability == TRAP_MAGNET) & steel)
+	)
+	can_switch &= ~trapped_by_ability
 	can_switch |= request == SWITCH
 	switch_mask = can_switch[:, None] & bench_alive
 	return jnp.concatenate((move_mask, switch_mask), axis=1)

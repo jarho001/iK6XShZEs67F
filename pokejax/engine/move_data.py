@@ -36,6 +36,7 @@ class MoveRow(NamedTuple):
 	move_fakeout: jax.Array
 	move_fixed_damage: jax.Array
 	move_force_switch: jax.Array
+	move_future: jax.Array
 	move_hazard: jax.Array
 	move_heal: jax.Array
 	move_heal_weather: jax.Array
@@ -45,6 +46,7 @@ class MoveRow(NamedTuple):
 	move_magnitude: jax.Array
 	move_pain_split: jax.Array
 	move_priority: jax.Array
+	move_pressure_target: jax.Array
 	move_protects: jax.Array
 	move_punch: jax.Array
 	move_rapid_spin: jax.Array

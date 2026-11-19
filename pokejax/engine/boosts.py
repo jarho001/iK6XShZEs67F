@@ -2,7 +2,15 @@
 
 import jax.numpy as jnp
 
-from .abilities import active_abilities, apply_boost_delta, move_abilities
+from .abilities import (
+	BOOST_EVENT,
+	BOOST_EVENT_DEFIANT,
+	active_abilities,
+	apply_boost_delta,
+	boost_delta,
+	move_abilities,
+	reveal_abilities,
+)
 from .actions import SIDES
 from .move_data import read_move
 from .state import BOOST_ATK, TEAM_SLOTS
@@ -19,11 +27,18 @@ def apply_boosts(state, side, move, enabled, hit, success, tables, rows=None):
 	user = state.active[side]
 	kind = row.move_boost_effect
 	when = row.move_boost_when
+	user_types = state.types[side, user]
+	curse_ghost = (row.move_volatile_status == 5) & jnp.any(user_types == tables.ghost_type)
 	target = jnp.where(row.move_boost_target == 0, side, foe)
 	status_hit = (target == side) | hit
-	apply = enabled & (((when == STATUS_BOOST) & status_hit) | ((when == ATTACK_DROP) & success))
+	apply = enabled & ~curse_ghost
+	apply &= ((when == STATUS_BOOST) & status_hit) | ((when == ATTACK_DROP) & success)
 	delta = jnp.where(((SIDES == target) & apply)[:, None], row.move_boosts, 0)
+	actual_delta = boost_delta(delta, rows, SIDES != side)
 	boosts = apply_boost_delta(state.boosts, delta, rows, SIDES != side)
+	defiant = rows[:, BOOST_EVENT] == BOOST_EVENT_DEFIANT
+	defiant &= (SIDES != side) & jnp.any(actual_delta < 0, axis=-1)
+	defiant &= boosts[:, 0] > state.boosts[:, 0]
 	boosts = jnp.where(enabled & (kind == HAZE), 0, boosts)
 	boosts = jnp.where(
 		((SIDES == foe) & (enabled & success & (kind == CLEAR_SMOG)))[:, None], 0, boosts
@@ -39,4 +54,5 @@ def apply_boosts(state, side, move, enabled, hit, success, tables, rows=None):
 	hp = jnp.where(drum, hp - maximum // 2, hp).astype(state.hp.dtype)
 	member_mask = (SIDES == side)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == user)
 	hp = jnp.where(member_mask, hp, state.hp)
-	return state._replace(boosts=boosts, hp=hp)
+	state = state._replace(boosts=boosts, hp=hp)
+	return reveal_abilities(state, defiant)

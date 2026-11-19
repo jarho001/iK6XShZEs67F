@@ -23,6 +23,8 @@
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-items.allowed.json --out tests/fixtures/diff-items.jsonl.gz
  * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-abilities1.allowed.json --out work/diff/abilities1.jsonl.gz
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-abilities1.allowed.json --out tests/fixtures/diff-abilities1.jsonl.gz
+ * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-abilities2.allowed.json --out work/diff/abilities2.jsonl.gz
+ * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-abilities2.allowed.json --out tests/fixtures/diff-abilities2.jsonl.gz
  *
  * JSONL schema v2: header {type, schemaVersion, showdownCommit, seed, count,
  * acceptedMoves, ...}; battle {type, index, seed (four uint16 words), policySeed,
@@ -39,8 +41,8 @@
  * itemKnockedOff,ability,abilityPublic (optional)}]}],
  * weather, weatherTurns, pseudoWeather}. Conditions map ids to {layers, turns}.
  * Types and volatiles are null for fainted actives; all other fields are compared.
- * Active confusion also adds volatileCounters: {confusion: time}; absent counters
- * default to zero, keeping existing schema v2 recordings readable.
+ * Confusion, Disable and Slow Start counters use volatileCounters; Disable also
+ * adds volatileMoves. Missing fields default to zero for earlier schema v2 files.
  * Default profile is isolation: --allowed path/to/task.json adds moves, abilities,
  * and items arrays to the supported registry. --profile phase1 uses the original
  * all-replaced plain-move and Ghost-lead exhaustion profiles.
@@ -56,8 +58,9 @@
  * Order occurrence 3 means a Speed tie during the weather's eachEvent('Weather').
  * Order occurrence 4 means a Speed tie during WeatherChange.
  * Residual ties use occurrence 2 for default-order volatiles, then 6/7/8 for
- * Poison/Toxic, burn and partial trapping. Same-side handler permutations are
- * recorded as verified no-effect exceptions.
+ * Poison/Toxic, burn and partial trapping. Roost, ability and end-item residual
+ * groups have separate one-slot outcome kinds. Same-side handler permutations
+ * are recorded as verified no-effect exceptions.
  *
  * Every 20th battle uses a pool team with a Ghost lead on both sides. Moves are
  * drawn without replacement from accepted <=10 PP moves whose types cannot hit
@@ -71,9 +74,12 @@
  *    runSwitch consumes as one group. fieldEvent enumerates that group by side.
  *    The separate runSwitch speed shuffle is recorded at order context 5
  *    for grouped hazards and order-sensitive ability handlers, including start.
+ *    Slow Start's isolated start callback is independent of other switch-ins.
  * 3. Frisk draws from one foe in singles. Two No Guard accuracy handlers
  *    return the same result. Ability-triggered and repeated WeatherChange
  *    draws have no handlers in the isolation format.
+ * 4. A Pokemon's Choice lock and Disable move-lock callbacks disable disjoint
+ *    move slots, so their equal-priority DisableMove order is independent.
  * Policy/team sampling uses a separate seeded PRNG, never battle.prng.
  *
  * Unknown draw sites, unexpected shuffle entries, and duplicate forced addresses
@@ -115,15 +121,7 @@ const SWITCH_START_ABILITIES = new Set([
 const WEATHER_START_ABILITIES = new Set(['drizzle', 'drought', 'sandstream', 'snowwarning']);
 
 function isolationBattle(seed) {
-	const battle = new Battle({ formatid: 'gen5randombattle', seed });
-	// Keep Showdown callbacks intact and exclude each explicitly deferred hook.
-	const getCallback = battle.getCallback;
-	battle.getCallback = function (target, effect, callback) {
-		if ((effect.id === 'pressure' && callback === 'onDeductPP') ||
-			(effect.id === 'dryskin' && callback === 'onWeather')) return undefined;
-		return getCallback.call(this, target, effect, callback);
-	};
-	return battle;
+	return new Battle({ formatid: 'gen5randombattle', seed });
 }
 
 const EXCEPTIONS = [
@@ -132,8 +130,10 @@ const EXCEPTIONS = [
 	'empty-eachEvent-BeforeTurn',
 	'empty-switchIn-order',
 	'benign-item-switchIn-order',
+	'independent-slowstart-switchIn-order',
 	'equal-speed-runSwitch-insertion',
 	'same-side-residual-order',
+	'choice-disable-move-order',
 ];
 
 // Fail closed on unfamiliar meaningful move properties. maxMove/zMove and contest
@@ -204,6 +204,14 @@ function trackPublicAbilities(battle) {
 	battle.add = function (...parts) {
 		add.apply(this, parts);
 		const [event, target, value] = parts;
+		if (event === '-activate' && dex.toID(String(value).replace(/^ability:\s*/i, '')) === 'mummy') {
+			for (const holder of this.sides.flatMap(side => side.pokemon)) {
+				if ((holder === target || holder === parts[3]) && holder.ability === 'mummy') {
+					revealed.set(holder, 'mummy');
+				}
+			}
+			return;
+		}
 		const tags = parts.slice(2).filter(part => typeof part === 'string');
 		const named = tags.find(tag => /^(?:\[from\] )?ability: /.test(tag));
 		const from = tags.find(tag => tag.startsWith('[from] '));
@@ -213,9 +221,9 @@ function trackPublicAbilities(battle) {
 		if (!name) return;
 		const id = dex.toID(name);
 		if (!dex.abilities.get(id).exists) return;
-		const active = this.getAllActive(true);
 		const source = tags.find(tag => tag.startsWith('[of] '))?.slice(5);
-		const holders = [target, source].flatMap(ref => active.filter(p => p === ref || String(p) === ref));
+		const holders = [target, source].flatMap(ref => this.sides.flatMap(side => side.pokemon)
+			.filter(p => p === ref || String(p) === ref));
 		const holder = holders.find(p => p.ability === id);
 		if (holder) revealed.set(holder, id);
 	};
@@ -243,8 +251,17 @@ function snapshot(battle, fixed, publicAbilities) {
 				!side.active[0].itemKnockedOff,
 			itemKnockedOff: side.active[0].itemKnockedOff,
 			volatiles: side.active[0].fainted ? null : Object.keys(side.active[0].volatiles).sort(),
-			...(!side.active[0].fainted && side.active[0].volatiles.confusion ? {
-				volatileCounters: { confusion: side.active[0].volatiles.confusion.time },
+			...(!side.active[0].fainted && (side.active[0].volatiles.confusion ||
+				side.active[0].volatiles.disable || side.active[0].abilityState.counter) ? {
+				volatileCounters: {
+					...(side.active[0].volatiles.confusion ? { confusion: side.active[0].volatiles.confusion.time } : {}),
+					...(side.active[0].volatiles.disable ? { disable: side.active[0].volatiles.disable.duration } : {}),
+					...(side.active[0].ability === 'slowstart' && side.active[0].abilityState.counter ?
+						{ slowstart: side.active[0].abilityState.counter } : {}),
+				},
+			} : {}),
+			...(!side.active[0].fainted && side.active[0].volatiles.disable ? {
+				volatileMoves: { disable: side.active[0].volatiles.disable.move },
 			} : {}),
 			sideConditions: conditions(side.sideConditions),
 			legalActions: Array.from({ length: 9 }, (_, action) =>
@@ -286,7 +303,9 @@ function legalChoices(side, fixed, ended = false) {
 			}
 		}
 	}
-	if (kind === 'switch' || !side.activeRequest.active[0].trapped) {
+	// maybeTrapped can describe only a possible foe ability. Showdown still
+	// accepts the switch unless the active Pokemon is actually trapped.
+	if (kind === 'switch' || !side.active[0].trapped) {
 		const inactive = fixed.filter(pokemon => pokemon !== side.active[0]);
 		for (const [k, pokemon] of inactive.entries()) {
 			if (!pokemon.fainted && pokemon.hp > 0) {
@@ -304,7 +323,7 @@ function directCaller() {
 }
 
 function residualOrderOccurrence(order) {
-	if (order === false || order === 5 || order === 28 || order === 29) return 2;
+	if (order === false || order === 5 || order === 17 || order === 25) return 2;
 	if (order === 9) return 6;
 	if (order === 10) return 7;
 	if (order === 13) return 8;
@@ -383,6 +402,20 @@ const OUTCOME_RULES = [
 		scope?.kind === 'status' && scope.status === 'frz' && caller === 'Battle.onBeforeMove' &&
 		args[0] === 1 && args[1] === 5,
 		address: scope => [scope.target.side.n, 0], value: value => Number(value) },
+	{ kind: 'ability_chance', method: 'chance', matches: (scope, caller, args) =>
+		scope?.kind === 'ability' && ['static', 'flamebody', 'cursedbody', 'poisontouch'].includes(scope.ability) &&
+		['Battle.onDamagingHit', 'Battle.onSourceDamagingHit'].includes(caller) &&
+		args[0] === 3 && args[1] === 10,
+		address: scope => [scope.target.side.n, 2 * scope.hitIndex +
+			(scope.ability === 'poisontouch' ? 1 : 0)], value: value => Number(value) },
+	{ kind: 'residual_chance', method: 'chance', matches: (scope, caller, args) =>
+		scope?.kind === 'ability' && scope.ability === 'shedskin' &&
+		caller === 'Battle.onResidual' && args[0] === 33 && args[1] === 100,
+		address: scope => [scope.target.side.n, 0], value: value => Number(value) },
+	{ kind: 'harvest', method: 'chance', matches: (scope, caller, args) =>
+		scope?.kind === 'ability' && scope.ability === 'harvest' &&
+		caller === 'Battle.onResidual' && args[0] === 1 && args[1] === 2,
+		address: scope => [scope.target.side.n, 0], value: value => Number(value) },
 	{ kind: 'hit', method: 'chance', matches: (scope, caller, args) =>
 		scope?.kind === 'hit' && caller === 'BattleActions.hitStepAccuracy' && args[1] === 100,
 		address: scope => [scope.user.side.n, 0], value: value => Number(value) },
@@ -393,6 +426,10 @@ const OUTCOME_RULES = [
 	{ kind: 'damage_roll', method: 'random', matches: (scope, caller, args) =>
 		scope?.kind === 'damage_roll' && caller === 'Battle.randomizer' && args.length === 1 && args[0] === 16,
 		address: scope => [scope.user.side.n, scope.occurrence], value: value => value },
+	{ kind: 'effect_spore', method: 'random', matches: (scope, caller, args) =>
+		scope?.kind === 'ability' && scope.ability === 'effectspore' &&
+		caller === 'Battle.onDamagingHit' && args.length === 1 && args[0] === 100,
+		address: scope => [scope.target.side.n, scope.hitIndex], value: value => value },
 	{ kind: 'order', method: 'shuffle', matches: scope => scope?.kind === 'queue',
 		address: (scope, tied) => [0, tied.every(a => a.choice === 'instaswitch') ? 1 : 0],
 		value: (value, list, start) => list[start].pokemon.side.n },
@@ -425,11 +462,12 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 		authorizedDraw = reason;
 		try { return fn(); } finally { authorizedDraw = null; }
 	}
-	function record(kind, side, occurrence, value) {
+	function record(kind, side, occurrence, value, detail = '') {
 		assert(outcomes, 'Random outcome outside a step');
 		const address = `${kind}:${side}:${occurrence}`;
-		assert(!addresses.has(address), `Duplicate outcome address ${address}`);
-		addresses.add(address);
+		assert(!addresses.has(address),
+			`Duplicate outcome address ${address}: ${addresses.get(address)} vs ${detail}`);
+		addresses.set(address, detail);
 		outcomes.push({ kind, side, occurrence, value });
 	}
 	function wrap(object, method, makeScope) {
@@ -477,8 +515,12 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 		const statusScope = this.effect?.effectType === 'Status' ||
 			['confusion', 'lockedmove', 'stall'].includes(this.effect?.id) ?
 			{ kind: 'status', status: this.effect.id, target: this.effectState.target } : scope;
-		const effectiveScope = statusScope?.status === 'stall' ?
-			{ kind: 'stall', target: statusScope.target } : statusScope;
+		const abilityScope = ['static', 'flamebody', 'cursedbody', 'poisontouch', 'shedskin', 'harvest'].includes(this.effect?.id) ? {
+			kind: 'ability', ability: this.effect.id, target: this.effectState.target,
+			hitIndex: Math.max(0, (scope?.move?.hit || 1) - 1),
+		} : statusScope;
+		const effectiveScope = abilityScope?.status === 'stall' ?
+			{ kind: 'stall', target: abilityScope.target } : abilityScope;
 		const rule = OUTCOME_RULES.find(rule => rule.method === 'chance' &&
 			rule.matches(effectiveScope, caller, [numerator, denominator]));
 		assert(rule, `Unclassified randomChance(${numerator}, ${denominator}) at ${caller}`);
@@ -505,14 +547,18 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 		const statusScope = caller === 'Battle.onStart' &&
 			(this.effect?.effectType === 'Status' || ['confusion', 'lockedmove'].includes(this.effect?.id)) ?
 			{ kind: 'status', status: this.effect.id, target: this.effectState.target } : scope;
+		const randomScope = this.effect?.id === 'effectspore' ? {
+			kind: 'ability', ability: this.effect.id, target: this.effectState.target,
+			hitIndex: Math.max(0, (scope?.move?.hit || 1) - 1),
+		} : statusScope;
 		if (scope?.kind === 'selfDrops' && caller === 'BattleActions.selfDrops' && args[0] === 100 &&
 			scope.moveData.self?.boosts && scope.moveData.self.chance === undefined) {
 			return allow('deterministic-self-drop', () => battleRandom.apply(this, args));
 		}
-		const rule = OUTCOME_RULES.find(rule => rule.method === 'random' && rule.matches(statusScope, caller, args));
+		const rule = OUTCOME_RULES.find(rule => rule.method === 'random' && rule.matches(randomScope, caller, args));
 		assert(rule, `Unclassified battle.random at ${caller}: ${args}`);
 		const value = allow(rule.kind, () => battleRandom.apply(this, args));
-		record(rule.kind, ...rule.address(statusScope), rule.value(value, statusScope));
+		record(rule.kind, ...rule.address(randomScope), rule.value(value, randomScope));
 		return value;
 	};
 	const sample = battle.sample;
@@ -548,14 +594,24 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 			assert(tied.length >= 2, 'Residual speed sort needs at least two handlers');
 			assert(tied.every(h => [
 				'brn', 'psn', 'tox', 'partiallytrapped', 'protect', 'endure', 'flinch', 'stall', 'lockedmove',
-				'mustrecharge', 'twoturnmove', 'fly', 'dig', 'bounce', 'dive', 'shadowforce',
-				'skullbash', 'skyattack', 'razorwind', 'solarbeam', 'freezeshock', 'iceburn',
+				'mustrecharge', 'twoturnmove', 'fly', 'dig', 'bounce', 'dive', 'shadowforce', 'disable',
+				'skullbash', 'skyattack', 'razorwind', 'solarbeam', 'freezeshock', 'iceburn', 'roost',
 				'leftovers', 'blacksludge', 'toxicorb', 'flameorb', 'whiteherb', 'gem',
+				'hydration', 'shedskin', 'speedboost', 'baddreams', 'slowstart', 'harvest',
 			].includes(h.effect.id)),
 			`Unexpected residual tie: ${tied.map(h => `${h.effect.id}:${h.effectHolder.side.n}`)}`);
 			const sides = new Set(tied.map(h => h.effectHolder.side.n));
 			if (sides.size === 1) exception = 'same-side-residual-order';
-			else rule = OUTCOME_RULES.find(row => row.method === 'shuffle' && row.matches(scope));
+			else {
+				const order = tied[0].order;
+				const kind = order === 25 ? 'roost_residual_order' :
+					order === 28 ? 'ability_residual_order' :
+					order === 29 ? 'item_residual_order' : 'order';
+				const baseRule = OUTCOME_RULES.find(row =>
+					row.kind === 'order' && row.method === 'shuffle' && row.matches(scope));
+				rule = { ...baseRule, kind, address: () => [0,
+					kind === 'order' ? residualOrderOccurrence(order) : 0] };
+			}
 		} else if (scope?.kind === 'eachEvent' && scope.event === 'Weather') {
 			assert(tied.every(pokemon => pokemon.side.active.includes(pokemon)) &&
 				tied[0].side !== tied[1].side, 'Unexpected weather event tie');
@@ -585,6 +641,11 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 			tied.every(h => h.effect?.id === 'noguard' && h.callback === h.effect.onAnyAccuracy) &&
 			tied[0].effectHolder.side !== tied[1].effectHolder.side) {
 			exception = 'identical-noguard-accuracy';
+		} else if (!scope && tied.length === 2 &&
+			tied.map(h => h.effect?.id).sort().join(',') === 'choicelock,disable' &&
+			tied.every(h => h.callback === h.effect.onDisableMove) &&
+			tied[0].effectHolder === tied[1].effectHolder) {
+			exception = 'choice-disable-move-order';
 		} else if (scope?.kind === 'runSwitch') {
 			const switchHandlers = tied.map(p => ({
 				item: p.item,
@@ -594,7 +655,8 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 			}));
 			assert(tied.every(p => battle.findPokemonEventHandlers(p, 'onSwitchIn').every(h => [
 					'slp', 'tox', 'choiceband', 'choicespecs', 'choicescarf',
-				].includes(h.effect.id) || SWITCH_START_ABILITIES.has(h.effect.id)) &&
+				].includes(h.effect.id) || SWITCH_START_ABILITIES.has(h.effect.id) ||
+					h.effect.id === 'slowstart') &&
 				battle.findPokemonEventHandlers(p, 'onAnySwitchIn').every(h => h.effect.id === 'whiteherb') &&
 				battle.findSideEventHandlers(p.side, 'onSideSwitchIn', undefined, p).length === 0 &&
 				battle.findSideEventHandlers(p.side, 'onSwitchIn', undefined, p)
@@ -613,6 +675,8 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 					tied.some(p => p.ability === 'intimidate'));
 			if (hasHazards || abilityOrder) {
 				rule = OUTCOME_RULES.find(row => row.method === 'shuffle' && row.matches(scope));
+			} else if (tied.some(p => p.ability === 'slowstart')) {
+				exception = 'independent-slowstart-switchIn-order';
 			} else if (tied.some(p => p.item)) {
 				exception = 'benign-item-switchIn-order';
 			} else {
@@ -624,11 +688,12 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 		}
 		const value = allow(exception || 'order', () => shuffle.call(this, list, start, end));
 		if (exception) stats.exceptions[exception] = (stats.exceptions[exception] || 0) + 1;
-		else record(rule.kind, ...rule.address(scope, tied), rule.value(value, list, start));
+		else record(rule.kind, ...rule.address(scope, tied), rule.value(value, list, start),
+			`shuffle ${scope?.kind} order=${tied[0]?.order} handlers=${tied.map(h => h.effect?.id).join(',')}`);
 		return value;
 	};
 	return {
-		begin() { assert.equal(outcomes, null); outcomes = []; addresses = new Set(); },
+		begin() { assert.equal(outcomes, null); outcomes = []; addresses = new Map(); },
 		setFixed(members) { fixed = members; },
 		end() { const result = outcomes; outcomes = null; return result; },
 	};

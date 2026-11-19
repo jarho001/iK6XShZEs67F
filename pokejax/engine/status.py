@@ -4,24 +4,39 @@ import jax.numpy as jnp
 
 from .abilities import (
 	OWN_TEMPO,
+	SLEEP_EARLY_BIRD,
+	SLEEP_HOOK,
+	STATUS_EVENT,
+	STATUS_EVENT_SYNCHRONIZE,
 	active_abilities,
 	effective_weather,
 	has_hook,
+	reveal_abilities,
 	status_immunity,
+)
+from .abilities import (
+	TRUANT as TRUANT_ABILITY,
 )
 from .actions import SIDES
 from .field import effective_move_type
 from .move_data import read_move
 from .randomness import FULL_PARALYSIS, SLEEP_DURATION, THAW, chance, integer
 from .state import (
+	BURN,
+	DISABLE_MOVE,
+	DISABLE_REMAINING,
 	FREEZE,
 	HEALTHY,
 	MUST_RECHARGE,
 	PARALYSIS,
+	POISON,
 	SLEEP,
 	TEAM_SLOTS,
 	TOXIC,
 	TWO_TURN_MOVE,
+)
+from .state import (
+	TRUANT as TRUANT_VOLATILE,
 )
 from .turn_moves import set_active_volatile
 from .volatiles import before_move as volatile_before_move
@@ -41,7 +56,7 @@ def switch_in(state, side, slot, enabled):
 	)
 
 
-def before_move(state, side, move, enabled, key, forced, tables, recharge=False):
+def before_move(state, side, move, enabled, key, forced, tables, ability_rows, recharge=False):
 	row = read_move(tables, move)
 	started = enabled
 	was_charging = state.volatiles[side, TWO_TURN_MOVE] > 0
@@ -57,7 +72,8 @@ def before_move(state, side, move, enabled, key, forced, tables, recharge=False)
 	status = state.status[side, slot]
 	counter = state.status_counter[side, slot]
 	sleeping = enabled & (status == SLEEP)
-	counter = jnp.where(sleeping, counter - 1, counter)
+	early_bird = ability_rows[side, SLEEP_HOOK] == SLEEP_EARLY_BIRD
+	counter = jnp.where(sleeping, counter - 1 - early_bird.astype(counter.dtype), counter)
 	wake = sleeping & (counter <= 0)
 	can_defrost = row.move_defrost
 	thaw = enabled & (status == FREEZE) & ~can_defrost & chance(key, forced, THAW, side, 0, 1, 5)
@@ -69,7 +85,25 @@ def before_move(state, side, move, enabled, key, forced, tables, recharge=False)
 		status_counter=jnp.where(member_mask, jnp.where(clear, 0, counter), state.status_counter),
 	)
 	enabled &= ~(sleeping & ~wake) & ~frozen
-	state, enabled = volatile_before_move(state, side, enabled, key, forced)
+	truant_ability = has_hook(ability_rows[side], TRUANT_ABILITY)
+	truant_active = truant_ability & (state.volatiles[side, TRUANT_VOLATILE] > 0)
+	truant_block = enabled & ~recharge_now & truant_active
+	truant_value = jnp.where(
+		enabled & ~recharge_now & truant_ability,
+		jnp.where(truant_active, 0, 1),
+		state.volatiles[side, TRUANT_VOLATILE],
+	)
+	truant_value = jnp.where(recharge_now, 0, truant_value)
+	state = set_active_volatile(state, side, TRUANT_VOLATILE, truant_value)
+	enabled &= ~truant_block
+	state = reveal_abilities(state, (SIDES == side) & truant_block)
+	state, enabled = volatile_before_move(
+		state, side, enabled, key, forced, tables, ability_rows[side]
+	)
+	disabled = (state.volatiles[side, DISABLE_REMAINING] > 0) & (
+		row.id == state.volatiles[side, DISABLE_MOVE]
+	)
+	enabled &= ~disabled
 	paralyzed = enabled & (status == PARALYSIS) & chance(key, forced, FULL_PARALYSIS, side, 0, 1, 4)
 	can_act = enabled & ~paralyzed
 	state = set_active_volatile(
@@ -81,37 +115,67 @@ def before_move(state, side, move, enabled, key, forced, tables, recharge=False)
 	return state, can_act
 
 
-def inflict_status(state, side, inflicted, enabled, key, forced, tables):
+def inflict_status(
+	state,
+	side,
+	inflicted,
+	enabled,
+	key,
+	forced,
+	tables,
+	ability_rows=None,
+	*,
+	reveal_immunity=False,
+):
 	"""Pokemon.trySetStatus: HP, current status, type immunity, then Sleep Clause."""
 	slot = state.active[side]
 	types = state.types[side, slot]
-	immune = jnp.any((types >= 0) & tables.status_immune[inflicted, jnp.maximum(types, 0)])
-	rows = active_abilities(state, tables)
+	type_immune = jnp.any((types >= 0) & tables.status_immune[inflicted, jnp.maximum(types, 0)])
+	rows = active_abilities(state, tables) if ability_rows is None else ability_rows
 	weather = effective_weather(state, rows)
-	immune |= tables.weather_status_immune[weather, inflicted]
-	immune |= status_immunity(rows[side], inflicted, weather)
+	weather_immune = tables.weather_status_immune[weather, inflicted]
+	ability_immune = status_immunity(rows[side], inflicted, weather)
+	immune = type_immune | weather_immune | ability_immune
 	clause = jnp.any(
 		(state.status[side] == SLEEP) & (state.sleep_from_foe[side] != 0) & (state.hp[side] > 0)
 	)
-	apply = enabled & (state.hp[side, slot] > 0) & (inflicted != HEALTHY)
-	apply &= (state.status[side, slot] == HEALTHY) & ~immune & ~((inflicted == SLEEP) & clause)
+	attempt = enabled & (state.hp[side, slot] > 0) & (inflicted != HEALTHY)
+	attempt &= (state.status[side, slot] == HEALTHY) & ~((inflicted == SLEEP) & clause)
+	apply = attempt & ~immune
 	duration = (integer(key, forced, SLEEP_DURATION, side, 0, 3) + 2).astype(jnp.int8)
-	return state._replace(
-		status=state.status.at[side, slot].set(
-			jnp.where(apply, inflicted, state.status[side, slot])
-		),
-		status_counter=state.status_counter.at[side, slot].set(
-			jnp.where(
-				apply, jnp.where(inflicted == SLEEP, duration, 0), state.status_counter[side, slot]
-			)
-		),
-		sleep_start=state.sleep_start.at[side, slot].set(
-			jnp.where(apply & (inflicted == SLEEP), duration, state.sleep_start[side, slot])
-		),
-		sleep_from_foe=state.sleep_from_foe.at[side, slot].set(
-			jnp.where(apply, inflicted == SLEEP, state.sleep_from_foe[side, slot])
-		),
+	member = (SIDES == side)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == slot)
+	status = jnp.where(member & apply, jnp.asarray(inflicted, state.status.dtype), state.status)
+	counter = jnp.where(
+		member & apply,
+		jnp.where(inflicted == SLEEP, duration, 0),
+		state.status_counter,
 	)
+	start = jnp.where(member & apply & (inflicted == SLEEP), duration, state.sleep_start)
+	source = jnp.where(member & apply, inflicted == SLEEP, state.sleep_from_foe)
+	state = state._replace(
+		status=status, status_counter=counter, sleep_start=start, sleep_from_foe=source
+	)
+	# Synchronize supplies a status-like pseudo effect, which Showdown treats
+	# like a named move status in the immunity protocol.
+	if reveal_immunity:
+		reveal = attempt & ~type_immune & ~weather_immune & ability_immune
+		state = reveal_abilities(state, (SIDES == side) & reveal)
+	return state
+
+
+def synchronize_status(
+	state, target_side, source_side, inflicted, enabled, key, forced, tables, ability_rows=None
+):
+	"""Copy a reflected major status once, without allowing Synchronize to chain."""
+	rows = active_abilities(state, tables) if ability_rows is None else ability_rows
+	statusable = (inflicted == BURN) | (inflicted == POISON) | (inflicted == TOXIC)
+	statusable |= inflicted == PARALYSIS
+	trigger = enabled & statusable & (target_side != source_side)
+	trigger &= rows[target_side, STATUS_EVENT] == STATUS_EVENT_SYNCHRONIZE
+	state = inflict_status(
+		state, source_side, inflicted, trigger, key, forced, tables, rows, reveal_immunity=True
+	)
+	return reveal_abilities(state, (SIDES == target_side) & trigger)
 
 
 def apply_move(state, side, move, enabled, hit, key, forced, tables, abilities, weather):
@@ -183,13 +247,15 @@ def apply_move(state, side, move, enabled, hit, key, forced, tables, abilities, 
 	start = jnp.where(user_mask & rest, 3, start)
 	source = jnp.where(user_mask & rest, False, source)
 	hp = jnp.where(user_mask & rest, state.stats[..., 0], state.hp)
-	return state._replace(
+	state = state._replace(
 		status=status,
 		status_counter=counter,
 		sleep_start=start,
 		sleep_from_foe=source,
 		hp=hp,
-	), revealed
+	)
+	state = synchronize_status(state, foe, side, inflicted, inflict, key, forced, tables, abilities)
+	return state, revealed
 
 
 def after_hit(state, side, move, enabled, tables, weather=None):

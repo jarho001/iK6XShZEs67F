@@ -45,7 +45,18 @@ SIDES = jnp.arange(2)
 	WEATHER,
 	WEATHER_IMMUNITY,
 	START,
-) = range(14)
+	RESIDUAL,
+	CONTACT,
+	DAMAGE_TAKEN,
+	SWITCH_OUT,
+	ORDER,
+	TRAP,
+	PP_COST,
+	STATUS_EVENT,
+	SLEEP_HOOK,
+	ITEM_GUARD,
+	BOOST_EVENT,
+) = range(25)
 (
 	BREAKABLE,
 	MOLD_BREAKER,
@@ -66,10 +77,17 @@ SIDES = jnp.arange(2)
 	CLOUD_NINE,
 	UNNERVE,
 	ROCK_HEAD,
-) = (1 << bit for bit in range(19))
+	MAGIC_GUARD,
+	TRUANT,
+	MUMMY_IMMUNE,
+	POWDER_IMMUNITY,
+) = (1 << bit for bit in range(23))
 ATTACK_DOUBLE, ATTACK_GUTS, ATTACK_HUSTLE = range(1, 4)
+ATTACK_DEFEATIST, ATTACK_SLOW_START = range(4, 6)
+ATTACK_BLAZE, ATTACK_OVERGROW, ATTACK_SWARM, ATTACK_TORRENT = range(6, 10)
 DEFENSE_THICK_FAT, DEFENSE_MARVEL_SCALE = range(1, 3)
 SPEED_QUICK_FEET = 5
+SPEED_UNBURDEN, SPEED_SLOW_START = range(6, 8)
 (
 	ACCURACY_COMPOUND,
 	ACCURACY_HUSTLE,
@@ -79,12 +97,53 @@ SPEED_QUICK_FEET = 5
 	ACCURACY_SAND,
 	ACCURACY_HAIL,
 ) = range(1, 8)
-POWER_TECHNICIAN, POWER_PUNCH, POWER_RECOIL, POWER_ANALYTIC, POWER_TOXIC, POWER_DRY_SKIN = range(
-	1, 7
-)
+(
+	POWER_TECHNICIAN,
+	POWER_PUNCH,
+	POWER_RECOIL,
+	POWER_ANALYTIC,
+	POWER_TOXIC,
+	POWER_DRY_SKIN,
+) = range(1, 7)
 DAMAGE_SNIPER, DAMAGE_TINTED, DAMAGE_FILTER, DAMAGE_MULTISCALE = range(1, 5)
 ABSORB_HEAL, ABSORB_FLASH, ABSORB_WONDER, ABSORB_ATK, ABSORB_SPA, ABSORB_SPE = range(1, 7)
 START_ANNOUNCE, START_INTIMIDATE, START_DOWNLOAD, START_FRISK, START_ANTICIPATION = range(1, 6)
+(
+	RESIDUAL_POISON_HEAL,
+	RESIDUAL_RAIN_DISH,
+	RESIDUAL_ICE_BODY,
+	RESIDUAL_DRY_SKIN,
+	RESIDUAL_HYDRATION,
+	RESIDUAL_SHED_SKIN,
+	RESIDUAL_SPEED_BOOST,
+	RESIDUAL_BAD_DREAMS,
+	RESIDUAL_SLOW_START,
+	RESIDUAL_HARVEST,
+) = range(1, 11)
+(
+	CONTACT_STATIC,
+	CONTACT_FLAME_BODY,
+	CONTACT_EFFECT_SPORE,
+	CONTACT_ROUGH_SKIN,
+	CONTACT_IRON_BARBS,
+	CONTACT_POISON_TOUCH,
+	CONTACT_MUMMY,
+	CONTACT_CURSED_BODY,
+	CONTACT_COLOR_CHANGE,
+	CONTACT_WEAK_ARMOR,
+	CONTACT_JUSTIFIED,
+	CONTACT_AFTERMATH,
+	CONTACT_LIQUID_OOZE,
+) = range(1, 14)
+DAMAGE_TAKEN_STURDY = 1
+SWITCH_OUT_REGENERATOR, SWITCH_OUT_NATURAL_CURE = range(1, 3)
+ORDER_PRANKSTER = 1
+TRAP_ARENA, TRAP_SHADOW, TRAP_MAGNET = range(1, 4)
+PP_COST_PRESSURE = 1
+STATUS_EVENT_SYNCHRONIZE = 1
+SLEEP_EARLY_BIRD = 1
+ITEM_GUARD_STICKY_HOLD = 1
+BOOST_EVENT_DEFIANT, BOOST_EVENT_MOXIE = range(1, 3)
 DROP_ALL = 127
 DOUBLE_STAGES = 128
 REVERSE_STAGES = 256
@@ -93,7 +152,7 @@ STATUS_SUN = 1 << 7
 
 def build_ability_hooks(tables):
 	"""Each exported ability has a row. Unimplemented and singles-inert hooks are zero."""
-	rows = np.zeros((len(tables.abilities.ids), START + 1), np.int32)
+	rows = np.zeros((len(tables.abilities.ids), BOOST_EVENT + 1), np.int32)
 	rows[:, ABSORB_TYPE] = -1
 
 	def set_hook(column, value, names):
@@ -119,6 +178,10 @@ def build_ability_hooks(tables):
 		(CLOUD_NINE, "cloudnine airlock"),
 		(UNNERVE, "unnerve"),
 		(ROCK_HEAD, "rockhead"),
+		(MAGIC_GUARD, "magicguard"),
+		(TRUANT, "truant"),
+		(MUMMY_IMMUNE, "multitype"),
+		(POWDER_IMMUNITY, "overcoat"),
 		(
 			BREAKABLE,
 			(
@@ -126,7 +189,7 @@ def build_ability_hooks(tables):
 				"immunity innerfocus insomnia keeneye leafguard levitate lightningrod limber magmaarmor "
 				"marvelscale motordrive multiscale oblivious owntempo sandveil sapsipper shellarmor "
 				"shielddust simple snowcloak solidrock stormdrain tangledfeet thickfat unaware "
-				"vitalspirit voltabsorb waterabsorb waterveil wonderguard wonderskin"
+				"vitalspirit voltabsorb waterabsorb waterveil wonderguard wonderskin sturdy stickyhold"
 			),
 		),
 	):
@@ -138,6 +201,12 @@ def build_ability_hooks(tables):
 				(ATTACK_DOUBLE, "hugepower purepower"),
 				(ATTACK_GUTS, "guts"),
 				(ATTACK_HUSTLE, "hustle"),
+				(ATTACK_DEFEATIST, "defeatist"),
+				(ATTACK_SLOW_START, "slowstart"),
+				(ATTACK_BLAZE, "blaze"),
+				(ATTACK_OVERGROW, "overgrow"),
+				(ATTACK_SWARM, "swarm"),
+				(ATTACK_TORRENT, "torrent"),
 			),
 		),
 		(DEFENSE, ((DEFENSE_THICK_FAT, "thickfat"), (DEFENSE_MARVEL_SCALE, "marvelscale"))),
@@ -148,6 +217,8 @@ def build_ability_hooks(tables):
 				(SUN, "chlorophyll"),
 				(SAND, "sandrush"),
 				(SPEED_QUICK_FEET, "quickfeet"),
+				(SPEED_UNBURDEN, "unburden"),
+				(SPEED_SLOW_START, "slowstart"),
 			),
 		),
 		(
@@ -217,7 +288,7 @@ def build_ability_hooks(tables):
 			(
 				(
 					START_ANNOUNCE,
-					"pressure moldbreaker teravolt turboblaze cloudnine airlock unnerve",
+					"pressure moldbreaker teravolt turboblaze cloudnine airlock unnerve slowstart",
 				),
 				(START_INTIMIDATE, "intimidate"),
 				(START_DOWNLOAD, "download"),
@@ -228,6 +299,59 @@ def build_ability_hooks(tables):
 	):
 		for value, names in entries:
 			set_hook(column, value, names)
+	for column, entries in (
+		(
+			RESIDUAL,
+			(
+				(RESIDUAL_POISON_HEAL, "poisonheal"),
+				(RESIDUAL_RAIN_DISH, "raindish"),
+				(RESIDUAL_ICE_BODY, "icebody"),
+				(RESIDUAL_DRY_SKIN, "dryskin"),
+				(RESIDUAL_HYDRATION, "hydration"),
+				(RESIDUAL_SHED_SKIN, "shedskin"),
+				(RESIDUAL_SPEED_BOOST, "speedboost"),
+				(RESIDUAL_BAD_DREAMS, "baddreams"),
+				(RESIDUAL_SLOW_START, "slowstart"),
+				(RESIDUAL_HARVEST, "harvest"),
+			),
+		),
+		(
+			CONTACT,
+			(
+				(CONTACT_STATIC, "static"),
+				(CONTACT_FLAME_BODY, "flamebody"),
+				(CONTACT_EFFECT_SPORE, "effectspore"),
+				(CONTACT_ROUGH_SKIN, "roughskin"),
+				(CONTACT_IRON_BARBS, "ironbarbs"),
+				(CONTACT_POISON_TOUCH, "poisontouch"),
+				(CONTACT_MUMMY, "mummy"),
+				(CONTACT_CURSED_BODY, "cursedbody"),
+				(CONTACT_COLOR_CHANGE, "colorchange"),
+				(CONTACT_WEAK_ARMOR, "weakarmor"),
+				(CONTACT_JUSTIFIED, "justified"),
+				(CONTACT_AFTERMATH, "aftermath"),
+				(CONTACT_LIQUID_OOZE, "liquidooze"),
+			),
+		),
+		(DAMAGE_TAKEN, ((DAMAGE_TAKEN_STURDY, "sturdy"),)),
+		(
+			SWITCH_OUT,
+			((SWITCH_OUT_REGENERATOR, "regenerator"), (SWITCH_OUT_NATURAL_CURE, "naturalcure")),
+		),
+		(ORDER, ((ORDER_PRANKSTER, "prankster"),)),
+		(
+			TRAP,
+			((TRAP_ARENA, "arenatrap"), (TRAP_SHADOW, "shadowtag"), (TRAP_MAGNET, "magnetpull")),
+		),
+		(PP_COST, ((PP_COST_PRESSURE, "pressure"),)),
+		(STATUS_EVENT, ((STATUS_EVENT_SYNCHRONIZE, "synchronize"),)),
+		(SLEEP_HOOK, ((SLEEP_EARLY_BIRD, "earlybird"),)),
+		(ITEM_GUARD, ((ITEM_GUARD_STICKY_HOLD, "stickyhold"),)),
+		(BOOST_EVENT, ((BOOST_EVENT_DEFIANT, "defiant"), (BOOST_EVENT_MOXIE, "moxie"))),
+	):
+		for value, names in entries:
+			set_hook(column, value, names)
+	rows[tables.abilities.index["icebody"], WEATHER_IMMUNITY] |= 1 << HAIL
 	for kind, type_name, names in (
 		(ABSORB_HEAL, "water", "waterabsorb dryskin"),
 		(ABSORB_HEAL, "electric", "voltabsorb"),
@@ -294,7 +418,12 @@ def boost_delta(delta, rows, external):
 
 
 def apply_boost_delta(boosts, delta, rows, external):
-	return jnp.clip(boosts + boost_delta(delta, rows, external), -6, 6).astype(boosts.dtype)
+	delta = boost_delta(delta, rows, external)
+	defiant = (rows[:, BOOST_EVENT] == BOOST_EVENT_DEFIANT) & jnp.asarray(external)
+	defiant &= jnp.any(delta < 0, axis=-1)
+	atk = jnp.arange(boosts.shape[-1]) == 0
+	delta += (defiant[:, None] & atk[None, :]).astype(delta.dtype) * 2
+	return jnp.clip(boosts + delta, -6, 6).astype(boosts.dtype)
 
 
 def berry_allowed(state, rows):
@@ -343,18 +472,38 @@ def grounded_ability(state, rows):
 	return ~has_hook(rows, LEVITATE) | (state.volatiles[:, SMACKDOWN] > 0)
 
 
-def attack_modifiers(rows, side, attack, physical, status, fire_or_ice, flash_fire):
-	"""ModifyAtk mixes a direct Hustle relay with chained ability/item hooks."""
+def attack_modifiers(
+	rows,
+	side,
+	attack,
+	physical,
+	status,
+	fire_or_ice,
+	flash_fire,
+	low_hp_half,
+	low_hp_third,
+	move_type,
+	tables,
+	slow_start,
+):
+	"""Showdown's ModifyAtk/ModifySpA ability hooks and chained modifiers."""
 	hook = rows[side, ATTACK]
 	guts = (hook == ATTACK_GUTS) & (status != HEALTHY)
 	hustle = physical & (hook == ATTACK_HUSTLE)
 	attack = modify(attack, jnp.where(hustle, 6144, 4096))
+	threshold = (hook == ATTACK_BLAZE) & (move_type == tables.fire_type)
+	threshold |= (hook == ATTACK_OVERGROW) & (move_type == tables.grass_type)
+	threshold |= (hook == ATTACK_SWARM) & (move_type == tables.bug_type)
+	threshold |= (hook == ATTACK_TORRENT) & (move_type == tables.water_type)
 	thick_fat = (rows[1 - side, DEFENSE] == DEFENSE_THICK_FAT) & fire_or_ice
+	defeatist = (hook == ATTACK_DEFEATIST) & low_hp_half
+	slow = (hook == ATTACK_SLOW_START) & slow_start & physical
 	modifier = jnp.where(
 		physical & (hook == ATTACK_DOUBLE),
 		8192,
-		jnp.where((physical & guts) | flash_fire, 6144, 4096),
+		jnp.where((physical & guts) | flash_fire | (threshold & low_hp_third), 6144, 4096),
 	)
+	modifier = chain(modifier, jnp.where(defeatist | slow, 2048, 4096))
 	return attack, chain(jnp.where(thick_fat, 2048, 4096), modifier)
 
 
@@ -380,7 +529,17 @@ def accuracy_modifier(rows, side, physical, target_confused, weather):
 
 
 def base_power_modifier(
-	rows, side, move, power, modifier, physical, status, fire, sheer, analytic, tables
+	rows,
+	side,
+	move,
+	power,
+	modifier,
+	physical,
+	status,
+	fire,
+	sheer,
+	analytic,
+	tables,
 ):
 	row = read_move(tables, move)
 	source = rows[side, BASE_POWER]

@@ -29,8 +29,14 @@ from pokejax.engine.randomness import (
 def test_forced_outcomes_exact():
 	records = []
 	for name in KIND_NAMES:
-		for side in range(1 if name == "order" else 2):
-			for occ in range(3 if name == "order" else MAX_OCCURRENCES):
+		order_kind = name in {
+			"order",
+			"ability_residual_order",
+			"item_residual_order",
+			"roost_residual_order",
+		}
+		for side in range(1 if order_kind else 2):
+			for occ in range(3 if name == "order" else 1 if order_kind else MAX_OCCURRENCES):
 				records.append(
 					{
 						"kind": name,

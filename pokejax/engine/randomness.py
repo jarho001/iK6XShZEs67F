@@ -8,7 +8,9 @@ KIND_NAMES; append a name to add a kind without changing existing addresses.
 order: side must be 0; value is the first side (0/1). Occurrences are tie
 contexts ACTION_ORDER=0, SWITCH_IN_ORDER=1, locked-move residual=2,
 WEATHER_ORDER=3, WEATHER_CHANGE_ORDER=4, SWITCH_HANDLER_ORDER=5,
-poison/toxic residual=6, burn residual=7, and partial-trap residual=8.
+poison/toxic residual=6, burn residual=7, partial-trap residual=8, and ability
+residual=9. Ability and held-item residual handler shuffles have their own
+one-slot outcome kinds; Roost's type-reset shuffle has its own one-slot kind.
 hit: side is attacker, occurrence is hit index, value 1=hit, 0=miss. Consult
 only if the move checks accuracy. crit: same address axes, value 1=crit, 0=no.
 damage_roll: same axes, value 0..15 is Showdown random(16), multiplying damage
@@ -25,6 +27,10 @@ then 15% each for 4 and 5.
 drag_in: side being dragged, occurrence 0, value is the selected fixed team slot
 0..5. This forces the chosen member; unforced sampling is uniform over its
 currently usable bench.
+ability_chance: on-hit ability randomChance outcomes, occurrence 2 * hit index
+for the defending Pokemon and 2 * hit index + 1 for the attacker. effect_spore
+is Showdown random(100). Harvest and residual_chance address their end-of-turn
+ability chances by holder side.
 
 The step draws a table of random bits once, addressed by kind, side and occurrence. integer
 requires n>0; chance requires 0<=numerator<=denominator and denominator>0.
@@ -55,6 +61,13 @@ OUTCOME_KINDS = (
 	("lock_duration", 1),
 	("magnitude", 99),
 	("drag_in", 5),
+	("ability_chance", 1),
+	("effect_spore", 99),
+	("harvest", 1),
+	("residual_chance", 1),
+	("ability_residual_order", 1),
+	("item_residual_order", 1),
+	("roost_residual_order", 1),
 )
 KIND_NAMES = tuple(name for name, _ in OUTCOME_KINDS)
 NUM_KINDS = len(KIND_NAMES)
@@ -69,6 +82,13 @@ STALL_SUCCESS, TRAP_DURATION, LOCK_DURATION = map(
 )
 MAGNITUDE = KIND_NAMES.index("magnitude")
 DRAG_IN = KIND_NAMES.index("drag_in")
+ABILITY_CHANCE, EFFECT_SPORE, HARVEST = map(
+	KIND_NAMES.index, ("ability_chance", "effect_spore", "harvest")
+)
+RESIDUAL_CHANCE = KIND_NAMES.index("residual_chance")
+ABILITY_RESIDUAL_ORDER = KIND_NAMES.index("ability_residual_order")
+ITEM_RESIDUAL_ORDER = KIND_NAMES.index("item_residual_order")
+ROOST_RESIDUAL_ORDER = KIND_NAMES.index("roost_residual_order")
 OUTCOME_MAXIMUM = tuple(maximum for _, maximum in OUTCOME_KINDS)
 OUTCOME_MINIMUM = tuple(2 if name == "hit_count" else 0 for name, _ in OUTCOME_KINDS)
 (
@@ -103,7 +123,10 @@ def forced_from_records(records, *, host=False) -> Forced:
 			raise ValueError("Outcome axes and value must be integers")
 		if not 0 <= side < NUM_SIDES or not 0 <= occ < MAX_OCCURRENCES:
 			raise ValueError("Outcome address out of range")
-		if kind == ORDER and (side != 0 or occ not in tuple(range(9))):
+		order_kinds = (ORDER, ABILITY_RESIDUAL_ORDER, ITEM_RESIDUAL_ORDER, ROOST_RESIDUAL_ORDER)
+		if kind in order_kinds and (
+			side != 0 or (kind != ORDER and occ != 0) or occ not in tuple(range(MAX_OCCURRENCES))
+		):
 			raise ValueError("Invalid order context")
 		minimum, maximum = OUTCOME_MINIMUM[kind], OUTCOME_MAXIMUM[kind]
 		if not minimum <= value <= maximum:

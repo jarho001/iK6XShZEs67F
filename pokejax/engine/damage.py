@@ -52,6 +52,7 @@ from .state import (
 	HEALTHY,
 	HP,
 	POISON,
+	SLOW_START,
 	SMACKDOWN,
 	TWO_TURN_MOVE,
 )
@@ -178,6 +179,10 @@ def move_damage_bases(
 	defense_effective = scale_stat_stage(defense, defense_stages)
 	fire = type_ == t.fire_type
 	user_status = state.status[side, user]
+	user_hp = state.hp[side, user].astype(jnp.int32)
+	user_max = state.stats[side, user, HP].astype(jnp.int32)
+	low_hp_half = (2 * user_hp <= user_max) & (user_max > 0)
+	low_hp_third = (3 * user_hp <= user_max) & (user_max > 0)
 	flash_boost = fire & (state.volatiles[side, FLASH_FIRE] > 0)
 	attack_effective, attack_modifier = attack_modifiers(
 		rows,
@@ -187,6 +192,11 @@ def move_damage_bases(
 		user_status,
 		fire | (type_ == t.ice_type),
 		flash_boost,
+		low_hp_half,
+		low_hp_third,
+		type_,
+		t,
+		state.volatiles[side, SLOW_START] > 0,
 	)
 	attack_effective = apply_stat_modifier(
 		attack_effective, side, attack_index, item_rows, attack_modifier

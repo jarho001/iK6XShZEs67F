@@ -34,7 +34,12 @@ function withItemDefaults(record) {
 			}
 		}
 	}
-	for (const name of ['berry-eachEvent-Update', 'benign-item-switchIn-order']) {
+	for (const name of [
+		'berry-eachEvent-Update',
+		'benign-item-switchIn-order',
+		'independent-slowstart-switchIn-order',
+		'choice-disable-move-order',
+	]) {
 		if (copy.stats?.exceptions) copy.stats.exceptions[name] ??= 0;
 	}
 	return copy;
@@ -162,6 +167,22 @@ test('dragged replacements record the selected fixed team slot', () => {
 			kind: 'drag_in', side: 0, occurrence: 0,
 			value: fixed[0].indexOf(selected),
 		}]);
+	} finally { battle.destroy(); }
+});
+
+test('switch legality distinguishes a possible trap from an active hidden trap', () => {
+	const battle = createBattle(battles[0]);
+	try {
+		const side = battle.sides[0];
+		const fixed = [...side.pokemon];
+		const request = side.activeRequest.active[0];
+		request.maybeTrapped = true;
+		assert(!request.trapped);
+		assert(!side.active[0].trapped);
+		assert(legalChoices(side, fixed).some(choice => choice.action >= 4));
+		assert(side.active[0].tryTrap(true));
+		assert.equal(side.active[0].trapped, 'hidden');
+		assert(!legalChoices(side, fixed).some(choice => choice.action >= 4));
 	} finally { battle.destroy(); }
 });
 

@@ -7,7 +7,18 @@ import numpy as np
 
 from pokejax.tables import Tables
 
-from .abilities import ability_cures, berry_allowed, reveal_abilities, status_immunity
+from .abilities import (
+	DAMAGE_TAKEN,
+	DAMAGE_TAKEN_STURDY,
+	MAGIC_GUARD,
+	SPEED,
+	SPEED_UNBURDEN,
+	ability_cures,
+	berry_allowed,
+	has_hook,
+	reveal_abilities,
+	status_immunity,
+)
 from .modifiers import chain, modify
 from .move_data import read_move
 from .state import (
@@ -23,6 +34,7 @@ from .state import (
 	SUN,
 	TEAM_SLOTS,
 	TOXIC,
+	UNBURDEN,
 )
 
 SIDES = jnp.arange(2)
@@ -33,6 +45,14 @@ BERRY_LUM, BERRY_SITRUS, BERRY_CHESTO, BERRY_CUSTAP = range(1, 5)
 DAMAGE_NONE, DAMAGE_LIFE_ORB, DAMAGE_EXPERT_BELT = range(3)
 DAMAGE_TAKEN_NONE, DAMAGE_TAKEN_FOCUS_SASH = range(2)
 CONTACT_NONE, CONTACT_ROCKY_HELMET = range(2)
+
+
+def damage_survival(full_hp_lethal, endure, ability_row, item_kind):
+	"""Sturdy has an earlier damage priority than Focus Sash."""
+	eligible = full_hp_lethal & ~endure
+	sturdy = eligible & (ability_row[DAMAGE_TAKEN] == DAMAGE_TAKEN_STURDY)
+	sash = eligible & ~sturdy & (item_kind == DAMAGE_TAKEN_FOCUS_SASH)
+	return sturdy, sash
 
 
 class ItemHookTable(NamedTuple):
@@ -58,6 +78,7 @@ CHOICE = 22
 WEATHER_KIND = 23
 WEATHER_DURATION = 24
 CRIT_BONUS = 25
+HARVEST_BERRY = 26
 
 
 class ActiveItemRows(NamedTuple):
@@ -109,6 +130,7 @@ def build_item_hook_table(tables: Tables) -> ItemHookTable:
 	weather_kind = np.zeros(item_count, dtype=np.int8)
 	weather_duration = np.zeros(item_count, dtype=np.uint8)
 	crit_bonus = np.zeros(item_count, dtype=np.int8)
+	harvest_berry = tables.items.is_berry.astype(np.bool_)
 
 	def set_stat(item, stat, numerator):
 		stat_modifier[tables.items.index[item], stat] = numerator
@@ -258,6 +280,7 @@ def build_item_hook_table(tables: Tables) -> ItemHookTable:
 			weather_kind[:, None],
 			weather_duration[:, None],
 			crit_bonus[:, None],
+			harvest_berry[:, None],
 		),
 		axis=1,
 	).astype(np.int16)
@@ -323,7 +346,7 @@ def reveal_active_items(state, sides):
 	return update_item_state(state, jnp.zeros((2,), jnp.bool_), sides)
 
 
-def update_item_state(state, consumed_sides, revealed_sides):
+def update_item_state(state, consumed_sides, revealed_sides, tables=None):
 	"""Write consumption and reveal events through one dense active-slot mask."""
 	held = state.item[SIDES, state.active]
 	consume = consumed_sides & (held != 0)
@@ -331,17 +354,24 @@ def update_item_state(state, consumed_sides, revealed_sides):
 	slots = jnp.arange(TEAM_SLOTS)[None, :] == state.active[:, None]
 	consume_mask = consume[:, None] & slots
 	reveal_mask = reveal[:, None] & slots
+	volatiles = state.volatiles
+	if tables is not None:
+		ability_rows = tables.ability_hooks[state.ability[SIDES, state.active].astype(jnp.int32)]
+		unburden = (ability_rows[:, SPEED] == SPEED_UNBURDEN) & consume
+		columns = jnp.arange(state.volatiles.shape[1])
+		volatiles = jnp.where(unburden[:, None] & (columns[None, :] == UNBURDEN), 1, volatiles)
 	return state._replace(
 		item=jnp.where(consume_mask, 0, state.item),
 		item_consumed=state.item_consumed | consume_mask,
 		item_revealed=state.item_revealed | reveal_mask,
 		item_public=jnp.where(reveal_mask, held[:, None], state.item_public),
+		volatiles=volatiles,
 	)
 
 
-def consume_active_items(state, sides):
+def consume_active_items(state, sides, tables=None):
 	"""Consume active items through one consolidated dense member write."""
-	return update_item_state(state, sides, jnp.zeros((2,), jnp.bool_))
+	return update_item_state(state, sides, jnp.zeros((2,), jnp.bool_), tables)
 
 
 def item_type_matches(type_, side, rows):
@@ -359,7 +389,9 @@ def item_base_power_modifier(side, type_, gem_trigger, damage_kind, rows):
 	return jnp.where(gem_hook, 6144, jnp.where(type_hook, 4915, 4096)).astype(jnp.int32)
 
 
-def apply_after_move_items(state, side, move, enabled, move_hit, rows, tables, sheer=False):
+def apply_after_move_items(
+	state, side, move, enabled, move_hit, rows, tables, sheer=False, abilities=None
+):
 	"""Resolve White Herb and Life Orb after a move's normal hit effects."""
 	row = read_move(tables, move)
 	negative = jnp.any(state.boosts < 0, axis=1)
@@ -373,6 +405,8 @@ def apply_after_move_items(state, side, move, enabled, move_hit, rows, tables, s
 	user_side = SIDES == side
 	recoil = user_side & enabled & move_hit & (rows.damage_kind == DAMAGE_LIFE_ORB)
 	recoil &= ~jnp.asarray(sheer) & (row.move_category != 2)
+	if abilities is not None:
+		recoil &= ~has_hook(abilities[side], MAGIC_GUARD)
 	user = state.active[side]
 	maximum = state.stats[side, user, HP].astype(jnp.int32)
 	hp = state.hp[side, user].astype(jnp.int32)
@@ -390,7 +424,7 @@ def gather_active_update_hooks(state, tables):
 	return ActiveItemUpdateHooks(rows[:, BERRY_KIND], rows[:, BOOST_RESTORE] != 0)
 
 
-def update_active_items(state, enabled, rows, abilities=None, ignore_confusion=False):
+def update_active_items(state, enabled, rows, abilities=None, ignore_confusion=False, tables=None):
 	"""Resolve active cures and held-item updates in event order."""
 	active = state.active
 	hp = state.hp[SIDES, active].astype(jnp.int32)
@@ -438,7 +472,7 @@ def update_active_items(state, enabled, rows, abilities=None, ignore_confusion=F
 		hp=hp_team,
 		boosts=boosts,
 	)
-	return consume_active_items(state, consume | white_herb)
+	return consume_active_items(state, consume | white_herb, tables)
 
 
 def clear_broken_choice_locks(state, tables):
@@ -454,7 +488,7 @@ def clear_broken_choice_locks(state, tables):
 	return state._replace(volatiles=jnp.where(mask, 0, state.volatiles))
 
 
-def residual_hp_item(state, enabled, tables, rows):
+def residual_hp_item(state, enabled, tables, rows, abilities=None):
 	"""Calculate Leftovers and Black Sludge effects for both holders."""
 	hp = state.hp[SIDES, state.active].astype(jnp.int32)
 	maximum = state.stats[SIDES, state.active, HP].astype(jnp.int32)
@@ -466,16 +500,18 @@ def residual_hp_item(state, enabled, tables, rows):
 	heal_hook = (kind == RESIDUAL_LEFTOVERS) | (sludge & poison_type)
 	heal = active & heal_hook & (hp < maximum)
 	damage = jnp.where(active & sludge & ~poison_type, jnp.maximum(maximum // 8, 1), 0)
+	if abilities is not None:
+		damage = jnp.where(has_hook(abilities, MAGIC_GUARD), 0, damage)
 	healing = jnp.minimum(maximum - hp, jnp.maximum(maximum // 16, 1))
 	return jnp.where(heal, healing, 0), damage
 
 
-def apply_residual_white_herb(state, enabled, rows):
+def apply_residual_white_herb(state, enabled, rows, tables=None):
 	active = enabled & (state.hp[SIDES, state.active] > 0)
 	trigger = active & rows.boost_restore & jnp.any(state.boosts < 0, axis=1)
 	cleared = jnp.where(state.boosts < 0, 0, state.boosts)
 	state = state._replace(boosts=jnp.where(trigger[:, None], cleared, state.boosts))
-	return consume_active_items(state, trigger)
+	return consume_active_items(state, trigger, tables)
 
 
 def apply_residual_status_items(state, enabled, key, forced, tables, rows, abilities, weather):

@@ -5,14 +5,22 @@ import jax.numpy as jnp
 from pokejax.mechanics.stat_stage import scale_stat_stage
 
 from .abilities import (
+	BOOST_EVENT,
+	BOOST_EVENT_DEFIANT,
+	RESIDUAL,
+	RESIDUAL_SLOW_START,
 	START,
 	START_ANNOUNCE,
 	START_ANTICIPATION,
 	START_DOWNLOAD,
 	START_FRISK,
 	START_INTIMIDATE,
+	SWITCH_OUT,
+	SWITCH_OUT_NATURAL_CURE,
+	SWITCH_OUT_REGENERATOR,
 	WEATHER,
 	active_abilities,
+	apply_boost_delta,
 	boost_delta,
 	effective_weather,
 	move_abilities,
@@ -26,11 +34,13 @@ from .order import active_speed
 from .randomness import DRAG_IN, SWITCH_HANDLER_ORDER, UNFORCED, first_side, integer
 from .state import (
 	DEF,
+	HEALTHY,
+	HP,
 	NUM_VOLATILES,
 	ONGOING,
 	QUICK_GUARD,
-	ROOST,
 	SLEEP,
+	SLOW_START,
 	SPD,
 	TEAM_SLOTS,
 	TOXIC,
@@ -38,15 +48,44 @@ from .state import (
 )
 
 
-def switch_members(state, switch_mask, targets):
+def switch_members(state, switch_mask, targets, tables=None, rows=None):
 	"""Replace selected active members, clearing active-only state densely."""
 	outgoing = state.active
+	if rows is None and tables is not None:
+		rows = active_abilities(state, tables)
+	if rows is not None:
+		old_hp = state.hp[SIDES, outgoing].astype(jnp.int32)
+		maximum = state.stats[SIDES, outgoing, HP].astype(jnp.int32)
+		old_status = state.status[SIDES, outgoing]
+		regenerator = (rows[:, SWITCH_OUT] == SWITCH_OUT_REGENERATOR) & (old_hp > 0)
+		natural_cure = (rows[:, SWITCH_OUT] == SWITCH_OUT_NATURAL_CURE) & (old_hp > 0)
+		healed = jnp.minimum(maximum, old_hp + jnp.maximum(maximum // 3, 1))
+		old_slots = jnp.arange(TEAM_SLOTS)[None, :] == outgoing[:, None]
+		heal_write = old_slots & switch_mask[:, None] & regenerator[:, None]
+		cure_write = old_slots & switch_mask[:, None] & natural_cure[:, None]
+		state = state._replace(
+			hp=jnp.where(heal_write, healed[:, None].astype(state.hp.dtype), state.hp),
+			status=jnp.where(cure_write, HEALTHY, state.status),
+			status_counter=jnp.where(cure_write, 0, state.status_counter),
+		)
+		# Regenerator's Gen 5 HP change has no protocol ability tag. Natural
+		# Cure does, through its explicit curestatus message.
+		revealed = natural_cure & (old_status != HEALTHY)
+		state = reveal_abilities(state, switch_mask & revealed)
 	active = jnp.where(switch_mask, targets, outgoing).astype(state.active.dtype)
 	boosts = jnp.where(switch_mask[:, None], 0, state.boosts)
 	columns = jnp.arange(NUM_VOLATILES)
 	side_condition = (columns == QUICK_GUARD) | (columns == WIDE_GUARD)
 	clear_volatile = switch_mask[:, None] & ~side_condition[None, :]
 	volatiles = jnp.where(clear_volatile, 0, state.volatiles)
+	if tables is not None:
+		incoming_rows = tables.ability_hooks[state.ability[SIDES, targets].astype(jnp.int32)]
+		starts_slow = incoming_rows[:, RESIDUAL] == RESIDUAL_SLOW_START
+		volatiles = jnp.where(
+			switch_mask[:, None] & (columns[None, :] == SLOW_START),
+			jnp.where(starts_slow, 5, 0)[:, None],
+			volatiles,
+		)
 
 	slots = jnp.arange(TEAM_SLOTS)
 	outgoing_mask = slots[None, :] == outgoing[:, None]
@@ -54,9 +93,9 @@ def switch_members(state, switch_mask, targets):
 	clear_fainted = switch_mask & (outgoing != targets) & (state.hp[SIDES, outgoing] == 0)
 	status_team = jnp.where(outgoing_mask & clear_fainted[:, None], 0, state.status)
 	status_counter_team = jnp.where(outgoing_mask & clear_fainted[:, None], 0, state.status_counter)
-	restore_roost = switch_mask & (state.volatiles[:, ROOST] > 0)
+	restore_roost = switch_mask
 	types = jnp.where(
-		(restore_roost[:, None] & outgoing_mask)[:, :, None], state.roost_types, state.types
+		(restore_roost[:, None] & outgoing_mask)[:, :, None], state.base_types, state.types
 	)
 	target_seen = state.seen_order[SIDES, targets]
 	next_seen = jnp.max(state.seen_order, axis=1) + 1
@@ -86,14 +125,14 @@ def switch_members(state, switch_mask, targets):
 	)
 
 
-def switch_actions(state, actions, switch_mask):
+def switch_actions(state, actions, switch_mask, tables=None, rows=None):
 	"""Translate action IDs 4..8 to fixed team slots and switch both sides."""
 	choices = jnp.clip(actions - 4, 0, 4)
 	targets = choices + (choices >= state.active)
-	return switch_members(state, switch_mask, targets)
+	return switch_members(state, switch_mask, targets, tables, rows)
 
 
-def drag_in(state, side, enabled, key, forced, tables, source=None):
+def drag_in(state, side, enabled, key, forced, tables, source=None, rows=None):
 	"""Uniformly select a usable bench member and run its normal hazards."""
 	slots = jnp.arange(TEAM_SLOTS)
 	eligible = (state.hp[side] > 0) & (slots != state.active[side])
@@ -108,7 +147,7 @@ def drag_in(state, side, enabled, key, forced, tables, source=None):
 	active = enabled & (count > 0) & forced_valid
 	switch_mask = (SIDES == side) & active
 	targets = jnp.where(switch_mask, target, state.active)
-	state = switch_members(state, switch_mask, targets)
+	state = switch_members(state, switch_mask, targets, tables, rows)
 	state, rows = run_switch_in(state, switch_mask, side, tables, source)
 	return (state, switch_mask) if source is None else (state, switch_mask, rows)
 
@@ -163,15 +202,17 @@ def run_switch_in(state, switchers, first, tables, mold_source=None, previous=No
 		old_start = starts & early & old_alive[::-1]
 		old_intimidate = (old_start & (start == START_INTIMIDATE))[::-1]
 		old_frisk = (old_start & (start == START_FRISK))[::-1] & (old_items.ids != 0)
-		delta = -((jnp.arange(7) == 0) & old_intimidate[:, None]).astype(jnp.int8)
-		delta = boost_delta(delta, old_abilities, True)
-		boosts = old.boosts + delta
+		old_delta = -((jnp.arange(7) == 0) & old_intimidate[:, None]).astype(jnp.int8)
+		delta = boost_delta(old_delta, old_abilities, True)
+		boosts = apply_boost_delta(old.boosts, old_delta, old_abilities, True)
+		defiant = old_abilities[:, BOOST_EVENT] == BOOST_EVENT_DEFIANT
+		defiant_revealed = old_intimidate & defiant & (boosts[:, 0] > old.boosts[:, 0])
 		blocked = old_intimidate & (delta[:, 0] == 0) & (old.boosts[:, 0] > -6)
 		# Only the outgoing target's item and public ability can survive its switch.
 		temporary = state._replace(active=old.active, ability=old.ability)
 		herb = old_intimidate & old_items.boost_restore & jnp.any(boosts < 0, axis=1)
-		temporary = update_item_state(temporary, herb, old_frisk)
-		temporary = reveal_abilities(temporary, blocked)
+		temporary = update_item_state(temporary, herb, old_frisk, tables)
+		temporary = reveal_abilities(temporary, blocked | defiant_revealed)
 		state = state._replace(
 			item=temporary.item,
 			item_consumed=temporary.item_consumed,
@@ -214,8 +255,11 @@ def run_switch_in(state, switchers, first, tables, mold_source=None, previous=No
 	up = download[:, None] & (stages == download_stat[:, None])
 	intimidate_active = (intimidate & ~early)[::-1]
 	down = intimidate_active[:, None] & (stages == 0)
-	delta = boost_delta(up.astype(jnp.int8) - down.astype(jnp.int8), rows, True)
-	boosts = jnp.clip(state.boosts + delta, -6, 6)
+	raw_delta = up.astype(jnp.int8) - down.astype(jnp.int8)
+	delta = boost_delta(raw_delta, rows, True)
+	boosts = apply_boost_delta(state.boosts, raw_delta, rows, True)
+	defiant_revealed = rows[:, BOOST_EVENT] == BOOST_EVENT_DEFIANT
+	defiant_revealed &= jnp.any(delta < 0, axis=-1) & (boosts[:, 0] > state.boosts[:, 0])
 	blocked_intimidate = (
 		intimidate_active & (delta[:, 0] == 0) & (state.boosts[:, 0] > -6) & ~up[:, 0]
 	)
@@ -245,5 +289,5 @@ def run_switch_in(state, switchers, first, tables, mold_source=None, previous=No
 		| frisk
 		| anticipation
 	)
-	revealed |= weather_changed
+	revealed |= weather_changed | defiant_revealed
 	return reveal_abilities(state, revealed), rows

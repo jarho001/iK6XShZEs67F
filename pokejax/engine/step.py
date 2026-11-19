@@ -8,7 +8,11 @@ import jax.numpy as jnp
 from jax import lax
 
 from .abilities import (
+	CONTACT,
+	CONTACT_COLOR_CHANGE,
 	OWN_TEMPO,
+	PP_COST,
+	PP_COST_PRESSURE,
 	SHEER_FORCE,
 	active_abilities,
 	effective_weather,
@@ -18,8 +22,8 @@ from .abilities import (
 )
 from .actions import SIDES, move_availability
 from .boosts import apply_boosts
-from .damage_effects import SELF_FAINT_ALWAYS, apply_damage_effects
-from .field import apply_move_field_effects
+from .damage_effects import SELF_FAINT_ALWAYS, apply_damage_effects, apply_poison_touch
+from .field import apply_move_field_effects, effective_move_type
 from .items import (
 	apply_after_move_items,
 	clear_broken_choice_locks,
@@ -101,7 +105,9 @@ def _move(
 		FAKE_OUT_USED,
 		jnp.where(started, 1, state.volatiles[side, FAKE_OUT_USED]),
 	)
-	state, enabled = before_move(state, side, row, enabled, key, forced, tables, recharge=recharge)
+	state, enabled = before_move(
+		state, side, row, enabled, key, forced, tables, ability_rows, recharge=recharge
+	)
 	move_enabled = enabled
 	choice_start = move_enabled & item_rows.choice[side]
 	choice_start &= state.volatiles[side, CHOICE_MOVE] == 0
@@ -117,7 +123,13 @@ def _move(
 	slot = jnp.minimum(action, 3)
 	pp = state.pp[side, user, slot].astype(jnp.int32)
 	consume_pp = enabled & ~recharge & ~continuation & ~struggle
-	new_pp = jnp.maximum(pp - consume_pp, 0).astype(state.pp.dtype)
+	pressure = rows[foe, PP_COST] == PP_COST_PRESSURE
+	pressure_target_alive = state.hp[foe, state.active[foe]] > 0
+	user_types = state.types[side, user]
+	curse_self = (row.move_volatile_status == 5) & ~jnp.any(user_types == tables.ghost_type)
+	pressure_target = row.move_pressure_target & ~curse_self
+	pp_cost = 1 + (pressure & pressure_target_alive & pressure_target).astype(jnp.int32)
+	new_pp = jnp.maximum(pp - consume_pp.astype(jnp.int32) * pp_cost, 0).astype(state.pp.dtype)
 	revealed = state.revealed_moves[side, user, slot] | (enabled & ~recharge & ~struggle)
 	team_slots = jnp.arange(TEAM_SLOTS)
 	move_slots = jnp.arange(state.pp.shape[-1])
@@ -205,6 +217,26 @@ def _move(
 		sheer,
 		item_rows,
 	)
+	state = apply_poison_touch(state, side, row, result.landed, key, forced, tables, rows)
+	color_change = rows[foe, CONTACT] == CONTACT_COLOR_CHANGE
+	color_type = effective_move_type(state, row, tables, weather).astype(state.types.dtype)
+	color_target = state.active[foe]
+	color_types = state.types[foe, color_target]
+	color_trigger = attack_allowed & result.success & color_change & (row.move_category != 2)
+	color_trigger &= (state.hp[foe, color_target] > 0) & (color_type >= 0)
+	color_trigger &= ~jnp.any(color_types == color_type)
+	color_member = (SIDES == foe)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == color_target)
+	changed_types = jnp.stack((color_type, jnp.asarray(-1, state.types.dtype)))
+	types = jnp.where(
+		color_member[:, :, None] & color_trigger,
+		changed_types,
+		state.types,
+	)
+	roosting = state.volatiles[foe, ROOST] > 0
+	roost_target = color_member & color_trigger & roosting
+	roost_types = jnp.where(roost_target[:, :, None], changed_types, state.roost_types)
+	state = state._replace(types=types, roost_types=roost_types)
+	state = reveal_abilities(state, (SIDES == foe) & color_trigger)
 	state = after_hit(state, side, row, attack_allowed & result.success, tables, weather)
 	state = apply_move_field_effects(
 		state, side, row, attack_allowed, result.field_hit, hit, key, forced, tables, item_rows
@@ -213,14 +245,18 @@ def _move(
 		state, side, row, attack_allowed & result.field_hit, key, forced, tables, ability_rows
 	)
 	user_alive_before_after_move_item = state.hp[side, user] > 0
+	post_ability = tables.ability_hooks[state.ability[side, user].astype(jnp.int32)]
+	post_ability_rows = jnp.where((SIDES == side)[:, None], post_ability[None, :], ability_rows)
+	post_sheer = has_hook(post_ability_rows[side], SHEER_FORCE) & row.move_sheer_force
 	state, herb, life_orb = apply_after_move_items(
-		state, side, row, move_enabled, hit, item_rows, tables, sheer
+		state, side, row, move_enabled, hit, item_rows, tables, post_sheer, post_ability_rows
 	)
 	# Every event still refers to the same two item holders until a drag.
 	state = update_item_state(
 		state,
 		result.item_consumptions | lum_between_hits | herb,
 		result.item_reveals | life_orb,
+		tables,
 	)
 	lock_continuation = locked & move_enabled
 	lock_remaining = state.volatiles[side, LOCKED_REMAINING]
@@ -254,7 +290,9 @@ def _move(
 	pivot = enabled & row.move_self_switch & hit & user_alive
 	pivot &= jnp.any(bench_alive)
 	drag = enabled & row.move_force_switch & hit & user_alive_before_after_move_item & target_alive
-	state, dragged, ability_rows = drag_in(state, foe, drag, key, forced, tables, side)
+	state, dragged, ability_rows = drag_in(
+		state, foe, drag, key, forced, tables, side, ability_rows
+	)
 	# A final hit can run Update before the queue declares the winner.
 	# Fatigue confusion starts later, so only an ongoing game can cure it here.
 	alive_after = jnp.any(state.hp > 0, axis=1)
@@ -267,6 +305,7 @@ def _move(
 		gather_active_update_hooks(state, tables),
 		ability_rows,
 		ignore_confusion,
+		tables,
 	)
 	hp = state.hp.astype(jnp.int32)
 	boosts = jnp.where((hp[SIDES, state.active] > 0)[:, None], state.boosts, 0)
@@ -275,11 +314,10 @@ def _move(
 
 def _resolve_action_winner(state, alive_before, alive, side, row):
 	"""Resolve a move's faint result before the next queued Showdown action."""
-	newly_dead = alive_before & ~alive
-	last_faint = jnp.where(row.move_self_faint == SELF_FAINT_ALWAYS, 1 - side, side)
-	last_faint = jnp.where(newly_dead[0] != newly_dead[1], newly_dead[1], last_faint)
+	del alive_before
 	winner = jnp.where(~alive[0], 1, 0)
-	winner = jnp.where(~jnp.any(alive), last_faint, winner)
+	double_ko_winner = jnp.where(row.move_self_faint == SELF_FAINT_ALWAYS, 1 - side, side)
+	winner = jnp.where(~jnp.any(alive), double_ko_winner, winner)
 	winner = jnp.where(jnp.all(alive), ONGOING, winner).astype(state.winner.dtype)
 	return state._replace(winner=jnp.where(state.winner == ONGOING, winner, state.winner))
 
@@ -341,7 +379,7 @@ def step(state, actions, key, forced, engine_tables):
 	# switch-in paths. Switches happen before the saved moves, as in Showdown.
 	switch_mask = (actions >= 4) & (requests != NONE) & ongoing
 	previous = (state, item_rows, ability_rows, start_turn)
-	state = switch_actions(state, actions, switch_mask)
+	state = switch_actions(state, actions, switch_mask, t, ability_rows)
 	item_rows = gather_active_items(state, t)
 	ability_rows = active_abilities(state, t)
 	handler_first = switch_handler_first(state, key, forced, item_rows, ability_rows)
@@ -349,7 +387,7 @@ def step(state, actions, key, forced, engine_tables):
 	state, ability_rows = run_switch_in(
 		state, switch_mask, handler_first, t, previous=previous, rows=ability_rows
 	)
-	state = update_active_items(state, jnp.any(switch_mask), item_rows, ability_rows)
+	state = update_active_items(state, jnp.any(switch_mask), item_rows, ability_rows, tables=t)
 
 	# Run the two fixed move slots through the same transition. A pivot masks
 	# any remaining slot until the player has chosen a replacement.
@@ -382,9 +420,6 @@ def step(state, actions, key, forced, engine_tables):
 		state = _resolve_action_winner(state, alive_before, alive, side, row)
 		return state, abilities, pivot_sides, alive
 
-	# GPU unrolling lets XLA fuse the two slots into the surrounding rollout.
-	# The compact loop keeps the CPU PPO compile tractable. The backend choice
-	# is resolved at lowering, independent of any batched battle values.
 	def run_queue(carry, *, unroll=False):
 		return lax.fori_loop(0, 2, execute, carry, unroll=unroll)
 

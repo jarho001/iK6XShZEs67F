@@ -8,11 +8,11 @@ Showdown commit: `1242c1e2d9763ba5b85d33f13aecb89bae19ae3d`
 
 | Kind | Distinct | Supported | Supported occurrences |
 | --- | ---: | ---: | ---: |
-| Moves | 223 | 170 | 82.2% |
-| Abilities | 126 | 77 | 62.9% |
+| Moves | 223 | 171 | 82.4% |
+| Abilities | 126 | 119 | 97.0% |
 | Items | 44 | 44 | 100.0% |
 
-Fully supported teams: 0.0%
+Fully supported teams: 0.7%
 
 ## Moves
 
@@ -117,7 +117,7 @@ Fully supported teams: 0.0%
 | highjumpkick | High Jump Kick | 604 | 6.0% | yes |
 | haze | Haze | 593 | 5.8% | yes |
 | iceshard | Ice Shard | 592 | 5.8% | yes |
-| curse | Curse | 587 | 5.8% | no |
+| curse | Curse | 587 | 5.8% | yes |
 | aurasphere | Aura Sphere | 587 | 5.8% | no |
 | moonlight | Moonlight | 572 | 5.7% | yes |
 | brickbreak | Brick Break | 574 | 5.6% | no |
@@ -249,59 +249,59 @@ Fully supported teams: 0.0%
 | levitate | Levitate | 3596 | 31.5% | yes |
 | pressure | Pressure | 2696 | 24.2% | yes |
 | intimidate | Intimidate | 2104 | 19.3% | yes |
-| sturdy | Sturdy | 1578 | 15.0% | no |
-| regenerator | Regenerator | 1411 | 13.4% | no |
-| prankster | Prankster | 1076 | 10.3% | no |
-| justified | Justified | 1066 | 10.3% | no |
+| sturdy | Sturdy | 1578 | 15.0% | yes |
+| regenerator | Regenerator | 1411 | 13.4% | yes |
+| prankster | Prankster | 1076 | 10.3% | yes |
+| justified | Justified | 1066 | 10.3% | yes |
 | guts | Guts | 1058 | 10.3% | yes |
-| torrent | Torrent | 1031 | 10.1% | no |
+| torrent | Torrent | 1031 | 10.1% | yes |
 | thickfat | Thick Fat | 1038 | 10.0% | yes |
 | waterabsorb | Water Absorb | 1026 | 10.0% | yes |
 | sheerforce | Sheer Force | 1010 | 9.8% | yes |
-| naturalcure | Natural Cure | 1020 | 9.8% | no |
+| naturalcure | Natural Cure | 1020 | 9.8% | yes |
 | clearbody | Clear Body | 926 | 9.0% | yes |
-| swarm | Swarm | 915 | 8.9% | no |
+| swarm | Swarm | 915 | 8.9% | yes |
 | swiftswim | Swift Swim | 896 | 8.7% | yes |
 | technician | Technician | 896 | 8.7% | yes |
-| overgrow | Overgrow | 884 | 8.6% | no |
+| overgrow | Overgrow | 884 | 8.6% | yes |
 | lightningrod | Lightning Rod | 835 | 8.2% | yes |
 | chlorophyll | Chlorophyll | 801 | 7.8% | yes |
 | flashfire | Flash Fire | 796 | 7.8% | yes |
-| blaze | Blaze | 764 | 7.5% | no |
+| blaze | Blaze | 764 | 7.5% | yes |
 | serenegrace | Serene Grace | 752 | 7.4% | yes |
 | tintedlens | Tinted Lens | 711 | 7.0% | yes |
-| defiant | Defiant | 696 | 6.8% | no |
-| hydration | Hydration | 685 | 6.8% | no |
+| defiant | Defiant | 696 | 6.8% | yes |
+| hydration | Hydration | 685 | 6.8% | yes |
 | sapsipper | Sap Sipper | 633 | 6.2% | yes |
 | rockhead | Rock Head | 603 | 6.0% | yes |
-| moxie | Moxie | 598 | 6.0% | no |
-| magicguard | Magic Guard | 598 | 5.9% | no |
+| moxie | Moxie | 598 | 6.0% | yes |
+| magicguard | Magic Guard | 598 | 5.9% | yes |
 | stormdrain | Storm Drain | 595 | 5.8% | yes |
 | voltabsorb | Volt Absorb | 587 | 5.7% | yes |
-| speedboost | Speed Boost | 576 | 5.7% | no |
+| speedboost | Speed Boost | 576 | 5.7% | yes |
 | insomnia | Insomnia | 552 | 5.4% | yes |
-| earlybird | Early Bird | 539 | 5.3% | no |
-| synchronize | Synchronize | 533 | 5.2% | no |
+| earlybird | Early Bird | 539 | 5.3% | yes |
+| synchronize | Synchronize | 533 | 5.2% | yes |
 | multitype | Multitype | 519 | 5.2% | no |
 | analytic | Analytic | 529 | 5.2% | yes |
 | waterveil | Water Veil | 502 | 5.0% | yes |
-| shedskin | Shed Skin | 487 | 4.8% | no |
+| shedskin | Shed Skin | 487 | 4.8% | yes |
 | battlearmor | Battle Armor | 471 | 4.7% | yes |
 | dryskin | Dry Skin | 462 | 4.6% | yes |
-| aftermath | Aftermath | 458 | 4.5% | no |
+| aftermath | Aftermath | 458 | 4.5% | yes |
 | adaptability | Adaptability | 450 | 4.4% | yes |
 | reckless | Reckless | 444 | 4.3% | yes |
-| static | Static | 434 | 4.3% | no |
+| static | Static | 434 | 4.3% | yes |
 | ironfist | Iron Fist | 430 | 4.3% | yes |
 | moldbreaker | Mold Breaker | 434 | 4.2% | yes |
 | sniper | Sniper | 417 | 4.1% | yes |
 | vitalspirit | Vital Spirit | 415 | 4.1% | yes |
 | scrappy | Scrappy | 414 | 4.1% | yes |
-| flamebody | Flame Body | 399 | 4.0% | no |
+| flamebody | Flame Body | 399 | 4.0% | yes |
 | innerfocus | Inner Focus | 391 | 3.9% | yes |
 | solidrock | Solid Rock | 370 | 3.7% | yes |
 | noguard | No Guard | 361 | 3.6% | yes |
-| shadowtag | Shadow Tag | 355 | 3.5% | no |
+| shadowtag | Shadow Tag | 355 | 3.5% | yes |
 | motordrive | Motor Drive | 354 | 3.5% | yes |
 | shellarmor | Shell Armor | 346 | 3.5% | yes |
 | drought | Drought | 345 | 3.4% | yes |
@@ -311,36 +311,36 @@ Fully supported teams: 0.0%
 | skilllink | Skill Link | 335 | 3.3% | yes |
 | sandstream | Sand Stream | 332 | 3.3% | yes |
 | magicbounce | Magic Bounce | 330 | 3.3% | no |
-| unburden | Unburden | 329 | 3.2% | no |
-| roughskin | Rough Skin | 324 | 3.2% | no |
+| unburden | Unburden | 329 | 3.2% | yes |
+| roughskin | Rough Skin | 324 | 3.2% | yes |
 | anticipation | Anticipation | 317 | 3.1% | yes |
 | frisk | Frisk | 310 | 3.1% | yes |
 | cloudnine | Cloud Nine | 304 | 3.0% | yes |
-| harvest | Harvest | 299 | 3.0% | no |
-| weakarmor | Weak Armor | 299 | 3.0% | no |
+| harvest | Harvest | 299 | 3.0% | yes |
+| weakarmor | Weak Armor | 299 | 3.0% | yes |
 | multiscale | Multiscale | 293 | 2.9% | yes |
 | owntempo | Own Tempo | 273 | 2.7% | yes |
 | simple | Simple | 264 | 2.6% | yes |
 | trace | Trace | 260 | 2.6% | no |
-| poisonheal | Poison Heal | 256 | 2.6% | no |
+| poisonheal | Poison Heal | 256 | 2.6% | yes |
 | quickfeet | Quick Feet | 256 | 2.6% | yes |
-| liquidooze | Liquid Ooze | 256 | 2.5% | no |
+| liquidooze | Liquid Ooze | 256 | 2.5% | yes |
 | teravolt | Teravolt | 239 | 2.4% | yes |
 | marvelscale | Marvel Scale | 224 | 2.2% | yes |
 | hustle | Hustle | 216 | 2.2% | yes |
 | turboblaze | Turboblaze | 215 | 2.1% | yes |
 | flowergift | Flower Gift | 210 | 2.1% | no |
-| magnetpull | Magnet Pull | 208 | 2.1% | no |
-| mummy | Mummy | 193 | 1.9% | no |
+| magnetpull | Magnet Pull | 208 | 2.1% | yes |
+| mummy | Mummy | 193 | 1.9% | yes |
 | unaware | Unaware | 194 | 1.9% | yes |
 | sandrush | Sand Rush | 190 | 1.9% | yes |
-| truant | Truant | 189 | 1.9% | no |
-| poisontouch | Poison Touch | 187 | 1.9% | no |
-| effectspore | Effect Spore | 185 | 1.9% | no |
+| truant | Truant | 189 | 1.9% | yes |
+| poisontouch | Poison Touch | 187 | 1.9% | yes |
+| effectspore | Effect Spore | 185 | 1.9% | yes |
 | contrary | Contrary | 184 | 1.8% | yes |
-| arenatrap | Arena Trap | 183 | 1.8% | no |
+| arenatrap | Arena Trap | 183 | 1.8% | yes |
 | imposter | Imposter | 181 | 1.8% | no |
-| colorchange | Color Change | 180 | 1.8% | no |
+| colorchange | Color Change | 180 | 1.8% | yes |
 | compoundeyes | Compound Eyes | 180 | 1.8% | yes |
 | filter | Filter | 178 | 1.8% | yes |
 | immunity | Immunity | 177 | 1.8% | yes |
@@ -353,23 +353,23 @@ Fully supported teams: 0.0%
 | limber | Limber | 167 | 1.7% | yes |
 | forecast | Forecast | 166 | 1.7% | no |
 | minus | Minus | 166 | 1.7% | yes |
-| icebody | Ice Body | 165 | 1.6% | no |
+| icebody | Ice Body | 165 | 1.6% | yes |
 | shielddust | Shield Dust | 164 | 1.6% | yes |
 | tangledfeet | Tangled Feet | 164 | 1.6% | yes |
 | toxicboost | Toxic Boost | 164 | 1.6% | yes |
-| stickyhold | Sticky Hold | 163 | 1.6% | no |
-| slowstart | Slow Start | 162 | 1.6% | no |
-| cursedbody | Cursed Body | 157 | 1.6% | no |
+| stickyhold | Sticky Hold | 163 | 1.6% | yes |
+| slowstart | Slow Start | 162 | 1.6% | yes |
+| cursedbody | Cursed Body | 157 | 1.6% | yes |
 | illusion | Illusion | 157 | 1.6% | no |
 | wonderskin | Wonder Skin | 157 | 1.6% | yes |
-| baddreams | Bad Dreams | 156 | 1.6% | no |
-| ironbarbs | Iron Barbs | 155 | 1.6% | no |
+| baddreams | Bad Dreams | 156 | 1.6% | yes |
+| ironbarbs | Iron Barbs | 155 | 1.6% | yes |
 | wonderguard | Wonder Guard | 152 | 1.5% | yes |
 | hugepower | Huge Power | 151 | 1.5% | yes |
-| raindish | Rain Dish | 148 | 1.5% | no |
+| raindish | Rain Dish | 148 | 1.5% | yes |
 | snowwarning | Snow Warning | 141 | 1.4% | yes |
 | superluck | Super Luck | 140 | 1.4% | yes |
-| defeatist | Defeatist | 130 | 1.3% | no |
+| defeatist | Defeatist | 130 | 1.3% | yes |
 | hypercutter | Hyper Cutter | 111 | 1.1% | yes |
 | leafguard | Leaf Guard | 80 | 0.8% | yes |
 
