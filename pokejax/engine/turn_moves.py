@@ -150,8 +150,13 @@ def apply_charge_boosts(state, side, move, enabled, tables, abilities):
 	return state._replace(boosts=boosts.astype(state.boosts.dtype))
 
 
-def apply_move_volatiles(state, side, move, hit, key, forced, tables, abilities):
-	"""Apply table-declared trap, lock and recharge volatiles after a hit."""
+def apply_move_volatiles(state, side, move, hit, key, forced, tables, abilities, connected=None):
+	"""Apply table-declared trap, lock and recharge volatiles after a hit.
+
+	Self volatiles (lock, recharge) follow the move connecting, which includes a hit that
+	the target's substitute absorbs. Trap and Smackdown need the target itself.
+	"""
+	connected = hit if connected is None else connected
 	row = read_move(tables, move)
 	foe = 1 - side
 	target = state.active[foe]
@@ -182,7 +187,7 @@ def apply_move_volatiles(state, side, move, hit, key, forced, tables, abilities)
 	member_mask = (SIDES == side)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == user_slot)
 	hp = jnp.where(member_mask, user_hp.astype(state.hp.dtype), state.hp)
 
-	lock_move = (row.move_self_volatile == 1) & hit
+	lock_move = (row.move_self_volatile == 1) & connected
 	new_lock = lock_move & (volatiles[side, LOCKED_MOVE] == 0)
 	continue_lock = lock_move & (volatiles[side, LOCKED_MOVE] == row.id)
 	true_duration = (integer(key, forced, LOCK_DURATION, side, 0, 2) + 2).astype(volatiles.dtype)
@@ -205,7 +210,7 @@ def apply_move_volatiles(state, side, move, hit, key, forced, tables, abilities)
 		volatiles,
 	)
 
-	recharge = (row.move_self_volatile == 2) & hit
+	recharge = (row.move_self_volatile == 2) & connected
 	volatiles = jnp.where(
 		(SIDES == side)[:, None] & recharge & (columns[None, :] == MUST_RECHARGE),
 		jnp.asarray(1, volatiles.dtype),

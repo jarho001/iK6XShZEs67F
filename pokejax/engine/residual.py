@@ -5,6 +5,8 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from .abilities import (
+	CONTACT,
+	CONTACT_LIQUID_OOZE,
 	MAGIC_GUARD,
 	OWN_TEMPO,
 	RESIDUAL,
@@ -22,6 +24,7 @@ from .abilities import (
 	reveal_abilities,
 )
 from .actions import SIDES
+from .delayed import trick_room_residual, wish_residual
 from .field import weather_residual
 from .items import (
 	HARVEST_BERRY,
@@ -42,12 +45,15 @@ from .randomness import (
 	chance,
 	integer,
 )
+from .restrictions import encore_residual, taunt_residual
 from .state import (
 	BOOST_SPE,
 	BURN,
 	CURSE,
 	DISABLE_MOVE,
 	DISABLE_REMAINING,
+	HP,
+	LEECH_SEED,
 	LOCKED_MOVE,
 	LOCKED_REMAINING,
 	LOCKED_TRUE_DURATION,
@@ -63,7 +69,9 @@ from .state import (
 	SUN,
 	TEAM_SLOTS,
 	TOXIC,
+	YAWN,
 )
+from .status import inflict_status
 from .volatiles import confuse_sides
 
 
@@ -135,7 +143,7 @@ def _status_damage(state, enabled, first, bench_alive, key, forced, speed_tie, r
 		state.status_counter,
 	)
 	state = state._replace(status_counter=counter)
-	return reveal_abilities(state, poison_heal & (healing > 0))
+	return reveal_abilities(state, enabled & poison_heal & (healing > 0))
 
 
 def _partial_trap(state, enabled, first, bench_alive, tables, item_rows, rows):
@@ -343,6 +351,60 @@ def _curse_residual(state, enabled, first, bench_alive, tables, item_rows, rows)
 	return state
 
 
+def _leech_pass(state, side, enabled, bench_alive, tables, rows):
+	"""One Leech Seed callback: the seeded side loses max HP / 8 to the seeder's slot.
+
+	The heal goes to the Pokemon in the seeder's slot. Liquid Ooze on the seeded
+	Pokemon turns the heal into damage for the seeder.
+	"""
+	seeder = 1 - side
+	seeded_slot = state.active[side]
+	seeder_slot = state.active[seeder]
+	seeded_hp = state.hp[side, seeded_slot].astype(jnp.int32)
+	seeder_hp = state.hp[seeder, seeder_slot].astype(jnp.int32)
+	seeder_max = state.stats[seeder, seeder_slot, HP].astype(jnp.int32)
+	seeded_max = state.stats[side, seeded_slot, HP].astype(jnp.int32)
+	live = enabled & (state.volatiles[side, LEECH_SEED] > 0) & (seeded_hp > 0) & (seeder_hp > 0)
+	magic = has_hook(rows[side], MAGIC_GUARD)
+	amount = jnp.where(live & ~magic, jnp.maximum(seeded_max // 8, 1), 0)
+	dealt = jnp.minimum(amount, seeded_hp)
+	ooze = rows[side, CONTACT] == CONTACT_LIQUID_OOZE
+	seeder_side = SIDES == seeder
+	damage = jnp.where(SIDES == side, dealt, 0) + jnp.where(seeder_side & ooze, dealt, 0)
+	room = jnp.maximum(seeder_max - seeder_hp, 0)
+	healing = jnp.where(seeder_side & ~ooze, jnp.minimum(dealt, room), 0)
+	# The seeded side's faint does not stop the seeder's heal in the same callback, so
+	# the seeder is the first side for the gate.
+	state, _ = _apply_damage(state, damage, live, seeder, bench_alive, healing)
+	state = reveal_abilities(state, (SIDES == side) & ooze & live)
+	return state, live
+
+
+def _leech_seed(state, enabled, first, bench_alive, key, forced, tables, rows):
+	"""Leech Seed (order 8), faster holder first."""
+	del key, forced
+	state, _ = _leech_pass(state, first, enabled, bench_alive, tables, rows)
+	state, _ = _leech_pass(state, 1 - first, enabled, bench_alive, tables, rows)
+	return state
+
+
+def _yawn(state, enabled, first, bench_alive, key, forced, tables, rows):
+	"""Yawn (order 23): the count ends, then the target falls asleep from the foe."""
+	del bench_alive
+	remaining = state.volatiles[:, YAWN].astype(jnp.int32)
+	tick = enabled & (remaining > 0)
+	left = jnp.where(tick, remaining - 1, remaining)
+	ends = tick & (left == 0)
+	columns = jnp.arange(NUM_VOLATILES)
+	volatiles = jnp.where(
+		columns[None, :] == YAWN, left[:, None].astype(state.volatiles.dtype), state.volatiles
+	)
+	state = state._replace(volatiles=volatiles)
+	for side in (first, 1 - first):
+		state = inflict_status(state, side, SLEEP, ends[side], key, forced, tables, rows)
+	return state
+
+
 # Rows are (Showdown order, suborder, name, scope, handler), sorted as the
 # pinned Gen 5 event dispatcher sorts them. Empty handlers are reserved for
 # pool mechanics added by later tasks; their rows establish the complete order.
@@ -353,31 +415,32 @@ RESIDUAL_TABLE = (
 	ResidualRow(0, 2, "Locked moves", "global", _locked_move),
 	ResidualRow(1, 5, "weather", "field", weather_residual),
 	ResidualRow(3, 3, "Future Sight", "slot", None),
-	ResidualRow(4, 3, "Wish", "slot", None),
+	ResidualRow(4, 3, "Wish", "global", wish_residual),
 	ResidualRow(5, 1, "Pledge field effects", "field", None),
 	ResidualRow(5, 2, "Grassy Terrain", "field", None),
 	ResidualRow(5, 3, "Hydration and Shed Skin", "pokemon", _ability_order5),
 	ResidualRow(5, 4, "Leftovers and Black Sludge", "pokemon", _item_hp),
 	ResidualRow(6, 2, "Aqua Ring", "pokemon", None),
 	ResidualRow(7, 2, "Ingrain", "pokemon", None),
-	ResidualRow(8, 2, "Leech Seed", "pokemon", None),
+	ResidualRow(8, 2, "Leech Seed", "ordered", _leech_seed),
 	ResidualRow(9, 2, "Poison, Toxic and Burn (order 10)", "status", _status_damage),
 	ResidualRow(11, 2, "Nightmare", "pokemon", None),
 	ResidualRow(12, 2, "Curse", "pokemon", _curse_residual),
 	ResidualRow(13, 2, "Partial trapping", "pokemon", _partial_trap),
-	ResidualRow(15, 2, "Taunt", "pokemon", None),
-	ResidualRow(16, 2, "Encore", "pokemon", None),
+	ResidualRow(15, 2, "Taunt", "global", taunt_residual),
+	ResidualRow(16, 2, "Encore", "global", encore_residual),
 	ResidualRow(17, 2, "Disable", "pokemon", _disable_residual),
 	ResidualRow(18, 2, "Magnet Rise", "pokemon", None),
 	ResidualRow(19, 2, "Telekinesis", "pokemon", None),
 	ResidualRow(20, 2, "Heal Block", "pokemon", None),
 	ResidualRow(21, 2, "Embargo", "pokemon", None),
 	ResidualRow(22, 2, "Throat Chop", "pokemon", None),
-	ResidualRow(23, 2, "Yawn", "pokemon", None),
+	ResidualRow(23, 2, "Yawn", "ordered", _yawn),
 	ResidualRow(24, 2, "Perish Song", "pokemon", None),
 	ResidualRow(25, 2, "Roost", "global", _end_roost),
 	ResidualRow(26, 1, "Side condition timers", "side", None),
-	ResidualRow(27, 1, "Field condition timers", "field", None),
+	ResidualRow(27, 1, "Trick Room timers", "global", trick_room_residual),
+	ResidualRow(27, 2, "Field condition timers", "field", None),
 	ResidualRow(
 		28, 2, "Speed Boost, Bad Dreams, Slow Start and Truant", "pokemon", _ability_order28
 	),
@@ -415,6 +478,10 @@ def residual(state, enabled, key, forced, tables, rows=None):
 			state = row.handler(state, active, key, forced, tables, item_rows)
 		elif row.scope == "status":
 			state = row.handler(state, active, faster, bench_alive, key, forced, speed_tie, rows)
+		elif row.scope == "ordered":
+			tie_first = _residual_tie_first(key, forced, 2)
+			first = jnp.where(speed_tie, tie_first, faster)
+			state = row.handler(state, active, first, bench_alive, key, forced, tables, rows)
 		elif row.scope == "pokemon":
 			context = 8 if row.order == 13 else 0 if row.order == 28 else 2
 			kind = ABILITY_RESIDUAL_ORDER if row.order == 28 else ORDER

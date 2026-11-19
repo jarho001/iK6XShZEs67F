@@ -55,6 +55,9 @@ from .variable_moves import (
 	TYPE_PLATE,
 )
 
+ARCEUS_NUM = 493
+GIRATINA_NUM = 487
+
 
 class _EngineTables(NamedTuple):
 	species_base_stats: jax.Array
@@ -99,6 +102,7 @@ class _EngineTables(NamedTuple):
 	hidden_power_type: jax.Array
 	plate_type: jax.Array
 	pursuit_id: jax.Array
+	item_take_species: jax.Array
 	move_table: MoveTable
 
 
@@ -352,6 +356,12 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 		RETURNED_DAMAGE
 	)
 	plate_types = np.full(len(tables.items.ids), -1, np.int32)
+	# Showdown onTakeItem refuses when the holder or the taker is Arceus (Plates) or Giratina
+	# (Griseous Orb): that is the species number this table records per item.
+	item_take_species = np.zeros(len(tables.items.ids), np.int32)
+	for item in PLATE_TYPES:
+		item_take_species[tables.items.index[item]] = ARCEUS_NUM
+	item_take_species[tables.items.index["griseousorb"]] = GIRATINA_NUM
 	for item, type_name in PLATE_TYPES.items():
 		plate_types[tables.items.index[item]] = tables.types.index[type_name]
 	hidden_power_types = np.asarray(
@@ -477,6 +487,15 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 		),
 		move_autotomize=rule_column(np.bool_, ((True, ("autotomize",)),)),
 		move_steal_berry=rule_column(np.bool_, ((True, ("bugbite", "pluck")),)),
+		move_bypass_sub=moves.flags[:, moves.flag_names.index("bypasssub")],
+		move_no_sleep_talk=moves.flags[:, moves.flag_names.index("nosleeptalk")],
+		move_failencore=moves.flags[:, moves.flag_names.index("failencore")],
+		move_sleep_usable=moves.sleep_usable,
+		move_slot_condition=moves.slot_condition,
+		move_trick_room=np.asarray(moves.ids) == "trickroom",
+		move_item_swap=np.isin(np.asarray(moves.ids), ("trick", "switcheroo")),
+		move_knock_off=np.asarray(moves.ids) == "knockoff",
+		move_sleep_talk=np.asarray(moves.ids) == "sleeptalk",
 	)
 	return EngineTables(
 		species_base_stats=jnp.asarray(tables.species.base_stats),
@@ -521,5 +540,6 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 		hidden_power_type=jnp.asarray(hidden_power_types),
 		plate_type=jnp.asarray(plate_types),
 		pursuit_id=jnp.asarray(np.asarray(moves.index["pursuit"], dtype=np.int32)),
+		item_take_species=jnp.asarray(item_take_species),
 		move_table=move_table,
 	)

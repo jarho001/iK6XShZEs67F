@@ -98,6 +98,8 @@ class MoveTable(RowTable):
 	volatile_status: NDArray[np.uint8]
 	self_volatile: NDArray[np.uint8]
 	breaks_protect: NDArray[np.bool_]
+	sleep_usable: NDArray[np.bool_]
+	slot_condition: NDArray[np.uint8]
 	target_names: tuple[str, ...]
 	flag_names: tuple[str, ...]
 
@@ -265,6 +267,8 @@ def _build_moves(rows, types, target_names, flag_names):
 		"volatile_status": np.zeros(count, dtype=np.uint8),
 		"self_volatile": np.zeros(count, dtype=np.uint8),
 		"breaks_protect": np.zeros(count, dtype=np.bool_),
+		"sleep_usable": np.zeros(count, dtype=np.bool_),
+		"slot_condition": np.zeros(count, dtype=np.uint8),
 	}
 	volatile_statuses = {
 		"protect": 1,
@@ -272,8 +276,15 @@ def _build_moves(rows, types, target_names, flag_names):
 		"partiallytrapped": 3,
 		"smackdown": 4,
 		"curse": 5,
+		"encore": 6,
+		"taunt": 7,
+		"disable": 8,
+		"leechseed": 9,
+		"yawn": 10,
 	}
-	self_volatiles = {"lockedmove": 1, "mustrecharge": 2}
+	# Substitute and Destiny Bond are volatiles on the user (Showdown target: self).
+	self_volatiles = {"lockedmove": 1, "mustrecharge": 2, "substitute": 3, "destinybond": 4}
+	slot_conditions = {"wish": 1, "healingwish": 2}
 	for row, move in enumerate(rows, start=1):
 		columns["confusion"][row] = move.get("volatileStatus") == "confusion"
 		columns["crit_always"][row] = move.get("willCrit", False)
@@ -354,10 +365,16 @@ def _build_moves(rows, types, target_names, flag_names):
 		columns["no_pp_boosts"][row] = move.get("noPPBoosts", False)
 		columns["stalling_move"][row] = move.get("stallingMove", False)
 		columns["volatile_status"][row] = volatile_statuses.get(move.get("volatileStatus"), 0)
-		columns["self_volatile"][row] = self_volatiles.get(
-			move.get("self", {}).get("volatileStatus"), 0
-		)
+		# Substitute and Destiny Bond name their volatile at the top level, with target self.
+		self_name = move.get("self", {}).get("volatileStatus")
+		if move.get("target") == "self":
+			self_name = self_name or move.get("volatileStatus")
+		columns["self_volatile"][row] = self_volatiles.get(self_name, 0)
 		columns["breaks_protect"][row] = move.get("breaksProtect", False)
+		columns["sleep_usable"][row] = move.get("sleepUsable", False)
+		columns["slot_condition"][row] = slot_conditions.get(
+			str(move.get("slotCondition", "")).lower(), 0
+		)
 		columns["type"][row] = types.index[_showdown_id(move["type"])]
 		columns["category"][row] = CATEGORY_INDEX[move["category"]]
 		columns["always_hits"][row] = move["accuracy"] is True

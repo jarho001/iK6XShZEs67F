@@ -62,10 +62,12 @@ from .state import (
 	PARALYSIS,
 	POISON,
 	SLEEP,
+	SUBSTITUTE,
 	SUN,
 	TEAM_SLOTS,
 )
 from .status import inflict_status, synchronize_status
+from .substitute import split_hits
 from .variable_moves import record_damage_taken
 
 NO_SELF_FAINT, SELF_FAINT_ALWAYS, SELF_FAINT_ON_HIT = 0, 1, 2
@@ -80,6 +82,8 @@ class HitResult(NamedTuple):
 	item_consumptions: jax.Array
 	item_reveals: jax.Array
 	ability_reveals: jax.Array
+	sub_hit: jax.Array
+	instafaint_kill: jax.Array
 
 
 def _round_fraction(value, numerator, denominator):
@@ -227,7 +231,10 @@ def apply_damage_effects(
 	self_faint_kind = row.move_self_faint
 	pre_faint = enabled & (self_faint_kind == SELF_FAINT_ALWAYS)
 
-	blocked = guarded | invulnerable
+	sub_hp = state.volatiles[foe, SUBSTITUTE].astype(jnp.int32)
+	sub_target = (sub_hp > 0) & row.move_target_foe & ~row.move_bypass_sub
+	# A status move aimed at a substitute fails with no effect (TryPrimaryHit returns null).
+	blocked = guarded | invulnerable | (sub_target & (row.move_category == 2))
 	checked_hit = accuracy_hit(
 		state, side, row, key, forced, t, rows, weather, switching_foe=switching_foe
 	)
@@ -282,11 +289,15 @@ def apply_damage_effects(
 		state, side, row, hit_indices, bases, key, forced, t, item_rows, rows, type_
 	)
 	move_success = enabled & ~blocked & checked_hit & can_damage
-	active_hits = (hit_indices < count) & move_success
+	scheduled = (hit_indices < count) & move_success
+	# Hits reach a standing substitute while the earlier hits leave it some HP.
+	sub_hits, sub_dealt = split_hits(jnp.where(sub_target, sub_hp, 0), damage, scheduled)
+	active_hits = scheduled & ~sub_hits
+	first_target = (hit_indices == jnp.argmax(active_hits)) & jnp.any(active_hits)
 	raw_active_damage = jnp.where(active_hits, damage, 0)
 	endure = state.volatiles[foe, ENDURE] > 0
 	target_maximum = state.stats[foe, target, HP].astype(jnp.int32)
-	lethal = active_hits[0] & (damage[0] >= target_hp_before)
+	lethal = jnp.any(first_target & (damage >= target_hp_before))
 	sturdy_trigger, sash_trigger = damage_survival(
 		lethal & (target_hp_before == target_maximum),
 		endure,
@@ -295,7 +306,7 @@ def apply_damage_effects(
 	)
 	reveal_ability |= (SIDES == foe) & sturdy_trigger
 	raw_active_damage = jnp.where(
-		(hit_indices == 0) & (sash_trigger | sturdy_trigger),
+		first_target & (sash_trigger | sturdy_trigger),
 		jnp.maximum(target_hp_before - 1, 0),
 		raw_active_damage,
 	)
@@ -313,6 +324,15 @@ def apply_damage_effects(
 	drain = _round_fraction(dealt, drain_fraction[0], drain_fraction[1])
 	drain = jnp.where((dealt > 0) & (drain_fraction[0] > 0), jnp.maximum(drain, 1), 0)
 	drain = jnp.sum(drain)
+	# A substitute's drain rounds up and is paid on the damage the substitute took.
+	fraction_num = drain_fraction[0].astype(jnp.int32)
+	fraction_den = jnp.maximum(drain_fraction[1].astype(jnp.int32), 1)
+	sub_drain = jnp.where(
+		(sub_dealt > 0) & (fraction_num > 0),
+		(sub_dealt * fraction_num + fraction_den - 1) // fraction_den,
+		0,
+	)
+	drain = drain + jnp.sum(sub_drain)
 	user_hp = state.hp[side, user].astype(jnp.int32)
 	user_max = state.stats[side, user, HP].astype(jnp.int32)
 	contact_hits = jnp.sum(hit_landed & row.move_contact).astype(jnp.int32)
@@ -345,6 +365,11 @@ def apply_damage_effects(
 	contact_self_damage = contact_ability_damage + jnp.where(helm_trigger, helm_damage, 0)
 	contact_self_damage += aftermath_damage + liquid_damage
 	user_hp = jnp.maximum(user_hp - contact_self_damage, 0)
+	# Aftermath, Rough Skin, Iron Barbs and Rocky Helmet damage are instafaint in Gen 5: the
+	# attacker is processed first in the faint queue, so the holder that fainted in this move
+	# is the last entry (checkWin names the holder's side).
+	instafaint_damage = contact_self_damage - liquid_damage
+	instafaint_kill = (instafaint_damage > 0) & (user_hp == 0)
 	# Moxie checks the user after contact damage; a later recoil faint still boosts.
 	moxie_user_alive = user_hp > 0
 
@@ -353,6 +378,9 @@ def apply_damage_effects(
 	effect_hit = (
 		enabled & ~blocked & checked_hit & (((target_hp_before > 0) & target_effect) | self_heal)
 	)
+	# A substitute absorbs the hit: the target gets no effect unless a later hit lands on it.
+	effect_hit &= ~sub_target | jnp.any(active_hits)
+	connected = effect_hit | jnp.any(sub_hits)
 	field_move = (row.move_hazard > 0) | (row.move_weather > 0)
 	curse_hit = enabled & ~blocked & checked_hit & (row.move_volatile_status == 5)
 	field_hit = effect_hit | (enabled & ~blocked & checked_hit & field_move) | curse_hit
@@ -368,16 +396,24 @@ def apply_damage_effects(
 	recoil_blocked = has_hook(rows[side], ROCK_HEAD) & ~mummy_disables_rock_head
 	recoil_blocked &= row.id != t.struggle_id
 	recoil_blocked |= magic_guard & (row.id != t.struggle_id)
+	# Recoil from a substitute hit is worked out per hit on the damage it took.
+	sub_recoil_base = jnp.where(row.move_recoil_basehp, user_max, sub_dealt)
+	sub_recoil_each = jnp.maximum(
+		_round_fraction(sub_recoil_base, recoil_fraction[0], recoil_fraction[1]), 1
+	)
+	sub_recoil = jnp.sum(
+		jnp.where((sub_dealt > 0) & ~recoil_blocked & (recoil_fraction[0] > 0), sub_recoil_each, 0)
+	)
 	recoil = jnp.where(
 		~recoil_blocked & (total_damage > 0) & (recoil_fraction[0] > 0), jnp.maximum(recoil, 1), 0
 	)
-	user_hp = jnp.maximum(user_hp - jnp.where(enabled, recoil, 0), 0)
+	user_hp = jnp.maximum(user_hp - jnp.where(enabled, recoil + sub_recoil, 0), 0)
 
-	crash = enabled & row.move_crash_damage & ~effect_hit & (target_hp_before > 0)
+	crash = enabled & row.move_crash_damage & ~connected & (target_hp_before > 0)
 	crash &= ~magic_guard
 	crash_damage = jnp.maximum(1, user_max // 2)
 	user_hp = jnp.maximum(user_hp - jnp.where(crash, crash_damage, 0), 0)
-	post_faint = enabled & (self_faint_kind == SELF_FAINT_ON_HIT) & effect_hit
+	post_faint = enabled & (self_faint_kind == SELF_FAINT_ON_HIT) & connected
 	user_hp = jnp.where(post_faint, 0, user_hp)
 	user_hp = jnp.where(pre_faint, 0, user_hp)
 	state, absorbed_hp = absorb_hit(state, foe, rows[foe], absorbed, target_hp_before)
@@ -444,6 +480,10 @@ def apply_damage_effects(
 	state = reveal_abilities(state, contact_reveals)
 	item_consumptions = (SIDES == side) & gem_trigger
 	item_consumptions |= (SIDES == foe) & sash_trigger
+	sub_mask = (SIDES == foe)[:, None] & sub_target
+	sub_mask &= jnp.arange(state.volatiles.shape[1])[None, :] == SUBSTITUTE
+	sub_left = (sub_hp - jnp.sum(sub_dealt)).astype(state.volatiles.dtype)
+	state = state._replace(volatiles=jnp.where(sub_mask, sub_left, state.volatiles))
 	state = record_damage_taken(state, side, row, hit_landed, dealt)
 	return state, HitResult(
 		success,
@@ -453,4 +493,6 @@ def apply_damage_effects(
 		item_consumptions,
 		(SIDES == foe) & helm_trigger,
 		contact_reveals | ((SIDES == foe) & reveal_ability),
+		jnp.any(sub_hits),
+		instafaint_kill,
 	)

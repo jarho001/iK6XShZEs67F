@@ -28,9 +28,10 @@ from .abilities import (
 	suppresses_weather,
 )
 from .actions import SIDES
+from .delayed import healing_wish_switch_in
 from .field import apply_active_switch_hazards, set_weather
 from .items import reveal_active_items, update_item_state
-from .order import active_speed
+from .order import action_speed
 from .randomness import DRAG_IN, SWITCH_HANDLER_ORDER, UNFORCED, first_side, integer
 from .state import (
 	DEF,
@@ -42,6 +43,7 @@ from .state import (
 	SLEEP,
 	SLOW_START,
 	SPD,
+	SUBSTITUTE,
 	TEAM_SLOTS,
 	TOXIC,
 	WIDE_GUARD,
@@ -112,7 +114,8 @@ def switch_members(state, switch_mask, targets, tables=None, rows=None):
 	target_mask = switch_mask[:, None] & (slots[None, :] == targets[:, None])
 	active_turns = jnp.where(target_mask, 0, state.active_turns)
 	status_counter_team = jnp.where(target_mask, counter[:, None], status_counter_team)
-	return state._replace(
+	last_move = jnp.where(outgoing_mask & switch_mask[:, None], 0, state.last_move)
+	state = state._replace(
 		active=active,
 		ability=ability,
 		active_turns=active_turns,
@@ -122,7 +125,9 @@ def switch_members(state, switch_mask, targets, tables=None, rows=None):
 		status=status_team,
 		status_counter=status_counter_team,
 		seen_order=seen_order,
+		last_move=last_move.astype(state.last_move.dtype),
 	)
+	return healing_wish_switch_in(state, switch_mask, targets)
 
 
 def switch_actions(state, actions, switch_mask, tables=None, rows=None):
@@ -154,7 +159,7 @@ def drag_in(state, side, enabled, key, forced, tables, source=None, rows=None):
 
 def switch_handler_first(state, key, forced, items, rows):
 	"""Incoming speed is cached when runSwitch is queued."""
-	speed = active_speed(state, items, rows)
+	speed = action_speed(state, items, rows)
 	tie = first_side(key, forced, SWITCH_HANDLER_ORDER)
 	return jnp.where(speed[0] == speed[1], tie, jnp.where(speed[0] > speed[1], 0, 1))
 
@@ -254,14 +259,18 @@ def run_switch_in(state, switchers, first, tables, mold_source=None, previous=No
 	stages = jnp.arange(7)
 	up = download[:, None] & (stages == download_stat[:, None])
 	intimidate_active = (intimidate & ~early)[::-1]
-	down = intimidate_active[:, None] & (stages == 0)
+	# Intimidate skips a target behind a substitute (-immune). Gen 5 inherits Gen 7, where
+	# Inner Focus no longer blocks it.
+	has_substitute = state.volatiles[:, SUBSTITUTE] > 0
+	intimidate_hits = intimidate_active & ~has_substitute
+	down = intimidate_hits[:, None] & (stages == 0)
 	raw_delta = up.astype(jnp.int8) - down.astype(jnp.int8)
 	delta = boost_delta(raw_delta, rows, True)
 	boosts = apply_boost_delta(state.boosts, raw_delta, rows, True)
 	defiant_revealed = rows[:, BOOST_EVENT] == BOOST_EVENT_DEFIANT
 	defiant_revealed &= jnp.any(delta < 0, axis=-1) & (boosts[:, 0] > state.boosts[:, 0])
 	blocked_intimidate = (
-		intimidate_active & (delta[:, 0] == 0) & (state.boosts[:, 0] > -6) & ~up[:, 0]
+		intimidate_hits & (delta[:, 0] == 0) & (state.boosts[:, 0] > -6) & ~up[:, 0]
 	)
 	state = state._replace(boosts=boosts)
 	# Anticipation uses the move dex's base type and effectiveness, before abilities.

@@ -87,6 +87,15 @@ class MoveRow(NamedTuple):
 	move_success_rule: jax.Array
 	move_autotomize: jax.Array
 	move_steal_berry: jax.Array
+	move_bypass_sub: jax.Array
+	move_no_sleep_talk: jax.Array
+	move_failencore: jax.Array
+	move_sleep_usable: jax.Array
+	move_slot_condition: jax.Array
+	move_trick_room: jax.Array
+	move_item_swap: jax.Array
+	move_knock_off: jax.Array
+	move_sleep_talk: jax.Array
 
 
 MOVE_FIELDS = MoveRow._fields[1:]

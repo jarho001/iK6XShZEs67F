@@ -11,6 +11,8 @@ WEATHER_ORDER=3, WEATHER_CHANGE_ORDER=4, SWITCH_HANDLER_ORDER=5,
 poison/toxic residual=6, burn residual=7, partial-trap residual=8, and ability
 residual=9. Ability and held-item residual handler shuffles have their own
 one-slot outcome kinds; Roost's type-reset shuffle has its own one-slot kind.
+sleep_talk: side is the Sleep Talk user, occurrence 0, value 0..2 indexes the
+callable moveset slots in slot order (Showdown samples that list uniformly).
 hit: side is attacker, occurrence is hit index, value 1=hit, 0=miss. Consult
 only if the move checks accuracy. crit: same address axes, value 1=crit, 0=no.
 damage_roll: same axes, value 0..15 is Showdown random(16), multiplying damage
@@ -68,6 +70,7 @@ OUTCOME_KINDS = (
 	("ability_residual_order", 1),
 	("item_residual_order", 1),
 	("roost_residual_order", 1),
+	("sleep_talk", 3),
 )
 KIND_NAMES = tuple(name for name, _ in OUTCOME_KINDS)
 NUM_KINDS = len(KIND_NAMES)
@@ -89,6 +92,7 @@ RESIDUAL_CHANCE = KIND_NAMES.index("residual_chance")
 ABILITY_RESIDUAL_ORDER = KIND_NAMES.index("ability_residual_order")
 ITEM_RESIDUAL_ORDER = KIND_NAMES.index("item_residual_order")
 ROOST_RESIDUAL_ORDER = KIND_NAMES.index("roost_residual_order")
+SLEEP_TALK = KIND_NAMES.index("sleep_talk")
 OUTCOME_MAXIMUM = tuple(maximum for _, maximum in OUTCOME_KINDS)
 OUTCOME_MINIMUM = tuple(2 if name == "hit_count" else 0 for name, _ in OUTCOME_KINDS)
 (

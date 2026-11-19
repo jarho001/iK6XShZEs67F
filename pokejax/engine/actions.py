@@ -18,6 +18,7 @@ from .abilities import (
 	has_hook,
 )
 from .items import CHOICE
+from .restrictions import restrict_legal_moves
 from .state import (
 	CHOICE_MOVE,
 	DISABLE_MOVE,
@@ -52,6 +53,7 @@ def move_availability(state, engine_tables):
 	usable &= (state.volatiles[:, DISABLE_REMAINING] == 0)[:, None] | (
 		moves != state.volatiles[:, DISABLE_MOVE, None]
 	)
+	usable = restrict_legal_moves(state, moves, usable, engine_tables)
 	choice_move = state.volatiles[:, CHOICE_MOVE]
 	item = state.item[SIDES, state.active].astype(jnp.int32)
 	choice_item = engine_tables.item_hooks.rows[item, CHOICE] != 0

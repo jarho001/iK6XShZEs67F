@@ -498,18 +498,38 @@ def test_truant_loafs_on_two_turn_continuation_and_recharge(battle, tables):
 	assert int(recharge.pp[0, 0, 0]) == int(beam.pp[0, 0, 0])
 
 
-def test_aftermath_and_rough_skin_can_make_a_double_faint(battle, tables):
+@pytest.mark.parametrize(
+	("ability", "hp_cost"), (("aftermath", 250), ("roughskin", 125), ("ironbarbs", 125))
+)
+def test_aftermath_and_rough_skin_can_make_a_double_faint(battle, tables, ability, hp_cost):
+	# Aftermath, Rough Skin and Iron Barbs are instafaint in Gen 5: the attacker is processed
+	# first in the faint queue, and the holder, which fainted from the move, is processed last
+	# and decides checkWin (side 1).
 	_, engine, state = battle
-	for ability, hp_cost in (("aftermath", 250), ("roughskin", 125)):
-		state = abilities(state, tables, "", ability)
-		state = state._replace(
-			hp=state.hp.at[0].set(0).at[0, 0].set(hp_cost - 1).at[1].set(0).at[1, 0].set(1),
-			stats=state.stats.at[:, :, HP].set(1000),
-		)
-		out = attack(state, engine, tables, "tackle")
-		assert int(out.hp[0, 0]) == 0
-		assert int(out.hp[1, 0]) == 0
-		assert int(out.winner) == 0
+	state = abilities(state, tables, "", ability)
+	state = state._replace(
+		hp=state.hp.at[0].set(0).at[0, 0].set(hp_cost - 1).at[1].set(0).at[1, 0].set(1),
+		stats=state.stats.at[:, :, HP].set(1000),
+	)
+	out = attack(state, engine, tables, "tackle")
+	assert int(out.hp[0, 0]) == 0
+	assert int(out.hp[1, 0]) == 0
+	assert int(out.winner) == 1
+
+
+def test_rocky_helmet_instafaint_gives_the_holder_the_win(battle, tables):
+	# Rocky Helmet damage is instafaint in Gen 5 (1/6 max HP), so the holder wins the double KO.
+	_, engine, state = battle
+	state = abilities(state, tables, "", "")
+	state = state._replace(
+		item=state.item.at[1, 0].set(tables.items.index["rockyhelmet"]),
+		hp=state.hp.at[0].set(0).at[0, 0].set(165).at[1].set(0).at[1, 0].set(1),
+		stats=state.stats.at[:, :, HP].set(1000),
+	)
+	out = attack(state, engine, tables, "tackle")
+	assert int(out.hp[0, 0]) == 0
+	assert int(out.hp[1, 0]) == 0
+	assert int(out.winner) == 1
 
 
 def test_moxie_does_not_boost_when_rough_skin_causes_a_double_faint(battle, tables):

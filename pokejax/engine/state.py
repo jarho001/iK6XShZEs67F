@@ -72,7 +72,15 @@ UNBURDEN, TRUANT, DISABLE_MOVE, DISABLE_REMAINING = range(21, 25)
 SLOW_START = 25
 CURSE = 26
 AUTOTOMIZE = 27
-NUM_VOLATILES = 28
+# Task 13 volatiles: Substitute holds its HP here; Encore keeps the move and its
+# duration; Taunt, Yawn and Destiny Bond keep a duration or flag.
+SUBSTITUTE = 28
+ENCORE_MOVE = 29
+ENCORE_REMAINING = 30
+TAUNT = 31
+YAWN = 32
+DESTINY_BOND = 33
+NUM_VOLATILES = 34
 HP, ATK, DEF, SPA, SPD, SPE = range(NUM_STATS)
 BOOST_ATK, BOOST_DEF, BOOST_SPA, BOOST_SPD, BOOST_SPE, ACCURACY, EVASION = range(NUM_BOOSTS)
 EMPTY = 0
@@ -163,3 +171,8 @@ class BattleState(NamedTuple):
 	last_success: jax.Array  # int16 scalar: last successful move ID this turn (Fusion Bolt/Flare)
 	fainted_last: jax.Array  # bool [2]: a member fainted in the previous turn (Retaliate)
 	alive_mark: jax.Array  # bool [2, 6]: members alive at the last turn end
+	last_move: jax.Array  # int16 [2, 6]: last move used by each member; cleared on switch-out
+	wish_turns: jax.Array  # int8 [2]: Wish turns left per slot; zero means no Wish
+	wish_hp: jax.Array  # int16 [2]: HP the pending Wish restores
+	healing_wish: jax.Array  # bool [2]: Healing Wish waits for the next switch-in to that side
+	trick_room: jax.Array  # int8 scalar: Trick Room turns left; zero means inactive

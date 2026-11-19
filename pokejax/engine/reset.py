@@ -167,6 +167,11 @@ def reset(key, teams: Teams, engine_tables: EngineTables, forced=UNFORCED) -> Ba
 		last_success=jnp.asarray(0, jnp.int16),
 		fainted_last=jnp.zeros(NUM_SIDES, jnp.bool_),
 		alive_mark=jnp.ones(stats.shape[:2], jnp.bool_),
+		last_move=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.int16),
+		wish_turns=jnp.zeros(NUM_SIDES, jnp.int8),
+		wish_hp=jnp.zeros(NUM_SIDES, jnp.int16),
+		healing_wish=jnp.zeros(NUM_SIDES, jnp.bool_),
+		trick_room=jnp.asarray(0, jnp.int8),
 	)
 	items = gather_active_items(state, t)
 	rows = active_abilities(state, t)

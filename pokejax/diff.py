@@ -25,8 +25,11 @@ from pokejax.engine.state import (
 	CHOICE_MOVE,
 	CONFUSION,
 	CURSE,
+	DESTINY_BOND,
 	DISABLE_MOVE,
 	DISABLE_REMAINING,
+	ENCORE_MOVE,
+	ENCORE_REMAINING,
 	ENDURE,
 	FLASH_FIRE,
 	FLINCH,
@@ -45,7 +48,9 @@ from pokejax.engine.state import (
 	SMACKDOWN,
 	STALL,
 	STATUS_NAMES,
+	SUBSTITUTE,
 	SWITCH,
+	TAUNT,
 	TIE,
 	TURN_IDLE,
 	TWO_TURN_MOVE,
@@ -53,6 +58,7 @@ from pokejax.engine.state import (
 	VOLATILE_NAMES,
 	WEATHER_NAMES,
 	WIDE_GUARD,
+	YAWN,
 )
 from pokejax.engine.state import (
 	TRUANT as TRUANT_VOLATILE,
@@ -65,6 +71,10 @@ KEY = jax.random.key(0)
 ROOT = Path(__file__).resolve().parents[1]
 REQUESTS = {"none": NONE, "move": MOVE, "switch": SWITCH}
 NULL_TYPE = -3
+# Volatile names compared as presence flags, in the order of comparable()["volatiles"].
+VOLATILE_KEYS = VOLATILE_NAMES + ("substitute", "encore", "taunt", "yawn", "destinybond")
+# Volatile counters that the recorder reports for these volatiles and that are compared above.
+COUNTER_KEYS = ("confusion", "disable", "slowstart", "substitute", "encore", "taunt", "yawn")
 BATTLE_CHUNK = 32
 STEP_CHUNK = 32
 
@@ -120,6 +130,11 @@ def comparable(state, tables):
 				state.volatiles[..., DISABLE_REMAINING, None] > 0,
 				state.volatiles[..., CURSE, None] > 0,
 				state.volatiles[..., AUTOTOMIZE, None] > 0,
+				state.volatiles[..., SUBSTITUTE, None] > 0,
+				state.volatiles[..., ENCORE_REMAINING, None] > 0,
+				state.volatiles[..., TAUNT, None] > 0,
+				state.volatiles[..., YAWN, None] > 0,
+				state.volatiles[..., DESTINY_BOND, None] > 0,
 			),
 			axis=-1,
 		),
@@ -133,6 +148,15 @@ def comparable(state, tables):
 		"confusionCounter": state.volatiles[..., CONFUSION],
 		"disableMove": state.volatiles[..., DISABLE_MOVE],
 		"disableCounter": state.volatiles[..., DISABLE_REMAINING],
+		"substituteHp": state.volatiles[..., SUBSTITUTE],
+		"encoreMove": state.volatiles[..., ENCORE_MOVE],
+		"encoreCounter": state.volatiles[..., ENCORE_REMAINING],
+		"tauntCounter": state.volatiles[..., TAUNT],
+		"yawnCounter": state.volatiles[..., YAWN],
+		"wishTurns": state.wish_turns,
+		"wishHp": state.wish_hp,
+		"healingWish": state.healing_wish,
+		"trickRoom": state.trick_room,
 		"slowStartCounter": state.volatiles[..., SLOW_START],
 		"request": state.request,
 		"midTurn": state.turn_stage > TURN_IDLE,
@@ -201,8 +225,36 @@ def recorded_state(snapshot, tables):
 		"ended": np.asarray(snapshot["ended"]),
 		"boosts": np.asarray([side["boosts"] for side in sides]),
 		"volatiles": np.asarray(
-			[[name in (side["volatiles"] or []) for name in VOLATILE_NAMES] for side in sides]
+			[[name in (side["volatiles"] or []) for name in VOLATILE_KEYS] for side in sides]
 		),
+		"substituteHp": np.asarray(
+			[side.get("volatileCounters", {}).get("substitute", 0) for side in sides]
+		),
+		"encoreMove": np.asarray(
+			[
+				tables.moves.index.get(side.get("volatileMoves", {}).get("encore", ""), 0)
+				for side in sides
+			]
+		),
+		"encoreCounter": np.asarray(
+			[side.get("volatileCounters", {}).get("encore", 0) for side in sides]
+		),
+		"tauntCounter": np.asarray(
+			[side.get("volatileCounters", {}).get("taunt", 0) for side in sides]
+		),
+		"yawnCounter": np.asarray(
+			[side.get("volatileCounters", {}).get("yawn", 0) for side in sides]
+		),
+		"wishTurns": np.asarray(
+			[side.get("slotConditions", {}).get("wish", {}).get("turns", 0) for side in sides]
+		),
+		"wishHp": np.asarray(
+			[side.get("slotConditions", {}).get("wish", {}).get("hp", 0) for side in sides]
+		),
+		"healingWish": np.asarray(
+			["healingwish" in side.get("slotConditions", {}) for side in sides]
+		),
+		"trickRoom": np.asarray(snapshot["pseudoWeather"].get("trickroom", {}).get("turns", 0)),
 		"sideConditions": np.asarray(
 			[
 				[name in side["sideConditions"] for name in ("quickguard", "wideguard")]
@@ -441,7 +493,7 @@ def replay_file(path, *, recording=None) -> ReplayResult:
 			extra = {
 				"pseudoWeather": (
 					{"sleepclausemod": {"layers": 0, "turns": 0}},
-					snapshot["pseudoWeather"],
+					{k: v for k, v in snapshot["pseudoWeather"].items() if k != "trickroom"},
 				),
 			}
 			for side_index, side in enumerate(snapshot["sides"]):
@@ -451,14 +503,14 @@ def replay_file(path, *, recording=None) -> ReplayResult:
 				if side["volatiles"] is not None:
 					extra[f"sides[{side_index}].volatiles"] = (
 						[],
-						[name for name in side["volatiles"] if name not in VOLATILE_NAMES],
+						[name for name in side["volatiles"] if name not in VOLATILE_KEYS],
 					)
 				extra[f"sides[{side_index}].volatileCounters"] = (
 					{},
 					{
 						name: value
 						for name, value in side.get("volatileCounters", {}).items()
-						if name not in ("confusion", "disable", "slowstart")
+						if name not in COUNTER_KEYS
 					},
 				)
 				extra[f"sides[{side_index}].volatileMoves"] = (
@@ -466,7 +518,15 @@ def replay_file(path, *, recording=None) -> ReplayResult:
 					{
 						name: value
 						for name, value in side.get("volatileMoves", {}).items()
-						if name != "disable"
+						if name not in ("disable", "encore")
+					},
+				)
+				extra[f"sides[{side_index}].slotConditions"] = (
+					{},
+					{
+						name: condition
+						for name, condition in side.get("slotConditions", {}).items()
+						if name not in ("wish", "healingwish")
 					},
 				)
 				extra[f"sides[{side_index}].sideConditions"] = (

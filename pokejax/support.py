@@ -327,6 +327,29 @@ VARIABLE_MOVES = frozenset(
 )
 SUPPORTED_MOVES |= VARIABLE_MOVES
 
+# Long tail, part 1 (task 13): restricting and delayed volatiles, Substitute, slot
+# and field effects, Sleep Talk, and item transfer. See engine/substitute.py,
+# restrictions.py, delayed.py, sleep_talk.py and item_moves.py.
+LONG_TAIL_MOVES = frozenset(
+	[
+		"destinybond",
+		"disable",
+		"encore",
+		"healingwish",
+		"knockoff",
+		"leechseed",
+		"sleeptalk",
+		"substitute",
+		"switcheroo",
+		"taunt",
+		"trick",
+		"trickroom",
+		"wish",
+		"yawn",
+	]
+)
+SUPPORTED_MOVES |= LONG_TAIL_MOVES
+
 # Pressure and Dry Skin include the hooks modeled in ability group 1.
 SUPPORTED_ABILITIES: frozenset[str] = frozenset(
 	{

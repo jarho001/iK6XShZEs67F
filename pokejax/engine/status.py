@@ -21,8 +21,10 @@ from .actions import SIDES
 from .field import effective_move_type
 from .move_data import read_move
 from .randomness import FULL_PARALYSIS, SLEEP_DURATION, THAW, chance, integer
+from .restrictions import taunt_blocks
 from .state import (
 	BURN,
+	DESTINY_BOND,
 	DISABLE_MOVE,
 	DISABLE_REMAINING,
 	FREEZE,
@@ -57,6 +59,11 @@ def switch_in(state, side, slot, enabled):
 
 
 def before_move(state, side, move, enabled, key, forced, tables, ability_rows, recharge=False):
+	"""BeforeMove handlers in Showdown's priority order.
+
+	Sleep (10), flinch (8), Disable (7), Taunt (5), confusion (3), paralysis (1),
+	then Destiny Bond (-1), which only clears when no earlier handler stopped the move.
+	"""
 	row = read_move(tables, move)
 	started = enabled
 	was_charging = state.volatiles[side, TWO_TURN_MOVE] > 0
@@ -84,7 +91,8 @@ def before_move(state, side, move, enabled, key, forced, tables, ability_rows, r
 		status=jnp.where(member_mask & clear, HEALTHY, state.status),
 		status_counter=jnp.where(member_mask, jnp.where(clear, 0, counter), state.status_counter),
 	)
-	enabled &= ~(sleeping & ~wake) & ~frozen
+	# Sleep Talk and the other sleep-usable moves may be used while asleep.
+	enabled &= ~(sleeping & ~wake & ~row.move_sleep_usable) & ~frozen
 	truant_ability = has_hook(ability_rows[side], TRUANT_ABILITY)
 	truant_active = truant_ability & (state.volatiles[side, TRUANT_VOLATILE] > 0)
 	truant_block = enabled & ~recharge_now & truant_active
@@ -97,15 +105,23 @@ def before_move(state, side, move, enabled, key, forced, tables, ability_rows, r
 	state = set_active_volatile(state, side, TRUANT_VOLATILE, truant_value)
 	enabled &= ~truant_block
 	state = reveal_abilities(state, (SIDES == side) & truant_block)
-	state, enabled = volatile_before_move(
-		state, side, enabled, key, forced, tables, ability_rows[side]
-	)
 	disabled = (state.volatiles[side, DISABLE_REMAINING] > 0) & (
 		row.id == state.volatiles[side, DISABLE_MOVE]
 	)
-	enabled &= ~disabled
+	enabled &= ~disabled & ~taunt_blocks(state, side, row)
+	state, enabled = volatile_before_move(
+		state, side, enabled, key, forced, tables, ability_rows[side]
+	)
 	paralyzed = enabled & (status == PARALYSIS) & chance(key, forced, FULL_PARALYSIS, side, 0, 1, 4)
 	can_act = enabled & ~paralyzed
+	# Destiny Bond ends when its user attempts any other move that gets this far.
+	destiny_clear = can_act & (row.move_self_volatile != 4)
+	state = set_active_volatile(
+		state,
+		side,
+		DESTINY_BOND,
+		jnp.where(destiny_clear, 0, state.volatiles[side, DESTINY_BOND]),
+	)
 	state = set_active_volatile(
 		state,
 		side,

@@ -29,6 +29,9 @@
  * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-moves12.allowed.json --out work/diff/moves12.jsonl.gz
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-moves12.allowed.json --out tests/fixtures/diff-moves12.jsonl.gz
  *
+ * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-longtail1.allowed.json --out work/diff/longtail1.jsonl.gz
+ * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-longtail1.allowed.json --out tests/fixtures/diff-longtail1.jsonl.gz
+ *
  * JSONL schema v2: header {type, schemaVersion, showdownCommit, seed, count,
  * acceptedMoves, ...}; battle {type, index, seed (four uint16 words), policySeed,
  * poolIndices, profile, teams (exact constructor inputs), initialOverrides: [],
@@ -81,8 +84,8 @@
  * 3. Frisk draws from one foe in singles. Two No Guard accuracy handlers
  *    return the same result. Ability-triggered and repeated WeatherChange
  *    draws have no handlers in the isolation format.
- * 4. A Pokemon's Choice lock and Disable move-lock callbacks disable disjoint
- *    move slots, so their equal-priority DisableMove order is independent.
+ * 4. Move-restricting callbacks (Choice lock, Disable, Encore, Taunt) only set
+ *    disabled flags on move slots, so their equal-priority DisableMove order is independent.
  * Policy/team sampling uses a separate seeded PRNG, never battle.prng.
  *
  * Unknown draw sites, unexpected shuffle entries, and duplicate forced addresses
@@ -126,7 +129,10 @@ const WEATHER_START_ABILITIES = new Set(['drizzle', 'drought', 'sandstream', 'sn
 // Pursuit, Focus Punch charge, Counter and Mirror Coat slots). They are removed
 // at the turn end and are not public conditions; the engine keeps their effects
 // in per-side turn fields and compares those through damage, HP and actions.
-const TURN_INTERNAL_VOLATILES = new Set(['pursuit', 'focuspunch', 'counter', 'mirrorcoat']);
+// 'gem' marks a consumed Gem's one-turn damage boost; the damage it changes is compared.
+const TURN_INTERNAL_VOLATILES = new Set(['pursuit', 'focuspunch', 'counter', 'mirrorcoat', 'gem']);
+// Move-restricting volatiles whose onDisableMove callbacks only write disabled flags, so their order is irrelevant.
+const DISABLE_RESTRICTIONS = new Set(['choicelock', 'disable', 'encore', 'taunt']);
 
 function isolationBattle(seed) {
 	return new Battle({ formatid: 'gen5randombattle', seed });
@@ -238,6 +244,30 @@ function trackPublicAbilities(battle) {
 	return revealed;
 }
 
+// Counters of the active member's restricting and substitute volatiles (task 13).
+function activeCounters(active) {
+	const v = active.volatiles;
+	return {
+		...(v.confusion ? { confusion: v.confusion.time } : {}),
+		...(v.disable ? { disable: v.disable.duration } : {}),
+		...(v.substitute ? { substitute: v.substitute.hp } : {}),
+		...(v.encore ? { encore: v.encore.duration } : {}),
+		...(v.taunt ? { taunt: v.taunt.duration } : {}),
+		...(v.yawn ? { yawn: v.yawn.duration } : {}),
+		...(active.ability === 'slowstart' && active.abilityState.counter ?
+			{ slowstart: active.abilityState.counter } : {}),
+	};
+}
+
+// Wish counts turns from its starting turn: two when it is set, resolved at zero.
+function slotConditionsOf(battle, side) {
+	const slot = side.slotConditions?.[0] ?? {};
+	return Object.fromEntries(Object.keys(slot).sort().map(id => [id, id === 'wish' ? {
+		// heal() rounds a fractional amount down, and at least to one HP.
+		hp: Math.max(1, Math.trunc(slot[id].hp)), turns: slot[id].startingTurn + 3 - battle.turn,
+	} : {}]));
+}
+
 function snapshot(battle, fixed, publicAbilities) {
 	return {
 		turn: battle.turn,
@@ -259,18 +289,17 @@ function snapshot(battle, fixed, publicAbilities) {
 				!side.active[0].itemKnockedOff,
 			itemKnockedOff: side.active[0].itemKnockedOff,
 			volatiles: side.active[0].fainted ? null : Object.keys(side.active[0].volatiles).filter(name => !TURN_INTERNAL_VOLATILES.has(name)).sort(),
-			...(!side.active[0].fainted && (side.active[0].volatiles.confusion ||
-				side.active[0].volatiles.disable || side.active[0].abilityState.counter) ? {
-				volatileCounters: {
-					...(side.active[0].volatiles.confusion ? { confusion: side.active[0].volatiles.confusion.time } : {}),
-					...(side.active[0].volatiles.disable ? { disable: side.active[0].volatiles.disable.duration } : {}),
-					...(side.active[0].ability === 'slowstart' && side.active[0].abilityState.counter ?
-						{ slowstart: side.active[0].abilityState.counter } : {}),
+			...(!side.active[0].fainted && Object.keys(activeCounters(side.active[0])).length ? {
+				volatileCounters: activeCounters(side.active[0]),
+			} : {}),
+			...(!side.active[0].fainted && (side.active[0].volatiles.disable || side.active[0].volatiles.encore) ? {
+				volatileMoves: {
+					...(side.active[0].volatiles.disable ? { disable: side.active[0].volatiles.disable.move } : {}),
+					...(side.active[0].volatiles.encore ? { encore: side.active[0].volatiles.encore.move } : {}),
 				},
 			} : {}),
-			...(!side.active[0].fainted && side.active[0].volatiles.disable ? {
-				volatileMoves: { disable: side.active[0].volatiles.disable.move },
-			} : {}),
+			...(Object.keys(slotConditionsOf(battle, side)).length ?
+				{ slotConditions: slotConditionsOf(battle, side) } : {}),
 			sideConditions: conditions(side.sideConditions),
 			legalActions: Array.from({ length: 9 }, (_, action) =>
 				Number(legalChoices(side, fixed[s], battle.ended).some(choice => choice.action === action))),
@@ -331,7 +360,8 @@ function directCaller() {
 }
 
 function residualOrderOccurrence(order) {
-	if (order === false || order === 5 || order === 17 || order === 25) return 2;
+	if (order === false || order === 4 || order === 5 || order === 8 || order === 15 || order === 16 ||
+		order === 17 || order === 23 || order === 25) return 2;
 	if (order === 9) return 6;
 	if (order === 10) return 7;
 	if (order === 13) return 8;
@@ -368,6 +398,11 @@ const OUTCOME_RULES = [
 		JSON.stringify(args[0]) === JSON.stringify(['brn', 'par', 'frz']),
 		address: scope => [scope.user.side.n, (scope.hitIndex * 2) + scope.occurrence - 1],
 		value: value => ['brn', 'par', 'frz'].indexOf(value) },
+	{ kind: 'sleep_talk', method: 'sample', matches: (scope, caller, args) =>
+		scope?.kind === 'hit_loop' && scope.move.id === 'sleeptalk' && caller === 'Battle.onHit' &&
+		Array.isArray(args[0]),
+		address: scope => [scope.user.side.n, 0],
+		value: (value, scope, items) => items.indexOf(value) },
 	{ kind: 'drag_in', method: 'sample', matches: (scope, caller, args) =>
 		scope?.kind === 'drag' && caller === 'Battle.getRandomSwitchable' &&
 		Array.isArray(args[0]),
@@ -581,7 +616,7 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 		const rule = OUTCOME_RULES.find(rule => rule.method === 'sample' && rule.matches(scope, caller, [items]));
 		assert(rule, `Unclassified battle.sample at ${caller}`);
 		const value = allow(rule.kind, () => sample.call(this, items));
-		record(rule.kind, ...rule.address(scope), rule.value(value, scope));
+		record(rule.kind, ...rule.address(scope), rule.value(value, scope, items));
 		return value;
 	};
 	const shuffle = battle.prng.shuffle;
@@ -606,6 +641,7 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 				'skullbash', 'skyattack', 'razorwind', 'solarbeam', 'freezeshock', 'iceburn', 'roost',
 				'leftovers', 'blacksludge', 'toxicorb', 'flameorb', 'whiteherb', 'gem',
 				'hydration', 'shedskin', 'speedboost', 'baddreams', 'slowstart', 'harvest', 'counter', 'mirrorcoat', 'focuspunch', 'pursuit',
+				'leechseed', 'wish', 'taunt', 'encore', 'yawn', 'trickroom',
 			].includes(h.effect.id)),
 			`Unexpected residual tie: ${tied.map(h => `${h.effect.id}:${h.effectHolder.side.n}`)}`);
 			const sides = new Set(tied.map(h => h.effectHolder.side.n));
@@ -650,7 +686,7 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 			tied[0].effectHolder.side !== tied[1].effectHolder.side) {
 			exception = 'identical-noguard-accuracy';
 		} else if (!scope && tied.length === 2 &&
-			tied.map(h => h.effect?.id).sort().join(',') === 'choicelock,disable' &&
+			tied.every(h => DISABLE_RESTRICTIONS.has(h.effect?.id)) &&
 			tied.every(h => h.callback === h.effect.onDisableMove) &&
 			tied[0].effectHolder === tied[1].effectHolder) {
 			exception = 'choice-disable-move-order';

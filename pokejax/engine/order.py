@@ -50,7 +50,7 @@ def action_order(state, actions, moves, replacement, key, forced, rows, tables, 
 	status_move = tables.move_category[moves] == 2
 	prankster = (abilities[:, ORDER] == ORDER_PRANKSTER) & status_move & ~switch
 	priority += prankster.astype(jnp.int32)
-	speed = active_speed(state, rows, abilities)
+	speed = action_speed(state, rows, abilities)
 	hp = state.hp[SIDES, state.active].astype(jnp.int32)
 	maximum = state.stats[SIDES, state.active, 0].astype(jnp.int32)
 	custap = (state.request == MOVE) & (actions < 4) & (state.turn_stage == TURN_IDLE)
@@ -70,8 +70,20 @@ def action_order(state, actions, moves, replacement, key, forced, rows, tables, 
 	return state, first
 
 
+def action_speed(state, items, abilities):
+	"""Pokemon.getActionSpeed: Trick Room inverts the capped speed as 10000 - speed."""
+	raw = _capped_speed(state, items, abilities)
+	trick_room = state.trick_room > 0
+	return jnp.where(trick_room, (10000 - raw) & 8191, raw & 8191)
+
+
 def active_speed(state, items, abilities):
 	"""GetActionSpeed: stages, chained speed hooks, paralysis, then width caps."""
+	return _capped_speed(state, items, abilities) & 8191
+
+
+def _capped_speed(state, items, abilities):
+	"""Speed after stages, hooks and paralysis, capped at 10000 (Pokemon.getStat)."""
 	status = state.status[SIDES, state.active]
 	speed = scale_stat_stage(
 		state.stats[SIDES, state.active, SPE].astype(jnp.int32),
@@ -91,4 +103,4 @@ def active_speed(state, items, abilities):
 	modifier = chain(modifier, jnp.where(unburden, 8192, jnp.where(slow_start, 2048, 4096)))
 	speed = apply_active_stat_modifiers(speed, SPE, items, modifier)
 	speed = jnp.where((status == PARALYSIS) & ~quick_feet, speed // 4, speed)
-	return jnp.minimum(speed, 10000) & 8191
+	return jnp.minimum(speed, 10000)
