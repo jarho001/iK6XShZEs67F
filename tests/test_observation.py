@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from pokejax.engine import state as S
 from pokejax.engine.actions import legal_actions
 from pokejax.engine.data import build_engine_tables
 from pokejax.engine.observation import Observation, observe
@@ -330,3 +331,28 @@ def test_shapes_dtypes_jit_vmap(battles):
 		):
 			assert np.all(np.asarray(x)[1:] == 0)
 	np.testing.assert_array_equal(o.opponent.unseen, [0, 1, 1, 1, 1, 1])
+
+
+@pytest.mark.parametrize("side", [0, 1])
+def test_illusion_disguise_hides_the_real_species(battles, side):
+	"""A disguised holder is shown as its disguise: its real species never reaches the observer."""
+	tables, t, _, states = battles
+	foe = 1 - side
+	slots = len(tables.species.ids)
+
+	def disguise(s):
+		active = s.active[foe]
+		bench = (active + 1) % 6
+		volatiles = s.volatiles.at[foe, S.ILLUSION_SLOT].set(bench + 1)
+		shown = s.shown_species.at[foe, active].set(s.species[foe, bench])
+		return s._replace(volatiles=volatiles, shown_species=shown)
+
+	def hide_real_species(s):
+		active = s.active[foe]
+		species = s.species.at[foe, active].set((s.species[foe, active] + 7) % slots)
+		return s._replace(species=species)
+
+	shown = jax.jit(jax.vmap(disguise))(states)
+	changed = jax.jit(jax.vmap(hide_real_species))(shown)
+	get = jax.jit(jax.vmap(observe, in_axes=(0, None, None)))
+	assert_equal(get(shown, side, t), get(changed, side, t))

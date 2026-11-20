@@ -144,7 +144,8 @@ def observe(state, side, engine_tables) -> Observation:
 	match = state.seen_order[foe, :, None] == ranks[None, :]
 	slots = jnp.argmax(match, axis=0)
 	seen = jnp.any(match, axis=0)
-	species = jnp.where(seen, state.species[foe, slots], 0)
+	# The opponent sees the species it was last shown: a disguise until Illusion breaks.
+	species = jnp.where(seen, state.shown_species[foe, slots], 0)
 	hp = state.hp[foe, slots].astype(jnp.int32)
 	maximum = jnp.maximum(state.stats[foe, slots, 0].astype(jnp.int32), 1)
 	percent = (100 * hp + maximum - 1) // maximum

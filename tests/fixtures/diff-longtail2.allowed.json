@@ -1,0 +1,17 @@
+{
+  "moves": [
+    "transform",
+    "naturepower",
+    "relicsong"
+  ],
+  "abilities": [
+    "multitype",
+    "magicbounce",
+    "trace",
+    "flowergift",
+    "forecast",
+    "imposter",
+    "illusion"
+  ],
+  "items": []
+}

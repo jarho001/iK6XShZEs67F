@@ -261,7 +261,9 @@ def apply_damage_effects(
 		t,
 	)
 	oblivious = enabled & ~blocked & (row.id == t.captivate_id) & has_hook(rows[foe], OBLIVIOUS)
-	reveal_ability = absorbed | oblivious | (enabled & levitate & immune_for_move & ~invulnerable)
+	# A fainted target is retargeted with no effect and shows no immunity (Levitate included).
+	reveal_ability = absorbed | oblivious
+	reveal_ability |= enabled & levitate & immune_for_move & ~invulnerable & (target_hp_before > 0)
 	blocked |= absorbed | oblivious
 	gem_trigger = enabled & ~blocked & checked_hit & (row.move_category != 2)
 	gem_trigger &= (row.id != t.struggle_id) & (item_rows.gem_type[side] == type_)

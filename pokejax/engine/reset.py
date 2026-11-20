@@ -12,6 +12,8 @@ from pokejax.teams import TeamPool
 
 from .abilities import RESIDUAL, RESIDUAL_SLOW_START, active_abilities
 from .data import EngineTables
+from .forms import foe_view
+from .illusion import enter_illusion
 from .items import gather_active_items, update_active_items
 from .randomness import UNFORCED
 from .state import (
@@ -27,7 +29,7 @@ from .state import (
 	TEAM_SLOTS,
 	BattleState,
 )
-from .switching import run_switch_in, switch_handler_first
+from .switching import copy_on_entry, run_switch_in, switch_handler_first
 
 
 class Teams(NamedTuple):
@@ -172,9 +174,24 @@ def reset(key, teams: Teams, engine_tables: EngineTables, forced=UNFORCED) -> Ba
 		wish_hp=jnp.zeros(NUM_SIDES, jnp.int16),
 		healing_wish=jnp.zeros(NUM_SIDES, jnp.bool_),
 		trick_room=jnp.asarray(0, jnp.int8),
+		species_base=teams.species.astype(jnp.int16),
+		saved_stats=jnp.zeros((NUM_SIDES, NUM_STATS - 1), jnp.int16),
+		saved_moves=jnp.zeros((NUM_SIDES, MOVE_SLOTS), jnp.int16),
+		saved_pp=jnp.zeros((NUM_SIDES, MOVE_SLOTS), jnp.uint8),
+		saved_max_pp=jnp.zeros((NUM_SIDES, MOVE_SLOTS), jnp.uint8),
+		saved_revealed=jnp.zeros((NUM_SIDES, MOVE_SLOTS), jnp.uint8),
+		shown_species=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.int16),
+		party=jnp.broadcast_to(jnp.arange(TEAM_SLOTS, dtype=jnp.int8), (NUM_SIDES, TEAM_SLOTS)),
+	)
+	both = jnp.ones(NUM_SIDES, jnp.bool_)
+	state = enter_illusion(state, both, t)
+	# Both leads are active before their switch-in handlers run (the queued runSwitch actions),
+	# so each Imposter copies the other lead, and each Trace copies it at once.
+	state, _ = copy_on_entry(
+		state, both, jnp.zeros((2,), jnp.bool_), t, foe_view(state, state.active[::-1])
 	)
 	items = gather_active_items(state, t)
 	rows = active_abilities(state, t)
 	first = switch_handler_first(state, key, forced, items, rows)
-	state, _ = run_switch_in(state, jnp.ones(NUM_SIDES, jnp.bool_), first, t, rows=rows)
+	state, _ = run_switch_in(state, both, first, t, rows=rows)
 	return update_active_items(state, True, items, rows, tables=t)

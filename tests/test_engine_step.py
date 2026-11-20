@@ -318,7 +318,8 @@ def test_jit_vmap_64_pool_battles_200_legal_steps(tables_and_state, battle_pool)
 			out = jax.vmap(step, in_axes=(0, 0, 0, None, None))(
 				carry, actions, jax.random.split(key, 64), UNFORCED, t
 			)
-			valid = jnp.all(out.hp >= 0) & jnp.all(out.pp <= states.max_pp)
+			# Transform sets the copied moves' maximum to their 5-PP cap, so check the live maximum.
+			valid = jnp.all(out.hp >= 0) & jnp.all(out.pp <= out.max_pp)
 			return out, valid
 
 		return jax.lax.scan(body, states, jax.random.split(KEY, 200))
@@ -326,7 +327,7 @@ def test_jit_vmap_64_pool_battles_200_legal_steps(tables_and_state, battle_pool)
 	out, valid = rollout(states)
 	assert np.all(valid)
 	assert np.all(out.hp >= 0)
-	assert np.all(out.pp <= states.max_pp)
+	assert np.all(out.pp <= out.max_pp)
 	assert np.all((out.winner >= ONGOING) & (out.winner <= 1))
 
 

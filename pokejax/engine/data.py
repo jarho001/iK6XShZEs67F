@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from pokejax.support import CONFUSION_MOVES, SECONDARY_MOVES
+from pokejax.support import CONFUSION_MOVES, LONG_TAIL2_SECONDARY_MOVES, SECONDARY_MOVES
 from pokejax.tables import Tables
 from pokejax.teams import HIDDEN_POWER_TYPES
 
@@ -104,6 +104,12 @@ class _EngineTables(NamedTuple):
 	pursuit_id: jax.Array
 	item_take_species: jax.Array
 	move_table: MoveTable
+	move_base_pp: jax.Array
+	noability_id: jax.Array
+	imposter_id: jax.Array
+	castform_forms: jax.Array
+	cherrim_forms: jax.Array
+	meloetta_forms: jax.Array
 
 
 class EngineTables(_EngineTables):
@@ -216,7 +222,7 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 	# Gen 5 explicitly removes Scald's later-generation thawsTarget property.
 	thaws_target = np.zeros(len(moves.ids), np.bool_)
 	secondary_chance = moves.secondary_chance.copy()
-	secondary_chance[~np.isin(moves.ids, tuple(SECONDARY_MOVES))] = 0
+	secondary_chance[~np.isin(moves.ids, tuple(SECONDARY_MOVES | LONG_TAIL2_SECONDARY_MOVES))] = 0
 	user_species = np.zeros_like(moves.secondary_status, dtype=np.int16)
 	user_species[moves.index["chatter"]] = tables.species.index["chatot"]
 	weather_moves = np.zeros(len(moves.ids), np.int8)
@@ -367,6 +373,20 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 	hidden_power_types = np.asarray(
 		[tables.types.index[name] for name in HIDDEN_POWER_TYPES], np.int32
 	)
+	# Nature Power calls Earthquake in Gen 5 (data/mods/gen5/moves.ts onHit, no terrain).
+	call_moves = np.zeros(len(moves.ids), np.int16)
+	call_moves[moves.index["naturepower"]] = moves.index["earthquake"]
+	# Indexed by weather: clear, rain, sun, sand (Castform), hail.
+	castform_species = np.asarray(
+		[
+			tables.species.index[name]
+			for name in ("castform", "castformrainy", "castformsunny", "castform", "castformsnowy")
+		]
+	)
+	cherrim_species = np.asarray([tables.species.index[n] for n in ("cherrim", "cherrimsunshine")])
+	meloetta_species = np.asarray(
+		[tables.species.index[n] for n in ("meloetta", "meloettapirouette")]
+	)
 	move_table = build_move_table(
 		move_type=moves.type,
 		move_category=moves.category,
@@ -496,6 +516,10 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 		move_item_swap=np.isin(np.asarray(moves.ids), ("trick", "switcheroo")),
 		move_knock_off=np.asarray(moves.ids) == "knockoff",
 		move_sleep_talk=np.asarray(moves.ids) == "sleeptalk",
+		move_transform=np.asarray(moves.ids) == "transform",
+		move_call=call_moves,
+		move_reflectable=moves.flags[:, moves.flag_names.index("reflectable")],
+		move_relic_forme=np.asarray(moves.ids) == "relicsong",
 	)
 	return EngineTables(
 		species_base_stats=jnp.asarray(tables.species.base_stats),
@@ -542,4 +566,10 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 		pursuit_id=jnp.asarray(np.asarray(moves.index["pursuit"], dtype=np.int32)),
 		item_take_species=jnp.asarray(item_take_species),
 		move_table=move_table,
+		move_base_pp=jnp.asarray(moves.pp.astype(np.int32)),
+		noability_id=jnp.asarray(tables.abilities.index.get("noability", 0), jnp.int32),
+		imposter_id=jnp.asarray(tables.abilities.index["imposter"], jnp.int32),
+		castform_forms=jnp.asarray(castform_species, jnp.int32),
+		cherrim_forms=jnp.asarray(cherrim_species, jnp.int32),
+		meloetta_forms=jnp.asarray(meloetta_species, jnp.int32),
 	)

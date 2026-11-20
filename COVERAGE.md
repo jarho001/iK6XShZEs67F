@@ -8,11 +8,11 @@ Showdown commit: `1242c1e2d9763ba5b85d33f13aecb89bae19ae3d`
 
 | Kind | Distinct | Supported | Supported occurrences |
 | --- | ---: | ---: | ---: |
-| Moves | 223 | 220 | 99.7% |
-| Abilities | 126 | 119 | 97.0% |
+| Moves | 223 | 223 | 100.0% |
+| Abilities | 126 | 126 | 100.0% |
 | Items | 44 | 44 | 100.0% |
 
-Fully supported teams: 79.8%
+Fully supported teams: 100.0%
 
 ## Moves
 
@@ -139,7 +139,7 @@ Fully supported teams: 79.8%
 | lowkick | Low Kick | 449 | 4.4% | yes |
 | superfang | Super Fang | 450 | 4.4% | yes |
 | destinybond | Destiny Bond | 440 | 4.3% | yes |
-| naturepower | Nature Power | 422 | 4.2% | no |
+| naturepower | Nature Power | 422 | 4.2% | yes |
 | judgment | Judgment | 413 | 4.1% | yes |
 | aquatail | Aqua Tail | 412 | 4.1% | yes |
 | roar | Roar | 372 | 3.7% | yes |
@@ -191,7 +191,7 @@ Fully supported teams: 79.8%
 | volttackle | Volt Tackle | 185 | 1.9% | yes |
 | feintattack | Feint Attack | 184 | 1.8% | yes |
 | mirrorcoat | Mirror Coat | 181 | 1.8% | yes |
-| transform | Transform | 181 | 1.8% | no |
+| transform | Transform | 181 | 1.8% | yes |
 | crabhammer | Crabhammer | 180 | 1.8% | yes |
 | bite | Bite | 175 | 1.8% | yes |
 | tailglow | Tail Glow | 175 | 1.8% | yes |
@@ -225,7 +225,7 @@ Fully supported teams: 79.8%
 | disable | Disable | 90 | 0.9% | yes |
 | clearsmog | Clear Smog | 85 | 0.8% | yes |
 | petaldance | Petal Dance | 82 | 0.8% | yes |
-| relicsong | Relic Song | 82 | 0.8% | no |
+| relicsong | Relic Song | 82 | 0.8% | yes |
 | weatherball | Weather Ball | 82 | 0.8% | yes |
 | flamewheel | Flame Wheel | 81 | 0.8% | yes |
 | irontail | Iron Tail | 81 | 0.8% | yes |
@@ -282,7 +282,7 @@ Fully supported teams: 79.8%
 | insomnia | Insomnia | 552 | 5.4% | yes |
 | earlybird | Early Bird | 539 | 5.3% | yes |
 | synchronize | Synchronize | 533 | 5.2% | yes |
-| multitype | Multitype | 519 | 5.2% | no |
+| multitype | Multitype | 519 | 5.2% | yes |
 | analytic | Analytic | 529 | 5.2% | yes |
 | waterveil | Water Veil | 502 | 5.0% | yes |
 | shedskin | Shed Skin | 487 | 4.8% | yes |
@@ -310,7 +310,7 @@ Fully supported teams: 79.8%
 | download | Download | 337 | 3.4% | yes |
 | skilllink | Skill Link | 335 | 3.3% | yes |
 | sandstream | Sand Stream | 332 | 3.3% | yes |
-| magicbounce | Magic Bounce | 330 | 3.3% | no |
+| magicbounce | Magic Bounce | 330 | 3.3% | yes |
 | unburden | Unburden | 329 | 3.2% | yes |
 | roughskin | Rough Skin | 324 | 3.2% | yes |
 | anticipation | Anticipation | 317 | 3.1% | yes |
@@ -321,7 +321,7 @@ Fully supported teams: 79.8%
 | multiscale | Multiscale | 293 | 2.9% | yes |
 | owntempo | Own Tempo | 273 | 2.7% | yes |
 | simple | Simple | 264 | 2.6% | yes |
-| trace | Trace | 260 | 2.6% | no |
+| trace | Trace | 260 | 2.6% | yes |
 | poisonheal | Poison Heal | 256 | 2.6% | yes |
 | quickfeet | Quick Feet | 256 | 2.6% | yes |
 | liquidooze | Liquid Ooze | 256 | 2.5% | yes |
@@ -329,7 +329,7 @@ Fully supported teams: 79.8%
 | marvelscale | Marvel Scale | 224 | 2.2% | yes |
 | hustle | Hustle | 216 | 2.2% | yes |
 | turboblaze | Turboblaze | 215 | 2.1% | yes |
-| flowergift | Flower Gift | 210 | 2.1% | no |
+| flowergift | Flower Gift | 210 | 2.1% | yes |
 | magnetpull | Magnet Pull | 208 | 2.1% | yes |
 | mummy | Mummy | 193 | 1.9% | yes |
 | unaware | Unaware | 194 | 1.9% | yes |
@@ -339,7 +339,7 @@ Fully supported teams: 79.8%
 | effectspore | Effect Spore | 185 | 1.9% | yes |
 | contrary | Contrary | 184 | 1.8% | yes |
 | arenatrap | Arena Trap | 183 | 1.8% | yes |
-| imposter | Imposter | 181 | 1.8% | no |
+| imposter | Imposter | 181 | 1.8% | yes |
 | colorchange | Color Change | 180 | 1.8% | yes |
 | compoundeyes | Compound Eyes | 180 | 1.8% | yes |
 | filter | Filter | 178 | 1.8% | yes |
@@ -351,7 +351,7 @@ Fully supported teams: 79.8%
 | overcoat | Overcoat | 170 | 1.7% | yes |
 | purepower | Pure Power | 169 | 1.7% | yes |
 | limber | Limber | 167 | 1.7% | yes |
-| forecast | Forecast | 166 | 1.7% | no |
+| forecast | Forecast | 166 | 1.7% | yes |
 | minus | Minus | 166 | 1.7% | yes |
 | icebody | Ice Body | 165 | 1.6% | yes |
 | shielddust | Shield Dust | 164 | 1.6% | yes |
@@ -360,7 +360,7 @@ Fully supported teams: 79.8%
 | stickyhold | Sticky Hold | 163 | 1.6% | yes |
 | slowstart | Slow Start | 162 | 1.6% | yes |
 | cursedbody | Cursed Body | 157 | 1.6% | yes |
-| illusion | Illusion | 157 | 1.6% | no |
+| illusion | Illusion | 157 | 1.6% | yes |
 | wonderskin | Wonder Skin | 157 | 1.6% | yes |
 | baddreams | Bad Dreams | 156 | 1.6% | yes |
 | ironbarbs | Iron Barbs | 155 | 1.6% | yes |

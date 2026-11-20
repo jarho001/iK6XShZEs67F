@@ -142,8 +142,9 @@ def base_power(state, side, row, tables, switching_foe, rows, item_rows, gem_con
 
 	double = row.move_bp_double.astype(jnp.int32)
 	status = state.status[side, user].astype(jnp.int32)
-	# Showdown's newlySwitched lasts through the first turn for the leads too.
-	target_newly = (state.active_turns[foe, target] == 0) | (state.turn == 1)
+	# Showdown's newlySwitched is set by clearVolatile, which a lead never runs, so a lead is
+	# not newly switched; a replacement is until its turn ends (active_turns counts turn ends).
+	target_newly = state.active_turns[foe, target] == 0
 	doubled = (
 		((double == DOUBLE_USER_STATUS) & (status != HEALTHY) & (status != SLEEP))
 		| ((double == DOUBLE_USER_NO_ITEM) & ((state.item[side, user] == 0) | gem_consumed))

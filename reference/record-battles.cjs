@@ -32,6 +32,9 @@
  * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-longtail1.allowed.json --out work/diff/longtail1.jsonl.gz
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-longtail1.allowed.json --out tests/fixtures/diff-longtail1.jsonl.gz
  *
+ * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-longtail2.allowed.json --out work/diff/longtail2.jsonl.gz
+ * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-longtail2.allowed.json --out tests/fixtures/diff-longtail2.jsonl.gz
+ *
  * JSONL schema v2: header {type, schemaVersion, showdownCommit, seed, count,
  * acceptedMoves, ...}; battle {type, index, seed (four uint16 words), policySeed,
  * poolIndices, profile, teams (exact constructor inputs), initialOverrides: [],
@@ -118,6 +121,7 @@ const BOOSTS = ['atk', 'def', 'spa', 'spd', 'spe', 'accuracy', 'evasion'];
 const TURN_LIMIT = 1000; // Showdown's own Endless Battle Clause also caps at 1000.
 const START_UPDATE_ABILITIES = new Set([
 	'immunity', 'insomnia', 'limber', 'magmaarmor', 'oblivious', 'owntempo', 'vitalspirit', 'waterveil',
+	'trace',
 ]);
 const SWITCH_START_ABILITIES = new Set([
 	'airlock', 'anticipation', 'cloudnine', 'download', 'drizzle', 'drought', 'frisk',
@@ -229,7 +233,7 @@ function trackPublicAbilities(battle) {
 		const tags = parts.slice(2).filter(part => typeof part === 'string');
 		const named = tags.find(tag => /^(?:\[from\] )?ability: /.test(tag));
 		const from = tags.find(tag => tag.startsWith('[from] '));
-		const name = event === '-ability' ? value :
+		const name = event === '-ability' || (event === '-end' && value === 'Illusion') ? value :
 			named?.replace(/^(?:\[from\] )?ability: /, '') ||
 			(['-immune', '-fail'].includes(event) ? from?.slice(7) : undefined);
 		if (!name) return;
@@ -242,6 +246,31 @@ function trackPublicAbilities(battle) {
 		if (holder) revealed.set(holder, id);
 	};
 	return revealed;
+}
+
+// Public species (task 14): the species the opponent was last shown for each Pokemon. A
+// disguise (Illusion) stays until a damaging hit names the real species; forme changes and
+// Transform name their species; a switch-out shows nothing new.
+function trackPublicSpecies(battle) {
+	const shown = new WeakMap();
+	const add = battle.add;
+	battle.add = function (...parts) {
+		add.apply(this, parts);
+		const [event, target, value] = parts;
+		if (!target?.species) return;
+		if (['switch', 'drag'].includes(event)) {
+			shown.set(target, (target.illusion || target).species.id);
+		} else if (event === 'replace') {
+			shown.set(target, target.species.id);
+		} else if (event === '-formechange') {
+			shown.set(target, dex.toID(String(value)));
+		} else if (event === '-transform' && value?.species) {
+			shown.set(target, value.species.id);
+		} else if (event === 'detailschange') {
+			shown.set(target, dex.toID(String(value).split(',')[0]));
+		}
+	};
+	return shown;
 }
 
 // Counters of the active member's restricting and substitute volatiles (task 13).
@@ -268,7 +297,7 @@ function slotConditionsOf(battle, side) {
 	} : {}]));
 }
 
-function snapshot(battle, fixed, publicAbilities) {
+function snapshot(battle, fixed, publicAbilities, publicSpecies) {
 	return {
 		turn: battle.turn,
 		winner: !battle.ended ? null : battle.winner ?
@@ -285,6 +314,10 @@ function snapshot(battle, fixed, publicAbilities) {
 				side.active[0].status === 'tox' ? side.active[0].statusState.stage ?? 0 : 0,
 			types: side.active[0].fainted ? null : side.active[0].getTypes().map(type => dex.toID(type)),
 			item: side.active[0].item, ability: side.active[0].ability,
+			...(publicSpecies ? {
+				transformed: Boolean(side.active[0].transformed),
+				illusion: side.active[0].illusion ? side.active[0].illusion.species.id : null,
+			} : {}),
 			itemConsumed: !side.active[0].item && Boolean(side.active[0].lastItem) &&
 				!side.active[0].itemKnockedOff,
 			itemKnockedOff: side.active[0].itemKnockedOff,
@@ -313,6 +346,9 @@ function snapshot(battle, fixed, publicAbilities) {
 				itemKnockedOff: pokemon.itemKnockedOff,
 				ability: pokemon.ability,
 				...(publicAbilities ? { abilityPublic: publicAbilities.get(pokemon) || '' } : {}),
+				...(publicSpecies ? {
+					species: pokemon.species.id, shownSpecies: publicSpecies.get(pokemon) || '',
+				} : {}),
 			})),
 		})),
 	};
@@ -459,6 +495,11 @@ const OUTCOME_RULES = [
 		scope?.kind === 'ability' && scope.ability === 'harvest' &&
 		caller === 'Battle.onResidual' && args[0] === 1 && args[1] === 2,
 		address: scope => [scope.target.side.n, 0], value: value => Number(value) },
+	// Magic Bounce's reflected move: the holder's own accuracy check (task 14).
+	{ kind: 'bounce_hit', method: 'chance', matches: (scope, caller, args) =>
+		scope?.kind === 'hit' && scope.move?.hasBounced && caller === 'BattleActions.hitStepAccuracy' &&
+		args[1] === 100,
+		address: scope => [scope.user.side.n, 0], value: value => Number(value) },
 	{ kind: 'hit', method: 'chance', matches: (scope, caller, args) =>
 		scope?.kind === 'hit' && caller === 'BattleActions.hitStepAccuracy' && args[1] === 100,
 		address: scope => [scope.user.side.n, 0], value: value => Number(value) },
@@ -613,6 +654,11 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 			stats.exceptions['singleton-frisk'] = (stats.exceptions['singleton-frisk'] || 0) + 1;
 			return allow('singleton-frisk', () => sample.call(this, items));
 		}
+		// Trace samples its one foe in singles; the draw has a single candidate (task 14).
+		if (this.effect?.id === 'trace' && items.length === 1) {
+			stats.exceptions['singleton-trace'] = (stats.exceptions['singleton-trace'] || 0) + 1;
+			return allow('singleton-trace', () => sample.call(this, items));
+		}
 		const rule = OUTCOME_RULES.find(rule => rule.method === 'sample' && rule.matches(scope, caller, [items]));
 		assert(rule, `Unclassified battle.sample at ${caller}`);
 		const value = allow(rule.kind, () => sample.call(this, items));
@@ -661,9 +707,12 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 				tied[0].side !== tied[1].side, 'Unexpected weather event tie');
 			rule = OUTCOME_RULES.find(row => row.method === 'shuffle' && row.matches(scope));
 		} else if (scope?.kind === 'eachEvent' && scope.event === 'WeatherChange') {
-			assert(tied.every(pokemon => battle.findEventHandlers(pokemon, 'WeatherChange').length === 0),
-				'Nonempty WeatherChange handlers: cannot ignore order');
-			if (scope.effect?.effectType === 'Ability' || addresses?.has('order:0:4')) {
+			// Forecast and Flower Gift change forme on WeatherChange; their order matters.
+			const formHandlers = tied.some(pokemon => battle.findEventHandlers(pokemon, 'WeatherChange').length > 0);
+			assert(!formHandlers || tied.every(pokemon => battle.findEventHandlers(pokemon, 'WeatherChange')
+				.every(h => ['forecast', 'flowergift'].includes(h.effect?.id))),
+			'Nonempty WeatherChange handlers: cannot ignore order');
+			if (!formHandlers && (scope.effect?.effectType === 'Ability' || addresses?.has('order:0:4'))) {
 				exception = 'empty-ability-WeatherChange';
 			} else {
 				rule = OUTCOME_RULES.find(row => row.method === 'shuffle' && row.matches(scope));
@@ -700,7 +749,8 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 			assert(tied.every(p => battle.findPokemonEventHandlers(p, 'onSwitchIn').every(h => [
 					'slp', 'tox', 'choiceband', 'choicespecs', 'choicescarf',
 				].includes(h.effect.id) || SWITCH_START_ABILITIES.has(h.effect.id) ||
-					h.effect.id === 'slowstart') &&
+					h.effect.id === 'slowstart' || h.effect.id === 'imposter' ||
+					h.effect.id === 'forecast' || h.effect.id === 'flowergift' || h.effect.id === 'trace') &&
 				battle.findPokemonEventHandlers(p, 'onAnySwitchIn').every(h => h.effect.id === 'whiteherb') &&
 				battle.findSideEventHandlers(p.side, 'onSideSwitchIn', undefined, p).length === 0 &&
 				battle.findSideEventHandlers(p.side, 'onSwitchIn', undefined, p)
@@ -717,7 +767,8 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 			const abilityOrder = grouped &&
 				(tied.every(p => WEATHER_START_ABILITIES.has(p.ability)) ||
 					tied.some(p => p.ability === 'intimidate'));
-			if (hasHazards || abilityOrder) {
+			const formOrder = tied.some(p => ['imposter', 'forecast', 'flowergift', 'trace'].includes(p.ability));
+			if (hasHazards || abilityOrder || formOrder) {
 				rule = OUTCOME_RULES.find(row => row.method === 'shuffle' && row.matches(scope));
 			} else if (tied.some(p => p.ability === 'slowstart')) {
 				exception = 'independent-slowstart-switchIn-order';
@@ -789,6 +840,7 @@ function playBattle(index, masterSeed, pool, moves, ghostTeams, exhaustionMoves,
 		const recorder = instrument(battle, stats, undefined, { groupedSwitchInOnly: recordStart });
 		let initialOutcomes;
 		const publicAbilities = recordStart ? trackPublicAbilities(battle) : undefined;
+		const publicSpecies = recordStart ? trackPublicSpecies(battle) : undefined;
 		if (recordStart) {
 			recorder.begin();
 			battle.setPlayer('p1', players[0]);
@@ -803,13 +855,15 @@ function playBattle(index, masterSeed, pool, moves, ghostTeams, exhaustionMoves,
 		const fixed = battle.sides.map(side => [...side.pokemon]);
 		for (const [s, members] of fixed.entries()) {
 			for (const [slot, pokemon] of members.entries()) {
-				assert.equal(pokemon.ability, dex.toID(teams[s][slot].ability));
+				// A Trace or Imposter lead copies its foe during the start (task 14).
+				const copiesAtStart = ['trace', 'imposter'].includes(dex.toID(teams[s][slot].ability));
+				if (!copiesAtStart) assert.equal(pokemon.ability, dex.toID(teams[s][slot].ability));
 				assert.equal(pokemon.item || pokemon.lastItem, dex.toID(teams[s][slot].item));
-				assert.deepEqual(pokemon.moveSlots.map(m => m.id), teams[s][slot].moves);
+				if (!copiesAtStart) assert.deepEqual(pokemon.moveSlots.map(m => m.id), teams[s][slot].moves);
 			}
 		}
 		recorder.setFixed(fixed);
-		const initialState = snapshot(battle, fixed, publicAbilities);
+		const initialState = snapshot(battle, fixed, publicAbilities, publicSpecies);
 		const steps = [];
 		let turnLimitHit = false;
 		while (!battle.ended) {
@@ -831,7 +885,7 @@ function playBattle(index, masterSeed, pool, moves, ghostTeams, exhaustionMoves,
 				}
 			}
 			const outcomes = recorder.end();
-			const state = snapshot(battle, fixed, publicAbilities);
+			const state = snapshot(battle, fixed, publicAbilities, publicSpecies);
 			steps.push({ actions: selected.map(choice => choice.action), outcomes, state });
 			for (const outcome of outcomes) {
 				stats.outcomes[outcome.kind] = (stats.outcomes[outcome.kind] || 0) + 1;
@@ -896,7 +950,7 @@ async function main() {
 			poolSeed: pool.seed, policy: 'uniform over all legal moves and switches',
 			exhaustion: { every: 20, moves: exhaustionMoves, initialOverrides: false },
 			prngExceptions: [...EXCEPTIONS, 'singleton-frisk', 'identical-noguard-accuracy',
-				'empty-ability-WeatherChange', 'independent-ability-Update'] });
+				'empty-ability-WeatherChange', 'independent-ability-Update', 'singleton-trace'] });
 		for (let index = 0; index < count; index++) {
 			let record;
 			try { record = playBattle(index, seed, pool, moves, ghostTeams, exhaustionMoves, options); }

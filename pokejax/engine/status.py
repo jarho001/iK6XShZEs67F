@@ -114,8 +114,9 @@ def before_move(state, side, move, enabled, key, forced, tables, ability_rows, r
 	)
 	paralyzed = enabled & (status == PARALYSIS) & chance(key, forced, FULL_PARALYSIS, side, 0, 1, 4)
 	can_act = enabled & ~paralyzed
-	# Destiny Bond ends when its user attempts any other move that gets this far.
-	destiny_clear = can_act & (row.move_self_volatile != 4)
+	# Destiny Bond ends when its user attempts any other move: its BeforeMove handler (priority
+	# -1) still runs after a sleep, flinch or paralysis check has stopped the move.
+	destiny_clear = started & (row.move_self_volatile != 4)
 	state = set_active_volatile(
 		state,
 		side,

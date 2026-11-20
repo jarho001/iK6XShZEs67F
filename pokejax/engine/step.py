@@ -10,10 +10,13 @@ from jax import lax
 from .abilities import (
 	CONTACT,
 	CONTACT_COLOR_CHANGE,
+	MAGIC_BOUNCE,
+	NOTRACE,
 	OWN_TEMPO,
 	PP_COST,
 	PP_COST_PRESSURE,
 	SHEER_FORCE,
+	TRACE,
 	active_abilities,
 	effective_weather,
 	has_hook,
@@ -22,6 +25,7 @@ from .abilities import (
 )
 from .actions import SIDES, move_availability
 from .boosts import apply_boosts
+from .damage import accuracy_hit
 from .damage_effects import SELF_FAINT_ALWAYS, apply_damage_effects, apply_poison_touch
 from .delayed import (
 	SELF_DESTINY_BOND,
@@ -35,6 +39,13 @@ from .delayed import (
 	faint_active,
 )
 from .field import apply_move_field_effects, effective_move_type
+from .forms import (
+	relic_song_forme,
+	restore_form,
+	switch_foe_view,
+	sync_weather_formes,
+)
+from .illusion import break_illusion
 from .item_moves import apply_item_swap, apply_knock_off
 from .items import (
 	apply_after_move_items,
@@ -46,7 +57,7 @@ from .items import (
 )
 from .move_data import read_move
 from .order import action_order
-from .randomness import random_bits
+from .randomness import BOUNCE_HIT, random_bits
 from .residual import residual
 from .restrictions import (
 	apply_restrictions,
@@ -72,6 +83,7 @@ from .state import (
 	SUN,
 	SWITCH,
 	TEAM_SLOTS,
+	TRACE_SEEK,
 	TURN_IDLE,
 	TURN_MOVES,
 	TURN_REPLACEMENT,
@@ -81,7 +93,14 @@ from .state import (
 )
 from .status import after_hit, apply_move, before_move
 from .substitute import SELF_SUBSTITUTE, apply_substitute
-from .switching import drag_in, run_switch_in, switch_actions, switch_handler_first
+from .switching import (
+	copy_on_entry,
+	drag_in,
+	run_switch_in,
+	switch_actions,
+	switch_handler_first,
+)
+from .trace import trace_copy
 from .turn_moves import (
 	apply_charge_boosts,
 	apply_move_volatiles,
@@ -203,6 +222,11 @@ def _move(
 	pp_cost = pp_cost_for(row, pressure, pressure_target_alive, user_types, tables)
 	called_extra = pp_cost_for(called_row, pressure, pressure_target_alive, user_types, tables) - 1
 	pp_cost += sleep_call.astype(jnp.int32) * called_extra
+	# A called move's Pressure surcharge is charged to the caller's slot (useMove sourceEffect).
+	natured = row.move_call > 0
+	nature_row = read_move(tables, row.move_call.astype(jnp.int32))
+	nature_extra = pp_cost_for(nature_row, pressure, pressure_target_alive, user_types, tables) - 1
+	pp_cost += natured.astype(jnp.int32) * nature_extra
 	new_pp = jnp.maximum(pp - consume_pp.astype(jnp.int32) * pp_cost, 0).astype(state.pp.dtype)
 	revealed = state.revealed_moves[side, user, slot] | (enabled & ~recharge & ~struggle)
 	selected_move = slot_mask(state, side, user, slot)
@@ -213,7 +237,9 @@ def _move(
 	# Showdown records the last move once PP is paid (or a continuation or Struggle runs).
 	last_id = row.id
 	last_moved = enabled & ~recharge & ((pp > 0) | continuation | struggle)
+	# Nature Power is a static call: the user uses Earthquake, and Nature Power keeps its PP.
 	row = select_row(sleep_call, called_row, row)
+	row = select_row(natured, read_move(tables, row.move_call.astype(jnp.int32)), row)
 	struggle = row.id == tables.struggle_id
 	will_act = (side == first) & opponent_pending
 	state, stalled = try_stalling_move(state, side, row, enabled, will_act, key, forced, tables)
@@ -257,6 +283,11 @@ def _move(
 	breaks_guard = attack_allowed & row.move_breaks_protect
 	state = clear_broken_guards(state, side, breaks_guard)
 	guarded, invulnerable = target_move_guards(state, side, row, tables, rows)
+	# TryHit: Magic Bounce reflects a reflectable move before its accuracy roll; the original
+	# move then does nothing, and the reflected move runs further down with the holder acting.
+	reflect = attack_allowed & row.move_reflectable & has_hook(rows[foe], MAGIC_BOUNCE)
+	reflect &= ~guarded & ~invulnerable
+	attack_allowed = attack_allowed & ~reflect
 	state, result = apply_damage_effects(
 		state,
 		side,
@@ -274,21 +305,33 @@ def _move(
 		~will_act,
 		switching_foe=target_switching,
 	)
+	# DamagingHit: a damaging hit on an Illusion holder ends the disguise.
+	state = break_illusion(state, (SIDES == foe) & result.success, tables)
 	hit = result.hit
 	connected = hit | result.sub_hit
+	# A reflected move (Magic Bounce) is used by the holder against the original user: its own
+	# accuracy check decides it, and the effects below act for the holder (acting) through the
+	# same effect calls, so each effect kind is compiled once.
+	bounce_hit = accuracy_hit(
+		state, foe, row.id, key, forced, tables, rows, weather, kind=BOUNCE_HIT
+	)
+	bounced = reflect & bounce_hit & (state.hp[side, user] > 0)
+	acting = jnp.where(reflect, foe, side)
+	effect_on = attack_allowed | reflect
+	effect_hit = jnp.where(reflect, bounced, hit)
 	state, status_reveals = apply_move(
-		state, side, row, attack_allowed, hit, key, forced, tables, rows, weather
+		state, acting, row, effect_on, effect_hit, key, forced, tables, rows, weather
 	)
 	state = reveal_abilities(state, result.ability_reveals | status_reveals)
 	state, _ = apply_item_swap(state, side, attack_allowed & row.move_item_swap & hit, tables, rows)
 	item_rows = gather_active_items(state, tables)
 	state = apply_boosts(
 		state,
-		side,
+		acting,
 		row,
-		attack_allowed & ~sheer,
-		hit,
-		result.success | result.sub_hit,
+		(attack_allowed & ~sheer) | reflect,
+		effect_hit,
+		jnp.where(reflect, bounced, result.success | result.sub_hit),
 		tables,
 		rows,
 	)
@@ -342,7 +385,16 @@ def _move(
 	state = reveal_abilities(state, (SIDES == foe) & color_trigger)
 	state = after_hit(state, side, row, attack_allowed & result.success, tables, weather)
 	state = apply_move_field_effects(
-		state, side, row, attack_allowed, result.field_hit, hit, key, forced, tables, item_rows
+		state,
+		acting,
+		row,
+		effect_on,
+		jnp.where(reflect, bounced, result.field_hit),
+		effect_hit,
+		key,
+		forced,
+		tables,
+		item_rows,
 	)
 	state = apply_move_volatiles(
 		state,
@@ -356,7 +408,12 @@ def _move(
 		connected=attack_allowed & connected,
 	)
 	state = apply_autotomize(state, side, attack_allowed & row.move_autotomize, tables)
-	state = apply_restrictions(state, side, row, hit, opponent_pending, tables, rows, weather)
+	state = apply_restrictions(
+		state, acting, row, effect_hit, opponent_pending & ~reflect, tables, rows, weather
+	)
+	# Relic Song (onAfterMoveSecondarySelf): a Meloetta changes forme after a connecting hit.
+	relic = attack_allowed & row.move_relic_forme & connected
+	state = relic_song_forme(state, (SIDES == side) & relic, tables)
 	# Destiny Bond: a KO by this move's damage takes the attacker down too.
 	db_trigger = attack_allowed & result.success & (state.volatiles[foe, DESTINY_BOND] > 0)
 	db_trigger &= (state.hp[foe, state.active[foe]] == 0) & (state.hp[side, user] > 0)
@@ -414,8 +471,22 @@ def _move(
 	pivot = enabled & row.move_self_switch & connected & user_alive
 	pivot &= jnp.any(bench_alive)
 	drag = enabled & row.move_force_switch & hit & user_alive_before_after_move_item & target_alive
+	# Trace's Update copies a copyable foe; its Start effects run with this move's switch-in.
+	state, traced = trace_copy(state, tables)
+	# A reflected Roar or Whirlwind drags the original user; Transform copies for the user.
+	bounce_drag = bounced & row.move_force_switch & (state.hp[side, user] > 0)
+	transform_on = attack_allowed & row.move_transform & hit
 	state, dragged, ability_rows = drag_in(
-		state, foe, drag, key, forced, tables, side, ability_rows
+		state,
+		jnp.where(reflect, side, foe),
+		drag | bounce_drag,
+		key,
+		forced,
+		tables,
+		jnp.where(reflect, foe, side),
+		ability_rows,
+		copy_mask=(SIDES == side) & transform_on,
+		extra_starts=traced,
 	)
 	# A final hit can run Update before the queue declares the winner.
 	# Fatigue confusion starts later, so only an ongoing game can cure it here.
@@ -431,6 +502,7 @@ def _move(
 		ignore_confusion,
 		tables,
 	)
+	state = update_forms(state, tables)
 	hp = state.hp.astype(jnp.int32)
 	boosts = jnp.where((hp[SIDES, state.active] > 0)[:, None], state.boosts, 0)
 	state = write_last_move(state, side, user, last_id, last_moved)
@@ -442,6 +514,24 @@ def _move(
 		alive_after,
 		result.instafaint_kill,
 	)
+
+
+def update_hooks(state, tables):
+	"""Showdown's Update event for formes and seeking abilities.
+
+	A seeking Trace copies its foe and runs the copied ability's Start effects. Forecast and
+	Flower Gift follow the effective weather of the active Pokemon.
+	"""
+	state, copied = trace_copy(state, tables)
+	state, _ = run_switch_in(
+		state, copied, 0, tables, hazards=False, rows=active_abilities(state, tables)
+	)
+	return sync_weather_formes(state, tables, active_abilities(state, tables))
+
+
+def update_forms(state, tables):
+	"""Forme changes that follow the weather, without any Start effects (the residual's update)."""
+	return sync_weather_formes(state, tables, active_abilities(state, tables))
 
 
 def _resolve_action_winner(state, alive_before, alive, side, row, last_first=False):
@@ -567,6 +657,32 @@ def step(state, actions, key, forced, engine_tables):
 		item_rows = gather_active_items(state, t)
 		previous = (state, item_rows, abilities, start_turn)
 		state = switch_actions(state, actions, switching, t, abilities)
+		# Imposter (onSwitchIn) and Trace (onStart) copy the foe as it stands when this side's
+		# switch-in runs; a foe entering after it is still the old active.
+		view = switch_foe_view(previous[0], state, switching, first_order)
+		state, _ = copy_on_entry(state, switching, jnp.zeros((2,), jnp.bool_), t, view)
+		# A seeking Trace whose holder leaves after its foe entered copies the new foe in that
+		# Update, before its own switch-out: only the public ability keeps the copy.
+		leaves_late = switching & switching[::-1] & (first_order == 1 - SIDES)
+		foe_now = state.active[::-1]
+		foe_ability = state.ability[SIDES[::-1], foe_now]
+		foe_rows = t.ability_hooks[foe_ability.astype(jnp.int32)]
+		copies = (
+			leaves_late
+			& (previous[0].volatiles[:, TRACE_SEEK] > 0)
+			& has_hook(active_abilities(previous[0], t), TRACE)
+			& (foe_ability != 0)
+			& (foe_ability != t.noability_id)
+			& ~has_hook(foe_rows, NOTRACE)
+			& (state.hp[SIDES[::-1], foe_now] > 0)
+		)
+		slots = jnp.arange(TEAM_SLOTS)[None, :] == previous[0].active[:, None]
+		public = jnp.where(
+			slots & copies[:, None],
+			foe_ability[:, None].astype(state.ability_public.dtype),
+			state.ability_public,
+		)
+		state = state._replace(ability_public=public)
 		item_rows = gather_active_items(state, t)
 		abilities = active_abilities(state, t)
 		handler_first = switch_handler_first(state, key, forced, item_rows, abilities)
@@ -575,6 +691,7 @@ def step(state, actions, key, forced, engine_tables):
 			state, switching, handler_first, t, previous=previous, rows=abilities
 		)
 		state = update_active_items(state, jnp.any(switching), item_rows, abilities, tables=t)
+		state = update_hooks(state, t)
 		return state, abilities
 
 	def unrolled_queue(carry):
@@ -637,6 +754,7 @@ def step(state, actions, key, forced, engine_tables):
 	run_residual = (state.turn_stage == TURN_RESIDUAL) & ~pivot_pause & (state.winner == ONGOING)
 	state = residual(state, run_residual, key, forced, t, ability_rows)
 	state = end_turn(state, run_residual & (state.winner == ONGOING), key, forced)
+	state = update_forms(state, t)
 	state = state._replace(
 		turn_stage=jnp.where(
 			run_residual & (state.winner == ONGOING), TURN_REPLACEMENT, state.turn_stage
@@ -652,6 +770,7 @@ def step(state, actions, key, forced, engine_tables):
 	active_slots = jnp.arange(TEAM_SLOTS)[None, :] == state.active[:, None]
 	replacement_stage = state.turn_stage == TURN_REPLACEMENT
 	clear_fainted = needs_switch & ~ended & replacement_stage
+	state = restore_form(state, fainted, t)
 	ability = jnp.where(active_slots & fainted[:, None], state.ability_base, state.ability)
 	status = jnp.where(active_slots & clear_fainted[:, None], 0, state.status)
 	status_counter = jnp.where(active_slots & clear_fainted[:, None], 0, state.status_counter)

@@ -7,10 +7,12 @@ from pokejax.mechanics.stat_stage import scale_stat_stage
 from .abilities import (
 	BOOST_EVENT,
 	BOOST_EVENT_DEFIANT,
+	IMPOSTER,
 	RESIDUAL,
 	RESIDUAL_SLOW_START,
 	START,
 	START_ANNOUNCE,
+	START_ANNOUNCE_SWITCH,
 	START_ANTICIPATION,
 	START_DOWNLOAD,
 	START_FRISK,
@@ -23,6 +25,7 @@ from .abilities import (
 	apply_boost_delta,
 	boost_delta,
 	effective_weather,
+	has_hook,
 	move_abilities,
 	reveal_abilities,
 	suppresses_weather,
@@ -30,6 +33,8 @@ from .abilities import (
 from .actions import SIDES
 from .delayed import healing_wish_switch_in
 from .field import apply_active_switch_hazards, set_weather
+from .forms import foe_view, restore_form, reveal_ability_ids, transform_copy
+from .illusion import enter_illusion
 from .items import reveal_active_items, update_item_state
 from .order import action_speed
 from .randomness import DRAG_IN, SWITCH_HANDLER_ORDER, UNFORCED, first_side, integer
@@ -48,11 +53,41 @@ from .state import (
 	TOXIC,
 	WIDE_GUARD,
 )
+from .trace import trace_enter
+
+
+def swap_party(party, switch_mask, targets, outgoing):
+	"""Showdown switchIn: the entering member takes array index 0 and the leaver takes its place."""
+	slots = jnp.arange(TEAM_SLOTS)
+	where_in = jnp.argmax(party == targets[:, None], axis=1)
+	swapped = jnp.where(
+		slots[None, :] == 0,
+		targets[:, None],
+		jnp.where(slots[None, :] == where_in[:, None], outgoing[:, None], party),
+	)
+	return jnp.where(switch_mask[:, None], swapped, party).astype(party.dtype)
+
+
+def copy_on_entry(state, switching, copy_mask, tables, view):
+	"""Imposter (onSwitchIn) and Trace (onStart) for the entering members, from the foe's view.
+
+	copy_mask adds Transform's user (not entering). Returns (state, changed): the sides whose
+	ability became a new one, which run their Start effects with the switch-in effects. The
+	copied Imposter ability is public (the protocol names it).
+	"""
+	imposter = switching & has_hook(active_abilities(state, tables), IMPOSTER)
+	held = state.ability[SIDES, state.active]
+	state, changed = transform_copy(state, imposter | copy_mask, tables, view)
+	state = reveal_ability_ids(state, changed & imposter, held)
+	return trace_enter(state, switching, tables, view), changed
 
 
 def switch_members(state, switch_mask, targets, tables=None, rows=None):
 	"""Replace selected active members, clearing active-only state densely."""
 	outgoing = state.active
+	if tables is not None:
+		# clearVolatile: the outgoing member's base species, stats and own moves come back.
+		state = restore_form(state, switch_mask, tables)
 	if rows is None and tables is not None:
 		rows = active_abilities(state, tables)
 	if rows is not None:
@@ -75,6 +110,7 @@ def switch_members(state, switch_mask, targets, tables=None, rows=None):
 		revealed = natural_cure & (old_status != HEALTHY)
 		state = reveal_abilities(state, switch_mask & revealed)
 	active = jnp.where(switch_mask, targets, outgoing).astype(state.active.dtype)
+	state = state._replace(party=swap_party(state.party, switch_mask, targets, outgoing))
 	boosts = jnp.where(switch_mask[:, None], 0, state.boosts)
 	columns = jnp.arange(NUM_VOLATILES)
 	side_condition = (columns == QUICK_GUARD) | (columns == WIDE_GUARD)
@@ -127,7 +163,10 @@ def switch_members(state, switch_mask, targets, tables=None, rows=None):
 		seen_order=seen_order,
 		last_move=last_move.astype(state.last_move.dtype),
 	)
-	return healing_wish_switch_in(state, switch_mask, targets)
+	state = healing_wish_switch_in(state, switch_mask, targets)
+	if tables is not None:
+		state = enter_illusion(state, switch_mask, tables)
+	return state
 
 
 def switch_actions(state, actions, switch_mask, tables=None, rows=None):
@@ -137,7 +176,18 @@ def switch_actions(state, actions, switch_mask, tables=None, rows=None):
 	return switch_members(state, switch_mask, targets, tables, rows)
 
 
-def drag_in(state, side, enabled, key, forced, tables, source=None, rows=None):
+def drag_in(
+	state,
+	side,
+	enabled,
+	key,
+	forced,
+	tables,
+	source=None,
+	rows=None,
+	copy_mask=None,
+	extra_starts=None,
+):
 	"""Uniformly select a usable bench member and run its normal hazards."""
 	slots = jnp.arange(TEAM_SLOTS)
 	eligible = (state.hp[side] > 0) & (slots != state.active[side])
@@ -153,7 +203,15 @@ def drag_in(state, side, enabled, key, forced, tables, source=None, rows=None):
 	switch_mask = (SIDES == side) & active
 	targets = jnp.where(switch_mask, target, state.active)
 	state = switch_members(state, switch_mask, targets, tables, rows)
-	state, rows = run_switch_in(state, switch_mask, side, tables, source)
+	if copy_mask is None:
+		copy_mask = jnp.zeros((2,), jnp.bool_)
+	view = foe_view(state, state.active[::-1])
+	state, changed = copy_on_entry(state, switch_mask, copy_mask, tables, view)
+	# Hazards belong to the dragged-in member only; a copied Transform user runs Start effects.
+	starts = switch_mask | changed
+	if extra_starts is not None:
+		starts = starts | extra_starts
+	state, rows = run_switch_in(state, starts, side, tables, source, hazards=switch_mask)
 	return (state, switch_mask) if source is None else (state, switch_mask, rows)
 
 
@@ -164,8 +222,13 @@ def switch_handler_first(state, key, forced, items, rows):
 	return jnp.where(speed[0] == speed[1], tie, jnp.where(speed[0] > speed[1], 0, 1))
 
 
-def run_switch_in(state, switchers, first, tables, mold_source=None, previous=None, rows=None):
-	"""Resolve hazards and Start effects in the order of their holders."""
+def run_switch_in(
+	state, switchers, first, tables, mold_source=None, previous=None, rows=None, hazards=True
+):
+	"""Resolve hazards and Start effects in the order of their holders.
+
+	hazards=False runs only the Start effects of a copied ability (Trace, Transform, Imposter).
+	"""
 	if rows is None:
 		rows = active_abilities(state, tables)
 	before = state.hp[SIDES, state.active] > 0
@@ -190,7 +253,7 @@ def run_switch_in(state, switchers, first, tables, mold_source=None, previous=No
 	state = apply_active_switch_hazards(
 		state,
 		state.active,
-		switchers,
+		switchers & hazards,
 		first,
 		tables,
 		hazard_rows,
@@ -290,8 +353,10 @@ def run_switch_in(state, switchers, first, tables, mold_source=None, previous=No
 		last = 1 - first
 		state, last_changed = set_weather(state, weather[last], starts[last], 0, ability=True)
 		weather_changed |= ~faster & last_changed
+	own_ability = state.ability[SIDES, state.active] == state.ability_base[SIDES, state.active]
 	revealed = (
 		(starts & (start == START_ANNOUNCE))
+		| (starts & (start == START_ANNOUNCE_SWITCH) & own_ability)
 		| intimidate
 		| blocked_intimidate
 		| download

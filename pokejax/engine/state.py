@@ -80,7 +80,12 @@ ENCORE_REMAINING = 30
 TAUNT = 31
 YAWN = 32
 DESTINY_BOND = 33
-NUM_VOLATILES = 34
+# Task 14 volatiles: a Transformed active (Transform or Imposter); the Illusion disguise as
+# the disguised member's slot plus one (zero means none); Trace's seek flag.
+TRANSFORMED = 34
+ILLUSION_SLOT = 35
+TRACE_SEEK = 36
+NUM_VOLATILES = 37
 HP, ATK, DEF, SPA, SPD, SPE = range(NUM_STATS)
 BOOST_ATK, BOOST_DEF, BOOST_SPA, BOOST_SPD, BOOST_SPE, ACCURACY, EVASION = range(NUM_BOOSTS)
 EMPTY = 0
@@ -176,3 +181,17 @@ class BattleState(NamedTuple):
 	wish_hp: jax.Array  # int16 [2]: HP the pending Wish restores
 	healing_wish: jax.Array  # bool [2]: Healing Wish waits for the next switch-in to that side
 	trick_room: jax.Array  # int8 scalar: Trick Room turns left; zero means inactive
+	# Task 14 forms. species_base is each member's own species; a member leaving the field
+	# restores its own species, and saved_stats / saved_* hold the active side's own stats and
+	# moveset while it is Transformed or a Meloetta has changed forme. shown_species is
+	# the species the opponent was last told (Illusion keeps the disguise until it breaks).
+	species_base: jax.Array  # int16 [2, 6]
+	saved_stats: jax.Array  # int16 [2, 5]: the active member's own Atk..Spe before a stat change
+	saved_moves: jax.Array  # int16 [2, 4]
+	saved_pp: jax.Array  # uint8 [2, 4]
+	saved_max_pp: jax.Array  # uint8 [2, 4]
+	saved_revealed: jax.Array  # uint8 [2, 4]
+	shown_species: jax.Array  # int16 [2, 6]
+	# Showdown's side.pokemon order (array index to team slot). Index 0 is the active member;
+	# a switch-in swaps the entering and leaving positions. Illusion's disguise reads it.
+	party: jax.Array  # int8 [2, 6]

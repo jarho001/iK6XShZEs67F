@@ -52,11 +52,21 @@ def test_showdown_reset(tables, tmp_path):
 		jax.random.split(jax.random.key(0), len(pairs)), teams, build_engine_tables(tables)
 	)
 	state = jax.device_get(state)
+	imposter = tables.abilities.index["imposter"]
+	ability = np.asarray(teams.ability)
 	for b, battle in enumerate(fixture["battles"]):
 		assert int(state.turn[b]) == battle["turn"] == FIRST_TURN
 		for side, members in enumerate(battle["sides"]):
 			for slot, member in enumerate(members):
 				index = b, side, slot
+				if slot == 0 and ability[b, side, 0] == imposter:
+					# An Imposter lead copies the foe lead when both are out (task 14): its
+					# stats and HP are the foe's, but its own maximum HP stays.
+					foe = battle["sides"][1 - side][0]
+					stats = [member["maxhp"], *(foe["storedStats"][s] for s in STAT_NAMES[1:])]
+					np.testing.assert_array_equal(state.stats[index], stats)
+					assert int(state.hp[index]) == member["maxhp"]
+					continue
 				stats = [member["maxhp"], *(member["storedStats"][s] for s in STAT_NAMES[1:])]
 				np.testing.assert_array_equal(state.stats[index], stats)
 				assert int(state.hp[index]) == member["maxhp"]
@@ -73,10 +83,18 @@ def test_showdown_reset(tables, tmp_path):
 	assert np.all(state.status_counter == 0)
 	assert np.all(state.request == MOVE)
 	assert np.all(state.winner == ONGOING)
+	# Imposter leads copy their foe at the start (task 14): species and ability then differ.
+	copying = np.zeros(np.shape(teams.ability), bool)
+	copying[..., 0] = np.asarray(teams.ability)[..., 0] == imposter
 	for name in teams._fields:
 		if name == "item":
 			np.testing.assert_array_equal(
 				np.where(state.item_consumed, state.item_public, state.item), teams.item
+			)
+		elif name in ("species", "ability", "moves"):
+			mask = copying[..., None] if name == "moves" else copying
+			np.testing.assert_array_equal(
+				np.where(mask, 0, getattr(state, name)), np.where(mask, 0, getattr(teams, name))
 			)
 		else:
 			np.testing.assert_array_equal(getattr(state, name), getattr(teams, name))

@@ -350,6 +350,13 @@ LONG_TAIL_MOVES = frozenset(
 )
 SUPPORTED_MOVES |= LONG_TAIL_MOVES
 
+# Long tail, part 2 (task 14): Transform, Nature Power, Relic Song. Relic Song's sleep is a
+# secondary (SECONDARY_MOVES). See engine/forms.py, reflect.py and move_data columns.
+LONG_TAIL2_MOVES = frozenset(["naturepower", "relicsong", "transform"])
+# Relic Song's sleep chance is a secondary; the Gen 5 table here adds it to the secondary group.
+LONG_TAIL2_SECONDARY_MOVES = frozenset(["relicsong"])
+SUPPORTED_MOVES |= LONG_TAIL2_MOVES
+
 # Pressure and Dry Skin include the hooks modeled in ability group 1.
 SUPPORTED_ABILITIES: frozenset[str] = frozenset(
 	{
@@ -477,6 +484,20 @@ SUPPORTED_ABILITIES: frozenset[str] = frozenset(
 		"weakarmor",
 		"wonderguard",
 		"wonderskin",
+	}
+)
+# Long tail, part 2 (task 14): Multitype, Magic Bounce, Trace, Flower Gift, Forecast, Imposter
+# and Illusion. See engine/abilities.py (flags, FORM) and engine/forms.py, illusion.py,
+# trace.py, reflect.py.
+SUPPORTED_ABILITIES |= frozenset(
+	{
+		"flowergift",
+		"forecast",
+		"illusion",
+		"imposter",
+		"magicbounce",
+		"multitype",
+		"trace",
 	}
 )
 SUPPORTED_ITEMS: frozenset[str] = frozenset(

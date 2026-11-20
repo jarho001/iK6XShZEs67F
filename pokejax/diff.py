@@ -34,6 +34,7 @@ from pokejax.engine.state import (
 	FLASH_FIRE,
 	FLINCH,
 	HP,
+	ILLUSION_SLOT,
 	LEECH_SEED,
 	LOCKED_MOVE,
 	MOVE,
@@ -52,6 +53,7 @@ from pokejax.engine.state import (
 	SWITCH,
 	TAUNT,
 	TIE,
+	TRANSFORMED,
 	TURN_IDLE,
 	TWO_TURN_MOVE,
 	UNBURDEN,
@@ -117,6 +119,10 @@ def comparable(state, tables):
 		"ability": state.ability,
 		"abilityPublic": state.ability_public,
 		"ended": state.winner != ONGOING,
+		"species": state.species,
+		"shownSpecies": state.shown_species,
+		"transformed": state.volatiles[..., TRANSFORMED] > 0,
+		"illusion": _disguise_species(state, tables),
 		"boosts": state.boosts,
 		"volatiles": jnp.concatenate(
 			(
@@ -172,12 +178,44 @@ def comparable(state, tables):
 	}
 
 
-def recorded_state(snapshot, tables):
-	"""Convert oracle snapshots without deriving fainted or any compared value."""
+def _disguise_species(state, tables):
+	"""Species of each active's Illusion disguise (zero when none is shown)."""
+	slot = state.volatiles[..., ILLUSION_SLOT].astype(jnp.int32) - 1
+	picked = jnp.take_along_axis(
+		state.species, jnp.clip(slot, 0, state.species.shape[-1] - 1)[..., None], axis=-1
+	)[..., 0]
+	return jnp.where(slot >= 0, picked, 0)
+
+
+def recorded_state(snapshot, tables, initial_species=None):
+	"""Convert oracle snapshots without deriving fainted or any compared value.
+
+	Schema-v2 files written before task 14 have no species, shownSpecies, transformed or
+	illusion fields: species then defaults to the team's starting species, transformed and
+	illusion to none, and shownSpecies is not compared at all.
+	"""
 	sides = snapshot["sides"]
 	members = [side["members"] for side in sides]
 	winner = snapshot["winner"]
+	species_known = all("species" in member for team in members for member in team)
+	shown_known = all("shownSpecies" in member for team in members for member in team)
+	extra = {}
+	if species_known:
+		extra["species"] = np.asarray(
+			[[tables.species.index.get(m["species"], -1) for m in team] for team in members]
+		)
+	elif initial_species is not None:
+		extra["species"] = initial_species
+	if shown_known:
+		extra["shownSpecies"] = np.asarray(
+			[[tables.species.index.get(m["shownSpecies"], -1) for m in team] for team in members]
+		)
+	extra["transformed"] = np.asarray([bool(side.get("transformed", False)) for side in sides])
+	extra["illusion"] = np.asarray(
+		[tables.species.index.get(side.get("illusion") or "", 0) for side in sides]
+	)
 	return {
+		**extra,
 		"active": np.asarray([side["active"] for side in sides]),
 		"legalActions": np.asarray([side["legalActions"] for side in sides]),
 		"status": np.asarray(
@@ -471,10 +509,24 @@ def replay_file(path, *, recording=None) -> ReplayResult:
 	mismatches = []
 	for b, battle in enumerate(battles):
 		snapshots = [battle["initialState"]] + [record["state"] for record in battle["steps"]]
-		expected = [recorded_state(snapshot, tables) for snapshot in snapshots]
+		initial_species = (
+			np.asarray(
+				[
+					[tables.species.index.get(m["species"], 0) for m in team]
+					for team in battle["teams"]
+				]
+			)
+			if "species" in battle["teams"][0][0]
+			else None
+		)
+		expected = [recorded_state(snapshot, tables, initial_species) for snapshot in snapshots]
 		# Check padding too: it must keep the last recorded state, even after a win.
 		expected += [expected[-1]] * (shape[1] + 1 - len(expected))
-		fields = {name: np.stack([state[name] for state in expected]) for name in actual}
+		fields = {
+			name: np.stack([state[name] for state in expected])
+			for name in actual
+			if name in expected[0]
+		}
 		first = None
 		for name, wanted in fields.items():
 			different = actual[name][b] != wanted

@@ -19,6 +19,8 @@ from .abilities import (
 	CRIT_BONUS,
 	DEFENSE,
 	DEFENSE_MARVEL_SCALE,
+	FLOWER_GIFT_NUM,
+	FORM,
 	IGNORE_BOOSTS,
 	LEVITATE,
 	NO_GUARD,
@@ -56,6 +58,7 @@ from .state import (
 	POISON,
 	SLOW_START,
 	SMACKDOWN,
+	SUN,
 	TWO_TURN_MOVE,
 )
 from .variable_moves import (
@@ -72,7 +75,7 @@ LEVEL_DAMAGE, HALF_CURRENT_DAMAGE, CONSTANT_DAMAGE = 1, 2, 3
 
 
 def accuracy_hit(
-	state, side, move, key, forced, tables, rows=None, weather=None, switching_foe=False
+	state, side, move, key, forced, tables, rows=None, weather=None, switching_foe=False, kind=HIT
 ):
 	"""Sample the single move accuracy check before a multi-hit sequence."""
 	row = read_move(tables, move)
@@ -118,7 +121,7 @@ def accuracy_hit(
 		| has_hook(rows[side], NO_GUARD)
 		| (targeted & has_hook(rows[1 - side], NO_GUARD))
 		| (weather_accuracy == WEATHER_ACCURACY_ALWAYS)
-		| chance(key, forced, HIT, side, 0, jnp.clip(accuracy, 0, 100), 100)
+		| chance(key, forced, kind, side, 0, jnp.clip(accuracy, 0, 100), 100)
 	)
 
 
@@ -219,12 +222,22 @@ def move_damage_bases(
 		t,
 		state.volatiles[side, SLOW_START] > 0,
 	)
+	# Flower Gift (onAllyModifyAtk): a Cherrim side's physical attacks gain 1.5x in sun.
+	flower_sun = weather == SUN
+	flower_attack = physical & (rows[side, FORM] == FLOWER_GIFT_NUM) & flower_sun
+	attack_modifier = chain(attack_modifier, jnp.where(flower_attack, 6144, 4096))
 	attack_effective = apply_stat_modifier(
 		attack_effective, side, attack_index, item_rows, attack_modifier
 	)
 	weather_spdef = jnp.any(present & t.weather_spdef_boost[weather, safe_types])
+	# Flower Gift (onAllyModifySpD) on the defending side: special defense gains 1.5x in sun.
+	flower_defense = ~defends_with_defense & (rows[foe, FORM] == FLOWER_GIFT_NUM) & flower_sun
 	defense_effective = modify(
-		defense_effective, jnp.where(~defends_with_defense & weather_spdef, 6144, 4096)
+		defense_effective,
+		chain(
+			jnp.where(~defends_with_defense & weather_spdef, 6144, 4096),
+			jnp.where(flower_defense, 6144, 4096),
+		),
 	)
 	marvel = defends_with_defense & (rows[foe, DEFENSE] == DEFENSE_MARVEL_SCALE)
 	statused = state.status[foe, target] != HEALTHY

@@ -27,6 +27,7 @@ from .state import (
 	BOOST_SPE,
 	HAIL,
 	HEALTHY,
+	LEECH_SEED,
 	ONGOING,
 	PARALYSIS,
 	POISON,
@@ -93,6 +94,13 @@ def apply_move_field_effects(
 	hazards = hazard_layers + (SIDES == foe)[:, None] * adds[None, :]
 	clear = enabled & hit & row.move_rapid_spin
 	hazards = jnp.where((SIDES == side)[:, None] & clear, 0, hazards)
+
+	# Rapid Spin (onAfterHit) also frees the user from its own Leech Seed.
+	columns = jnp.arange(state.volatiles.shape[1])
+	seed = (SIDES == side)[:, None] & clear & (columns[None, :] == LEECH_SEED)
+	state = state._replace(
+		volatiles=jnp.where(seed, 0, state.volatiles).astype(state.volatiles.dtype)
+	)
 
 	order = state.hazard_order.astype(jnp.int32)
 	foe_order = order[foe]

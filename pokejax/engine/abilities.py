@@ -56,7 +56,8 @@ SIDES = jnp.arange(2)
 	SLEEP_HOOK,
 	ITEM_GUARD,
 	BOOST_EVENT,
-) = range(25)
+	FORM,
+) = range(26)
 (
 	BREAKABLE,
 	MOLD_BREAKER,
@@ -82,6 +83,14 @@ SIDES = jnp.arange(2)
 	MUMMY_IMMUNE,
 	POWDER_IMMUNITY,
 ) = (1 << bit for bit in range(23))
+# Task 14 flags: Magic Bounce reflects, Trace seeks, Illusion disguises, Imposter copies on
+# switch-in. NOTRACE marks abilities Trace cannot copy (Showdown's notrace flag, Gen 5 list).
+MAGIC_BOUNCE, NOTRACE, ILLUSION, TRACE, IMPOSTER = (1 << bit for bit in range(23, 28))
+# FORM holds the national-dex number of the only species whose base form this ability
+# changes (Castform, Cherrim); zero means none. The row is gated by species_base.
+FORECAST_NUM = 351
+FLOWER_GIFT_NUM = 421
+MELOETTA_NUM = 648
 ATTACK_DOUBLE, ATTACK_GUTS, ATTACK_HUSTLE = range(1, 4)
 ATTACK_DEFEATIST, ATTACK_SLOW_START = range(4, 6)
 ATTACK_BLAZE, ATTACK_OVERGROW, ATTACK_SWARM, ATTACK_TORRENT = range(6, 10)
@@ -108,6 +117,8 @@ SPEED_UNBURDEN, SPEED_SLOW_START = range(6, 8)
 DAMAGE_SNIPER, DAMAGE_TINTED, DAMAGE_FILTER, DAMAGE_MULTISCALE = range(1, 5)
 ABSORB_HEAL, ABSORB_FLASH, ABSORB_WONDER, ABSORB_ATK, ABSORB_SPA, ABSORB_SPE = range(1, 7)
 START_ANNOUNCE, START_INTIMIDATE, START_DOWNLOAD, START_FRISK, START_ANTICIPATION = range(1, 6)
+# Cloud Nine and Air Lock announce from onSwitchIn only, so a copied ability does not announce.
+START_ANNOUNCE_SWITCH = 6
 (
 	RESIDUAL_POISON_HEAL,
 	RESIDUAL_RAIN_DISH,
@@ -152,8 +163,10 @@ STATUS_SUN = 1 << 7
 
 def build_ability_hooks(tables):
 	"""Each exported ability has a row. Unimplemented and singles-inert hooks are zero."""
-	rows = np.zeros((len(tables.abilities.ids), BOOST_EVENT + 1), np.int32)
+	rows = np.zeros((len(tables.abilities.ids), FORM + 1), np.int32)
 	rows[:, ABSORB_TYPE] = -1
+	rows[tables.abilities.index["forecast"], FORM] = FORECAST_NUM
+	rows[tables.abilities.index["flowergift"], FORM] = FLOWER_GIFT_NUM
 
 	def set_hook(column, value, names):
 		for name in names.split():
@@ -182,6 +195,11 @@ def build_ability_hooks(tables):
 		(TRUANT, "truant"),
 		(MUMMY_IMMUNE, "multitype"),
 		(POWDER_IMMUNITY, "overcoat"),
+		(MAGIC_BOUNCE, "magicbounce"),
+		(NOTRACE, "multitype trace forecast flowergift illusion imposter"),
+		(ILLUSION, "illusion"),
+		(TRACE, "trace"),
+		(IMPOSTER, "imposter"),
 		(
 			BREAKABLE,
 			(
@@ -189,7 +207,8 @@ def build_ability_hooks(tables):
 				"immunity innerfocus insomnia keeneye leafguard levitate lightningrod limber magmaarmor "
 				"marvelscale motordrive multiscale oblivious owntempo sandveil sapsipper shellarmor "
 				"shielddust simple snowcloak solidrock stormdrain tangledfeet thickfat unaware "
-				"vitalspirit voltabsorb waterabsorb waterveil wonderguard wonderskin sturdy stickyhold"
+				"vitalspirit voltabsorb waterabsorb waterveil wonderguard wonderskin sturdy stickyhold "
+				"magicbounce flowergift"
 			),
 		),
 	):
@@ -288,8 +307,9 @@ def build_ability_hooks(tables):
 			(
 				(
 					START_ANNOUNCE,
-					"pressure moldbreaker teravolt turboblaze cloudnine airlock unnerve slowstart",
+					"pressure moldbreaker teravolt turboblaze unnerve slowstart",
 				),
+				(START_ANNOUNCE_SWITCH, "cloudnine airlock"),
 				(START_INTIMIDATE, "intimidate"),
 				(START_DOWNLOAD, "download"),
 				(START_FRISK, "frisk"),
@@ -373,7 +393,11 @@ def build_ability_hooks(tables):
 
 
 def active_abilities(state, tables):
-	return tables.ability_hooks[state.ability[SIDES, state.active]]
+	"""Active hook rows; a forme-changing ability applies only to its own base species."""
+	rows = tables.ability_hooks[state.ability[SIDES, state.active]]
+	base = tables.species_num[state.species_base[SIDES, state.active].astype(jnp.int32)]
+	form = rows[:, FORM]
+	return rows.at[:, FORM].set(jnp.where(form == base, form, 0))
 
 
 def has_hook(rows, flag):

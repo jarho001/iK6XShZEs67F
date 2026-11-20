@@ -29,7 +29,8 @@ then 15% each for 4 and 5.
 drag_in: side being dragged, occurrence 0, value is the selected fixed team slot
 0..5. This forces the chosen member; unforced sampling is uniform over its
 currently usable bench.
-ability_chance: on-hit ability randomChance outcomes, occurrence 2 * hit index
+bounce_hit: Magic Bounce's reflected move accuracy check: side is the reflecting holder, value
+1=hit, 0=miss. ability_chance: on-hit ability randomChance outcomes, occurrence 2 * hit index
 for the defending Pokemon and 2 * hit index + 1 for the attacker. effect_spore
 is Showdown random(100). Harvest and residual_chance address their end-of-turn
 ability chances by holder side.
@@ -71,6 +72,7 @@ OUTCOME_KINDS = (
 	("item_residual_order", 1),
 	("roost_residual_order", 1),
 	("sleep_talk", 3),
+	("bounce_hit", 1),
 )
 KIND_NAMES = tuple(name for name, _ in OUTCOME_KINDS)
 NUM_KINDS = len(KIND_NAMES)
@@ -93,6 +95,8 @@ ABILITY_RESIDUAL_ORDER = KIND_NAMES.index("ability_residual_order")
 ITEM_RESIDUAL_ORDER = KIND_NAMES.index("item_residual_order")
 ROOST_RESIDUAL_ORDER = KIND_NAMES.index("roost_residual_order")
 SLEEP_TALK = KIND_NAMES.index("sleep_talk")
+# Magic Bounce's reflected move: its own accuracy check (side is the reflecting holder).
+BOUNCE_HIT = KIND_NAMES.index("bounce_hit")
 OUTCOME_MAXIMUM = tuple(maximum for _, maximum in OUTCOME_KINDS)
 OUTCOME_MINIMUM = tuple(2 if name == "hit_count" else 0 for name, _ in OUTCOME_KINDS)
 (

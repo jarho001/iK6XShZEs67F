@@ -96,6 +96,10 @@ class MoveRow(NamedTuple):
 	move_item_swap: jax.Array
 	move_knock_off: jax.Array
 	move_sleep_talk: jax.Array
+	move_transform: jax.Array
+	move_call: jax.Array
+	move_reflectable: jax.Array
+	move_relic_forme: jax.Array
 
 
 MOVE_FIELDS = MoveRow._fields[1:]
