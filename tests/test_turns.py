@@ -11,6 +11,7 @@ from pokejax.engine.observation import observe
 from pokejax.engine.randomness import (
 	CONFUSION_DURATION,
 	HIT,
+	MAX_OCCURRENCES,
 	ORDER,
 	SECONDARY,
 	STALL_SUCCESS,
@@ -36,6 +37,48 @@ from pokejax.engine.state import (
 )
 from pokejax.engine.step import step
 from pokejax.engine.turn_moves import try_stalling_move
+
+_FMIX_MULTIPLIERS = (0x85EBCA6B, 0xC2B2AE35)
+
+
+def _unxorshift(value, shift):
+	"""Invert value ^= value >> shift on uint32 values."""
+	result = value
+	for _ in range(32 // shift + 1):
+		result = value ^ (result >> shift)
+	return result
+
+
+def _fmix32_inverse(value):
+	"""Invert the murmur3 finalizer used by randomness.address_bits."""
+	first, second = (pow(m, -1, 2**32) for m in _FMIX_MULTIPLIERS)
+	value = _unxorshift(value, 16)
+	value = (value * second) % 2**32
+	value = _unxorshift(value, 13)
+	value = (value * first) % 2**32
+	return _unxorshift(value, 16)
+
+
+def _keys_with_raw_bits(kind, side, occurrence, values):
+	"""Step key words whose addressed draw equals each value exactly.
+
+	The draw is fmix32(fmix32(word0 ^ address * golden) ^ word1); word1 is chosen so
+	that the outer finalizer returns the requested value.
+	"""
+	address = (kind * 2 + side) * MAX_OCCURRENCES + occurrence
+	mixed = _fmix32_forward(address * 0x9E3779B9)
+	words = [[0, mixed ^ _fmix32_inverse(int(value))] for value in values]
+	return np.asarray(words, dtype=np.uint32)
+
+
+def _fmix32_forward(value):
+	value = value & 0xFFFFFFFF
+	value ^= value >> 16
+	value = (value * _FMIX_MULTIPLIERS[0]) & 0xFFFFFFFF
+	value ^= value >> 13
+	value = (value * _FMIX_MULTIPLIERS[1]) & 0xFFFFFFFF
+	return value ^ (value >> 16)
+
 
 KEY = jax.random.key(73)
 FORCED = UNFORCED.at[HIT, :, 0].set(1).at[ORDER, 0, 0].set(0)
@@ -82,9 +125,7 @@ def test_protect_samples_gen5_chances_through_the_two_to_32_cap(setup):
 	protect = tables.moves.index["protect"]
 
 	def sample_batch(current, values):
-		values = jnp.asarray(values, dtype=jnp.uint32)
-		keys = jnp.zeros((values.shape[0],) + UNFORCED.shape, dtype=jnp.uint32)
-		keys = keys.at[:, STALL_SUCCESS, 0, 0].set(values)
+		keys = jnp.asarray(_keys_with_raw_bits(STALL_SUCCESS, 0, 0, values), dtype=jnp.uint32)
 		return jax.vmap(
 			lambda key: try_stalling_move(current, 0, protect, True, True, key, UNFORCED, t)
 		)(keys)

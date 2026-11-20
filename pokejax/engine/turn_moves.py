@@ -5,7 +5,13 @@ import jax.numpy as jnp
 from .abilities import LEVITATE, NO_GUARD, apply_boost_delta, has_hook
 from .actions import SIDES
 from .move_data import read_move
-from .randomness import LOCK_DURATION, STALL_SUCCESS, TRAP_DURATION, integer
+from .randomness import (
+	LOCK_DURATION,
+	STALL_SUCCESS,
+	TRAP_DURATION,
+	address_bits,
+	integer,
+)
 from .state import (
 	CURSE,
 	ENDURE,
@@ -68,7 +74,7 @@ def try_stalling_move(state, side, move, enabled, will_act, key, forced, tables)
 	# The engine initializes the stall counter at two and doubles it to 256.
 	# A power-of-two denominator has exactly the same low-bit remainder.
 	mask = jnp.maximum(counter - 1, 0).astype(jnp.uint32)
-	bits = key[STALL_SUCCESS, side, 0]
+	bits = address_bits(key, STALL_SUCCESS, side, 0)
 	sample = jnp.where(counter >= 256, bits == 0, (bits & mask) == 0)
 	forced_value = forced[STALL_SUCCESS, side, 0]
 	passed = jnp.where(forced_value >= 0, forced_value != 0, sample)

@@ -27,6 +27,7 @@ from .randomness import (
 	SECONDARY,
 	SECONDARY_STATUS,
 	SLEEP_DURATION,
+	address_bits,
 	chance,
 	integer,
 )
@@ -57,7 +58,7 @@ def apply_secondaries(
 	row = read_move(tables, move)
 	rows = jnp.arange(SECONDARY_SLOTS)
 	later_forced = forced[SECONDARY, side, 2:MAX_OCCURRENCES:SECONDARY_SLOTS]
-	later_bits = key[SECONDARY, side, 2:MAX_OCCURRENCES:SECONDARY_SLOTS]
+	later_bits = address_bits(key, SECONDARY, side, jnp.arange(2, MAX_OCCURRENCES, SECONDARY_SLOTS))
 	chance_ = secondary_chances(tables, row, abilities[side])
 	later_passed = jnp.where(
 		later_forced >= 0,

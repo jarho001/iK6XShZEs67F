@@ -34,8 +34,8 @@ for the defending Pokemon and 2 * hit index + 1 for the attacker. effect_spore
 is Showdown random(100). Harvest and residual_chance address their end-of-turn
 ability chances by holder side.
 
-The step draws a table of random bits once, addressed by kind, side and occurrence. integer
-requires n>0; chance requires 0<=numerator<=denominator and denominator>0.
+A step keeps the key's two words and hashes each address (kind, side, occurrence) when
+it is used. integer requires n>0; chance requires 0<=numerator<=denominator and denominator>0.
 These are caller preconditions. A forced integer must be less than n at its
 call site. Samples still evaluate when forced; selection is branch-free.
 """
@@ -141,15 +141,43 @@ def forced_from_records(records, *, host=False) -> Forced:
 	return values if host else jnp.asarray(values)
 
 
+_FMIX_MUL_1, _FMIX_MUL_2, _ADDRESS_MUL = 0x85EBCA6B, 0xC2B2AE35, 0x9E3779B9
+
+
+def _key_words(key):
+	"""The two uint32 words of a step key; a words array passes through unchanged."""
+	if jnp.issubdtype(key.dtype, jax.dtypes.prng_key):
+		key = jax.random.key_data(key)
+	return key.astype(jnp.uint32).reshape(-1)[:2]
+
+
 def random_bits(key):
-	"""Draw independent bits for every address used by a step."""
-	return jax.random.bits(key, (NUM_KINDS, NUM_SIDES, MAX_OCCURRENCES), dtype=jnp.uint32)
+	"""Per-step randomness: the key's two words. Each address hashes them on use.
+
+	Hashing an address costs a few fused integer ops, so a step never materializes
+	the whole kinds x sides x occurrences table.
+	"""
+	return _key_words(key)
+
+
+def address_bits(key, kind, side, occ):
+	"""Addressed 32-bit draw: a murmur3 finalizer over the key words and the address."""
+	words = _key_words(key)
+	address = jnp.asarray((kind * NUM_SIDES + side) * MAX_OCCURRENCES + occ, jnp.uint32)
+	mixed = _fmix32(words[0] ^ (address * jnp.uint32(_ADDRESS_MUL)))
+	return _fmix32(mixed ^ words[1])
+
+
+def _fmix32(value):
+	value = value ^ (value >> 16)
+	value = value * jnp.uint32(_FMIX_MUL_1)
+	value = value ^ (value >> 13)
+	value = value * jnp.uint32(_FMIX_MUL_2)
+	return value ^ (value >> 16)
 
 
 def _sample_or_force(key, forced, kind, side, occ, n):
-	# Direct helper calls accept a PRNG key too; step passes the shared table.
-	bits = random_bits(key) if key.ndim < 3 else key
-	sample = (bits[kind, side, occ] % jnp.asarray(n, jnp.uint32)).astype(jnp.int32)
+	sample = (address_bits(key, kind, side, occ) % jnp.asarray(n, jnp.uint32)).astype(jnp.int32)
 	value = forced[kind, side, occ].astype(jnp.int32)
 	return jnp.where(value >= 0, value, sample)
 
@@ -161,14 +189,14 @@ def integer(key, forced, kind, side, occ, n):
 
 def hit_count(key, forced, side, hit_min, hit_max):
 	"""Sample Gen 5's 2-5 distribution or force the resulting hit count."""
-	bits = random_bits(key) if key.ndim < 3 else key
-	selector = bits[HIT_COUNT, side, 0] % jnp.asarray(20, jnp.uint32)
+	bits = address_bits(key, HIT_COUNT, side, 0)
+	selector = bits % jnp.asarray(20, jnp.uint32)
 	gen5_count = jnp.where(
 		selector < 7, 2, jnp.where(selector < 14, 3, jnp.where(selector < 17, 4, 5))
 	)
 	low = hit_min.astype(jnp.uint32)
 	span = (hit_max - hit_min + 1).astype(jnp.uint32)
-	uniform = low + bits[HIT_COUNT, side, 0] % span
+	uniform = low + bits % span
 	sample = jnp.where((hit_min == 2) & (hit_max == 5), gen5_count, uniform)
 	value = forced[HIT_COUNT, side, 0].astype(jnp.int32)
 	return jnp.where(value >= 0, value, sample.astype(jnp.int32))

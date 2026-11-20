@@ -288,21 +288,17 @@ def move_damage_bases(
 	weak_defense = apply_stat_modifier(
 		scale_stat_stage(defense, weak_stages), foe, defense_index, item_rows, 4096
 	)
-	weak_scenarios = neutral_damage_before_roll(
-		level, jnp.maximum(power, 1), attack_effective, weak_defense
-	)
-	base_scenarios = neutral_damage_before_roll(
-		level, jnp.maximum(power, 1), attack_effective, defense_eff
-	)
+	# One neutral pass over the stacked defenses: the plain row, the Weak Armor row for
+	# each hit (five rows), and the defense of a later hit after a marvel-scale poison.
+	defenses = jnp.concatenate((defense_eff[None, :], weak_defense, defense_later[None, :]))
+	scenarios = neutral_damage_before_roll(level, jnp.maximum(power, 1), attack_effective, defenses)
+	weak_scenarios = scenarios[1:-1]
 	base_scenarios = (
-		jnp.where(weak_armor, weak_scenarios[:, 0], base_scenarios[0]),
-		jnp.where(weak_armor, weak_scenarios[:, 1], base_scenarios[1]),
+		jnp.where(weak_armor, weak_scenarios[:, 0], scenarios[0, 0]),
+		jnp.where(weak_armor, weak_scenarios[:, 1], scenarios[0, 1]),
 	)
 	weather_modifier = t.weather_damage_by_type[weather, type_]
-	later_scenarios = neutral_damage_before_roll(
-		level, jnp.maximum(power, 1), attack_effective, defense_later
-	)
-	late_bases = modify(later_scenarios, weather_modifier)
+	late_bases = modify(scenarios[-1], weather_modifier)
 	base_normal = modify(base_scenarios[0], weather_modifier)
 	base_crit = modify(base_scenarios[1], weather_modifier) * 2
 	damage_kind = row.move_damage_kind
