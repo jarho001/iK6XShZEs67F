@@ -420,6 +420,13 @@ def apply_after_move_items(
 	return state, white_herb, recoil
 
 
+def showdown_item_consumed(state):
+	"""Showdown's itemConsumed: the holder has no item, has consumed one (lastItem), and was not
+	knocked off. Trick and Switcheroo move items without changing lastItem, so an item given back
+	to a consumed holder and then taken away again still reads as consumed."""
+	return state.item_consumed & (state.item == 0) & ~state.item_knocked_off
+
+
 def gather_active_update_hooks(state, tables):
 	"""Gather berry and boost hooks after a drag changes the active member."""
 	ids = state.item[SIDES, state.active].astype(jnp.int32)

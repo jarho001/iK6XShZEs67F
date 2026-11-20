@@ -18,6 +18,7 @@ import numpy as np
 
 from pokejax.engine.actions import legal_actions
 from pokejax.engine.data import build_engine_tables
+from pokejax.engine.items import showdown_item_consumed
 from pokejax.engine.randomness import UNFORCED, forced_from_records
 from pokejax.engine.reset import check_teams, reset, teams_from_pool
 from pokejax.engine.state import (
@@ -114,7 +115,7 @@ def comparable(state, tables):
 			jnp.arange(state.active.shape[0])[:, None], jnp.arange(2), state.active
 		],
 		"item": state.item,
-		"itemConsumed": state.item_consumed,
+		"itemConsumed": showdown_item_consumed(state),
 		"itemKnockedOff": state.item_knocked_off,
 		"ability": state.ability,
 		"abilityPublic": state.ability_public,
@@ -185,6 +186,18 @@ def _disguise_species(state, tables):
 		state.species, jnp.clip(slot, 0, state.species.shape[-1] - 1)[..., None], axis=-1
 	)[..., 0]
 	return jnp.where(slot >= 0, picked, 0)
+
+
+# Showdown's choicelock outlives its Choice item (Trick); with no Choice item it is inert.
+CHOICE_ITEMS = frozenset(("choiceband", "choicescarf", "choicespecs"))
+
+
+def _compared_volatiles(side):
+	"""The recorded active volatiles, without a choicelock that has no Choice item to lock."""
+	names = side["volatiles"] or []
+	if side["item"] in CHOICE_ITEMS:
+		return names
+	return [name for name in names if name != "choicelock"]
 
 
 def recorded_state(snapshot, tables, initial_species=None):
@@ -263,7 +276,7 @@ def recorded_state(snapshot, tables, initial_species=None):
 		"ended": np.asarray(snapshot["ended"]),
 		"boosts": np.asarray([side["boosts"] for side in sides]),
 		"volatiles": np.asarray(
-			[[name in (side["volatiles"] or []) for name in VOLATILE_KEYS] for side in sides]
+			[[name in _compared_volatiles(side) for name in VOLATILE_KEYS] for side in sides]
 		),
 		"substituteHp": np.asarray(
 			[side.get("volatileCounters", {}).get("substitute", 0) for side in sides]

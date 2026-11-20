@@ -17,6 +17,7 @@ from pokejax.engine.randomness import UNFORCED
 from pokejax.engine.reset import Teams, check_teams, reset
 from pokejax.engine.state import ONGOING, TEAM_SLOTS
 from pokejax.engine.step import step
+from pokejax.sampler import sample_team_indices
 from pokejax.tables import load_tables
 from pokejax.teams import load_npz
 
@@ -26,9 +27,13 @@ DEFAULT_STEPS = 256
 DEFAULT_REPETITIONS = 3
 
 
-def _new_states(key, pool, tables, batch_size):
+def _new_states(key, pool, tables, batch_size, team_indices=None):
+	"""Reset a batch on teams drawn from the whole pool, or from team_indices (pokejax.sampler)."""
 	index_key, reset_key = jax.random.split(key)
-	indices = jax.random.randint(index_key, (batch_size, 2), 0, pool.species.shape[0])
+	if team_indices is None:
+		indices = jax.random.randint(index_key, (batch_size, 2), 0, pool.species.shape[0])
+	else:
+		indices = sample_team_indices(index_key, team_indices, batch_size)
 	teams = jax.tree.map(lambda column: column[indices], pool)
 	keys = jax.random.split(reset_key, batch_size)
 	return jax.vmap(reset, in_axes=(0, 0, None))(keys, teams, tables)

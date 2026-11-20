@@ -71,6 +71,25 @@ def test_cli_is_deterministic(synthetic_pool, tables, tmp_path):
 	assert first.decode("utf-8") == render_coverage(synthetic_pool, tables)
 
 
+def test_excluded_teams_are_listed_with_their_unsupported_ids(synthetic_pool, tables, monkeypatch):
+	monkeypatch.setattr(support, "SUPPORTED_MOVES", frozenset({"surf"}))
+	monkeypatch.setattr(support, "SUPPORTED_ABILITIES", frozenset({"overgrow", "torrent"}))
+	monkeypatch.setattr(support, "SUPPORTED_ITEMS", frozenset({"leftovers"}))
+	output = render_coverage(synthetic_pool, tables)
+	assert "Excluded teams: 2 (66.7%); supported teams for the sampler: 1." in output
+	assert section_rows(output, "Excluded teams") == [
+		"| 0 | tackle | - | - |",
+		"| 2 | protect, tackle | - | lifeorb |",
+	]
+
+
+def test_empty_excluded_section_when_all_supported(synthetic_pool, tables):
+	output = render_coverage(synthetic_pool, tables)
+	assert "Excluded teams: 0 (0.0%); supported teams for the sampler: 3." in output
+	assert "None: every team in the pool is fully supported" in output
+	assert section_rows(output, "Excluded teams") == []
+
+
 def test_display_names_use_table(synthetic_pool, tables):
 	names = list(tables.moves.names)
 	names[tables.moves.index["tackle"]] = "Custom Tackle"

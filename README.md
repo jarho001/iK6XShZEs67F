@@ -83,3 +83,39 @@ The differential tests passed the 40-battle fixture and the 300-battle set
 against random (94.80%, 95% Wilson CI 94.08–95.44%); random against random
 won 50.95% (95% CI 49.42–52.48%). Training took 136.01 s and 9,830,400
 environment steps.
+
+### Phase 2 results
+
+Gates, measured 2026-11-20 on an idle NVIDIA GeForce RTX 3060 Ti, JAX 0.12.0.1, with the
+Phase 2 exit code (`python -m pokejax.bench --json`, batch 4,096, engine only, median of three
+fresh processes): 3,323,719 steps/s (runs 3,323,012 to 3,327,847), 46,912 battles/s, mean
+battle length 70.99 steps, cold first call 33.34 s (33.18 to 33.52 s). Cold compile under 60 s:
+pass. Engine throughput against the 5,000,000 steps/s target: **fail**. Throughput fell
+from 7.62M after performance pass 4 to 3.32M as tasks 11 to 14 added the remaining mechanics.
+Performance pass 5 recovered 4%, and a structural attempt (pass 6, a working copy of the
+active Pokemon) did not help and was not committed. The CPU cold compile at batch 64 is
+about 146 s.
+
+Coverage (`COVERAGE.md`, generated): all 223 moves, 126 abilities and 44 items in the
+10,000-team pool are supported, so 100.0% of teams are fully supported. The excluded set is
+empty (0 teams, 0.0%). The team sampler (`pokejax/sampler.py`) draws only from supported
+teams and computes its index array once on the host.
+
+Differential recordings on unchanged pool teams: the 40-battle fixture
+`tests/fixtures/diff-pool.jsonl.gz` matches 40 of 40 battles (2,609 decisions) and the
+300-battle set `work/diff/pool.jsonl.gz` matches 300 of 300 (21,526 decisions). The other
+fixtures and 300-battle sets still match completely. `python -m pytest -q tests --large`
+passes 374 tests; `node --test tests/test-record-battles.cjs` passes 18.
+
+Statistics (`python -m pokejax.stats --battles 4000 --unchanged --seed N`, pool teams exactly
+as generated): with seed 1 and with seed 2 no statistic is flagged after Holm correction
+(341 metrics each). The smallest raw p-values are 0.041 (seed 1, `move.agility`) and 0.064
+(seed 2, `move.seedflare`). Showdown and the engine agree on side 0's win rate (Showdown
+0.505 and engine 0.491 with seed 1; 0.504 and 0.497 with seed 2), mean battle length (Showdown
+61.9 and engine 61.5 turns with seed 1; 62.3 and 62.3 with seed 2), faints per battle (9.95
+and 9.98; 9.93 and 9.96) and status counts.
+
+PPO smoke test (`python -m pokejax.ppo_smoke`, default configuration, 600 updates,
+9,830,400 environment steps): the trained policy won 3,754 of 4,096 battles against random
+(91.65%, 95% Wilson CI 90.76–92.46%); random against random won 49.88% (48.35–51.41%). Training
+took 188.9 s on the RTX 3060 Ti, with no illegal actions.

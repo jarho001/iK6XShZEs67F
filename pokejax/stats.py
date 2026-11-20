@@ -21,8 +21,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from pokejax.engine.actions import legal_actions
+from pokejax.engine.actions import legal_actions, move_availability
 from pokejax.engine.data import build_engine_tables
+from pokejax.engine.items import showdown_item_consumed
 from pokejax.engine.randomness import UNFORCED
 from pokejax.engine.reset import check_teams, reset, teams_from_pool
 from pokejax.engine.state import (
@@ -164,17 +165,20 @@ def _rollout_batch(teams, policy_keys, engine_tables):
 				)
 			)(legal, action_keys)
 		)(logits == 0.0, move_policy_keys).astype(jnp.int32)
-		active_moves = state.moves[indices[:, None], sides, state.active, :]
-		active_pp = state.pp[indices[:, None], sides, state.active, :]
-		usable = (active_moves != 0) & (active_pp > 0)
+		# The trace names the move the step executes: Struggle when no move is usable (PP,
+		# Disable, Taunt, Encore) or the Choice lock's move has no PP, as in step().
+		active_moves, usable, choice_active, choice_usable = jax.vmap(
+			move_availability, in_axes=(0, None)
+		)(state, engine_tables)
 		slot = jnp.minimum(actions, MOVE_SLOTS - 1)
 		selected_moves = active_moves[indices[:, None], sides, slot]
-		selected_moves = jnp.where(
-			jnp.any(usable, axis=-1), selected_moves, engine_tables.struggle_id
-		)
 		locked = state.volatiles[indices[:, None], sides, LOCKED_MOVE]
 		charging = state.volatiles[indices[:, None], sides, TWO_TURN_MOVE]
 		recharging = state.volatiles[indices[:, None], sides, MUST_RECHARGE] > 0
+		forced_move = (locked > 0) | (charging > 0) | recharging
+		choice_struggle = choice_active & ~jnp.any(choice_usable, axis=-1)
+		struggle = (~jnp.any(usable, axis=-1) | choice_struggle) & ~forced_move
+		selected_moves = jnp.where(struggle, engine_tables.struggle_id, selected_moves)
 		selected_moves = jnp.where(locked > 0, locked, selected_moves)
 		selected_moves = jnp.where(charging > 0, charging, selected_moves)
 		selected_moves = jnp.where(recharging, -2, selected_moves)
@@ -194,7 +198,9 @@ def _rollout_batch(teams, policy_keys, engine_tables):
 		statuses_trace = statuses_trace.at[decision].set(statuses)
 		fainted_trace = fainted_trace.at[decision].set(fainted)
 		confusion_trace = confusion_trace.at[decision].set(confusion)
-		item_consumed_trace = item_consumed_trace.at[decision].set(new_state.item_consumed)
+		item_consumed_trace = item_consumed_trace.at[decision].set(
+			showdown_item_consumed(new_state)
+		)
 		return (
 			new_state,
 			next_keys,
@@ -588,7 +594,7 @@ def _read_json(path):
 	return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def _validate_showdown(summary, battles, seed):
+def _validate_showdown(summary, battles, seed, teams):
 	lock = _read_json(ROOT / "reference-lock.json")
 	if summary.get("schemaVersion") != 1 or summary.get("simulator") != "showdown":
 		raise ValueError("Expected a whole-battle Showdown summary schema v1")
@@ -600,6 +606,8 @@ def _validate_showdown(summary, battles, seed):
 		raise ValueError("Showdown summary has an incomplete battle list")
 	if summary.get("seed") != seed:
 		raise ValueError("Showdown summary seed differs from --seed")
+	if summary.get("teams", "isolation") != teams:
+		raise ValueError("Showdown summary team mode differs from --unchanged")
 
 
 def _engine_summaries_from_raw(showdown, seed):
@@ -659,9 +667,12 @@ def run(args):
 		]
 		if args.allowed:
 			command.extend(("--allowed", str(Path(args.allowed).resolve())))
+		if args.unchanged:
+			command.append("--unchanged")
 		subprocess.run(command, cwd=ROOT, check=True)
 		showdown = _read_json(showdown_path)
-	_validate_showdown(showdown, args.battles, args.seed)
+	teams = "unchanged" if args.unchanged else "isolation"
+	_validate_showdown(showdown, args.battles, args.seed, teams)
 	showdown_counts = [
 		count_battle_summary({**battle, "teamPair": showdown["teamPairs"][index]})
 		for index, battle in enumerate(showdown["battles"])
@@ -688,6 +699,7 @@ def run(args):
 		"battles": args.battles,
 		"seed": args.seed,
 		"format": FORMAT,
+		"teams": teams,
 		"showdownCommit": showdown["showdownCommit"],
 		"teamPairsHash": team_hash,
 		"allowed": showdown["allowed"],
@@ -716,14 +728,21 @@ def main(argv=None):
 	parser.add_argument("--battles", type=int, default=DEFAULT_BATTLES)
 	parser.add_argument("--seed", type=int, default=1)
 	parser.add_argument("--allowed", type=Path)
+	parser.add_argument(
+		"--unchanged",
+		action="store_true",
+		help="use pool teams exactly as generated (no isolation or replacements)",
+	)
 	parser.add_argument("--team-pool", type=Path, default=DEFAULT_POOL)
 	parser.add_argument("--stats-dir", type=Path, default=DEFAULT_STATS_DIR)
-	parser.add_argument("--out", type=Path, default=DEFAULT_STATS_DIR / "report.json")
+	parser.add_argument("--out", type=Path)
 	parser.add_argument("--reuse-showdown", type=Path)
 	parser.add_argument("--reuse-engine", type=Path)
 	args = parser.parse_args(argv)
 	if args.battles < 2:
 		parser.error("--battles must be at least two for the battle-length test")
+	if args.out is None:
+		args.out = args.stats_dir / "report.json"
 	if not args.allowed and args.reuse_showdown is None:
 		pass
 	if args.reuse_engine and not args.reuse_showdown:

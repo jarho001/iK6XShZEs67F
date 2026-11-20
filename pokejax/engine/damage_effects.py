@@ -454,11 +454,14 @@ def apply_damage_effects(
 	source_delta = (stats == ATK - 1).astype(state.boosts.dtype) * moxie.astype(state.boosts.dtype)
 	delta = jnp.where((SIDES == foe)[:, None], target_delta[None, :], delta)
 	delta = jnp.where((SIDES == side)[:, None], source_delta[None, :], delta)
+	# Showdown names the ability when a boost is effective, i.e. the stage was below its cap
+	# before the change (a boost from +5 to +6 still reveals), so the reveals read the old stages.
+	stages_before = state.boosts
 	state = state._replace(boosts=apply_boost_delta(state.boosts, delta, rows, False))
 	weak_reveals = weak_armor & (weak_count > 0)
-	weak_reveals &= (state.boosts[foe, 1] > -6) | (state.boosts[foe, 4] < 6)
-	justified_reveals = justified & (justified_count > 0) & (state.boosts[foe, 0] < 6)
-	moxie_reveals = moxie & (state.boosts[side, 0] < 6)
+	weak_reveals &= (stages_before[foe, 1] > -6) | (stages_before[foe, 4] < 6)
+	justified_reveals = justified & (justified_count > 0) & (stages_before[foe, 0] < 6)
+	moxie_reveals = moxie & (stages_before[side, 0] < 6)
 	mummy_trigger = (target_hook == CONTACT_MUMMY) & (contact_hits > 0)
 	mummy_trigger &= ~has_hook(rows[side], MUMMY_IMMUNE)
 	mummy_trigger &= state.ability[side, user] != t.mummy_id

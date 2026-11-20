@@ -183,16 +183,25 @@ def inflict_status(
 def synchronize_status(
 	state, target_side, source_side, inflicted, enabled, key, forced, tables, ability_rows=None
 ):
-	"""Copy a reflected major status once, without allowing Synchronize to chain."""
+	"""Copy a reflected major status once, without allowing Synchronize to chain.
+
+	Both holders reveal Synchronize: the target when the status reaches it, and the source
+	when the copy lands on it (Showdown runs onAfterSetStatus for each status that is set).
+	"""
 	rows = active_abilities(state, tables) if ability_rows is None else ability_rows
 	statusable = (inflicted == BURN) | (inflicted == POISON) | (inflicted == TOXIC)
 	statusable |= inflicted == PARALYSIS
 	trigger = enabled & statusable & (target_side != source_side)
 	trigger &= rows[target_side, STATUS_EVENT] == STATUS_EVENT_SYNCHRONIZE
+	source_slot = state.active[source_side]
+	before = state.status[source_side, source_slot]
 	state = inflict_status(
 		state, source_side, inflicted, trigger, key, forced, tables, rows, reveal_immunity=True
 	)
-	return reveal_abilities(state, (SIDES == target_side) & trigger)
+	copied = trigger & (state.status[source_side, source_slot] != before)
+	copied &= rows[source_side, STATUS_EVENT] == STATUS_EVENT_SYNCHRONIZE
+	revealed = ((SIDES == target_side) & trigger) | ((SIDES == source_side) & copied)
+	return reveal_abilities(state, revealed)
 
 
 def apply_move(state, side, move, enabled, hit, key, forced, tables, abilities, weather):

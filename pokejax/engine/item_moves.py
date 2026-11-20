@@ -59,7 +59,6 @@ def apply_item_swap(state, side, enabled, tables, rows):
 	receives = write & (incoming[:, None] != 0)
 	state = state._replace(
 		item=jnp.where(write, incoming[:, None].astype(state.item.dtype), state.item),
-		item_consumed=jnp.where(receives, False, state.item_consumed),
 		item_revealed=state.item_revealed | receives,
 		item_public=jnp.where(
 			receives, incoming[:, None].astype(state.item_public.dtype), state.item_public

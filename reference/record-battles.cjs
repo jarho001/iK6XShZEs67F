@@ -54,7 +54,9 @@
  * adds volatileMoves. Missing fields default to zero for earlier schema v2 files.
  * Default profile is isolation: --allowed path/to/task.json adds moves, abilities,
  * and items arrays to the supported registry. --profile phase1 uses the original
- * all-replaced plain-move and Ghost-lead exhaustion profiles.
+ * all-replaced plain-move and Ghost-lead exhaustion profiles. --profile pool keeps
+ * pool teams exactly as generated (no isolation, no replacements), drawing teams from
+ * the supported indices of pokejax.sampler.
  * Team slots NEVER change identity. Actions 4..8 enumerate all non-active fixed
  * slots in ascending order, INCLUDING fainted slots (which are illegal choices).
  * Waiting sides use action 0. Struggle uses action 0 and does not consume PP.
@@ -137,6 +139,10 @@ const WEATHER_START_ABILITIES = new Set(['drizzle', 'drought', 'sandstream', 'sn
 const TURN_INTERNAL_VOLATILES = new Set(['pursuit', 'focuspunch', 'counter', 'mirrorcoat', 'gem']);
 // Move-restricting volatiles whose onDisableMove callbacks only write disabled flags, so their order is irrelevant.
 const DISABLE_RESTRICTIONS = new Set(['choicelock', 'disable', 'encore', 'taunt']);
+// Showdown keeps a choicelock volatile after its Choice item leaves (Trick, Knock Off). Its
+// BeforeMove and DisableMove callbacks remove it when the item is not a Choice item, so with
+// no Choice item it has no effect and is not compared (task 15).
+const CHOICE_ITEMS = new Set(['choiceband', 'choicescarf', 'choicespecs']);
 
 function isolationBattle(seed) {
 	return new Battle({ formatid: 'gen5randombattle', seed });
@@ -321,7 +327,8 @@ function snapshot(battle, fixed, publicAbilities, publicSpecies) {
 			itemConsumed: !side.active[0].item && Boolean(side.active[0].lastItem) &&
 				!side.active[0].itemKnockedOff,
 			itemKnockedOff: side.active[0].itemKnockedOff,
-			volatiles: side.active[0].fainted ? null : Object.keys(side.active[0].volatiles).filter(name => !TURN_INTERNAL_VOLATILES.has(name)).sort(),
+			volatiles: side.active[0].fainted ? null : Object.keys(side.active[0].volatiles).filter(name => !TURN_INTERNAL_VOLATILES.has(name) &&
+				!(name === 'choicelock' && !CHOICE_ITEMS.has(side.active[0].item))).sort(),
 			...(!side.active[0].fainted && Object.keys(activeCounters(side.active[0])).length ? {
 				volatileCounters: activeCounters(side.active[0]),
 			} : {}),
@@ -739,6 +746,10 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 			tied.every(h => h.callback === h.effect.onDisableMove) &&
 			tied[0].effectHolder === tied[1].effectHolder) {
 			exception = 'choice-disable-move-order';
+		} else if (!scope && tied.length === 2 && tied.every(h => h.effect?.id === 'whiteherb') &&
+			tied[0].effectHolder !== tied[1].effectHolder) {
+			// White Herb's AfterMove restores only its own holder's stat stages (task 15).
+			exception = 'independent-whiteherb-order';
 		} else if (scope?.kind === 'runSwitch') {
 			const switchHandlers = tied.map(p => ({
 				item: p.item,
@@ -747,7 +758,8 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 				onAnySwitchIn: battle.findPokemonEventHandlers(p, 'onAnySwitchIn').map(h => h.effect.id),
 			}));
 			assert(tied.every(p => battle.findPokemonEventHandlers(p, 'onSwitchIn').every(h => [
-					'slp', 'tox', 'choiceband', 'choicespecs', 'choicescarf',
+					// Healing Wish heals and cures only the Pokemon entering its slot (task 15).
+					'slp', 'tox', 'choiceband', 'choicespecs', 'choicescarf', 'healingwish',
 				].includes(h.effect.id) || SWITCH_START_ABILITIES.has(h.effect.id) ||
 					h.effect.id === 'slowstart' || h.effect.id === 'imposter' ||
 					h.effect.id === 'forecast' || h.effect.id === 'flowergift' || h.effect.id === 'trace') &&
@@ -821,17 +833,21 @@ function playBattle(index, masterSeed, pool, moves, ghostTeams, exhaustionMoves,
 	const seed = seedFor(masterSeed, index, 'battle');
 	const policySeed = seedFor(masterSeed, index, 'policy');
 	const policy = new PRNG(policySeed);
-	const exhaustion = options.profile !== 'isolation' && index % 20 === 0;
-	const poolIndices = exhaustion ? Array(2).fill(policy.sample(ghostTeams)) :
-		[policy.random(pool.teams.length), policy.random(pool.teams.length)];
+	const exhaustion = options.profile !== 'isolation' && options.profile !== 'pool' && index % 20 === 0;
+	// Pool profile draws from the supported team indices (pokejax.sampler); others draw from the whole pool.
+	const drawTeam = () => options.teamIndices ?
+		options.teamIndices[policy.random(options.teamIndices.length)] : policy.random(pool.teams.length);
+	const poolIndices = exhaustion ? Array(2).fill(policy.sample(ghostTeams)) : [drawTeam(), drawTeam()];
 	const teams = poolIndices.map(i => pool.teams[i].map(member => {
 		if (options.profile === 'isolation') return isolationMember(member, moves, options, policy);
+		if (options.profile === 'pool') return structuredClone(member);
 		const candidates = [...(exhaustion ? exhaustionMoves : moves)];
 		policy.shuffle(candidates);
 		return { ...structuredClone(member), ability: 'noability', item: '', moves: candidates.slice(0, 4) };
 	}));
 	const players = teams.map((team, side) => ({ name: `Side ${side}`, team: structuredClone(team) }));
-	const recordStart = options.profile === 'isolation' && options.abilities?.length > 0;
+	const recordStart = (options.profile === 'isolation' && options.abilities?.length > 0) ||
+		options.profile === 'pool';
 	const battle = recordStart ? isolationBattle(seed) : new Battle({
 		formatid: 'gen5randombattle', seed, p1: players[0], p2: players[1],
 	});
@@ -859,7 +875,9 @@ function playBattle(index, masterSeed, pool, moves, ghostTeams, exhaustionMoves,
 				const copiesAtStart = ['trace', 'imposter'].includes(dex.toID(teams[s][slot].ability));
 				if (!copiesAtStart) assert.equal(pokemon.ability, dex.toID(teams[s][slot].ability));
 				assert.equal(pokemon.item || pokemon.lastItem, dex.toID(teams[s][slot].item));
-				if (!copiesAtStart) assert.deepEqual(pokemon.moveSlots.map(m => m.id), teams[s][slot].moves);
+				// Showdown stores a typed Hidden Power as plain hiddenpower; its type comes from the IVs (pokejax.teams checks them).
+				if (!copiesAtStart) assert.deepEqual(pokemon.moveSlots.map(m => m.id),
+					teams[s][slot].moves.map(id => (id.startsWith('hiddenpower') ? 'hiddenpower' : id)));
 			}
 		}
 		recorder.setFixed(fixed);
@@ -927,7 +945,12 @@ async function main() {
 	const options = { profile: values.profile, taskMoves: (extra.moves || []).map(id => dex.toID(id)),
 		abilities: [...new Set([...supported.abilities, ...(extra.abilities || []).map(id => dex.toID(id))])].sort(),
 		items: [...supported.items, ...(extra.items || []).map(id => dex.toID(id))] };
-	assert(['phase1', 'isolation'].includes(values.profile));
+	assert(['phase1', 'isolation', 'pool'].includes(values.profile));
+	if (values.profile === 'pool') {
+		// The same supported team indices as the environment sampler, computed once.
+		options.teamIndices = JSON.parse(execFileSync('python', ['-m', 'pokejax.sampler',
+			path.join(root, 'work/teams/gen5-teams.json')], { cwd: root, encoding: 'utf8', maxBuffer: 1 << 26 }));
+	}
 	assert(moves.length >= 4);
 	assert(!Object.values(dex.abilities.get('noability')).some(value => typeof value === 'function'));
 	const ghostTeams = pool.teams.flatMap((team, i) => dex.species.get(team[0].species).types.includes('Ghost') ? [i] : []);
@@ -945,8 +968,9 @@ async function main() {
 	}
 	const summary = { battles: count, ...newStats(), meanLength: 0, turnLimitHits: 0 };
 	try {
+		const { teamIndices, ...allowed } = options;
 		await write({ type: 'header', schemaVersion: 2, showdownCommit: lock.commit, seed, count,
-			format: 'gen5randombattle', acceptedMoves: moves, allowed: options, turnLimit: TURN_LIMIT,
+			format: 'gen5randombattle', acceptedMoves: moves, allowed, turnLimit: TURN_LIMIT,
 			poolSeed: pool.seed, policy: 'uniform over all legal moves and switches',
 			exhaustion: { every: 20, moves: exhaustionMoves, initialOverrides: false },
 			prngExceptions: [...EXCEPTIONS, 'singleton-frisk', 'identical-noguard-accuracy',

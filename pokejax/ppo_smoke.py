@@ -22,6 +22,7 @@ from pokejax.engine.randomness import UNFORCED
 from pokejax.engine.reset import Teams, check_teams
 from pokejax.engine.state import ONGOING
 from pokejax.engine.step import step
+from pokejax.sampler import supported_team_indices
 from pokejax.tables import load_tables
 from pokejax.teams import load_npz
 
@@ -124,6 +125,8 @@ class Trainer:
 			tables,
 		)
 		self.pool = Teams(*(jnp.asarray(getattr(host_pool, n)) for n in Teams._fields))
+		# Only fully supported teams are drawn; the index array is computed once here.
+		self.team_indices = jnp.asarray(supported_team_indices(host_pool, tables))
 		self.tables = build_engine_tables(tables)
 		self.model = Policy(
 			c, len(tables.species.ids), len(tables.moves.ids), len(tables.types.ids) + 1
@@ -144,7 +147,7 @@ class Trainer:
 	def new_env(self, key, batch):
 		key, reset_key, side_key = jax.random.split(key, 3)
 		return Env(
-			_new_states(reset_key, self.pool, self.tables, batch),
+			_new_states(reset_key, self.pool, self.tables, batch, self.team_indices),
 			jax.random.bernoulli(side_key, shape=(batch,)).astype(jnp.int32),
 			jnp.zeros((batch, self.config.hidden_size)),
 			key,

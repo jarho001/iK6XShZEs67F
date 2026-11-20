@@ -99,6 +99,7 @@ from .switching import (
 	run_switch_in,
 	switch_actions,
 	switch_handler_first,
+	switch_in_hazards,
 )
 from .trace import trace_copy
 from .turn_moves import (
@@ -196,7 +197,8 @@ def _move(
 	move_enabled = enabled
 	choice_start = move_enabled & item_rows.choice[side]
 	choice_start &= state.volatiles[side, CHOICE_MOVE] == 0
-	choice_start &= ~continuation & ~recharge
+	# A Choice item locks the move even when it continues a locked move (Showdown ModifyMove).
+	choice_start &= ~recharge
 	choice_start &= row.id != 0
 	state = set_active_volatile(
 		state,
@@ -237,6 +239,8 @@ def _move(
 	# Showdown records the last move once PP is paid (or a continuation or Struggle runs).
 	last_id = row.id
 	last_moved = enabled & ~recharge & ((pp > 0) | continuation | struggle)
+	# Showdown's moveUsed runs before the hit, so an Encore reflected back at this user reads it.
+	state = write_last_move(state, side, user, last_id, last_moved)
 	# Nature Power is a static call: the user uses Earthquake, and Nature Power keeps its PP.
 	row = select_row(sleep_call, called_row, row)
 	row = select_row(natured, read_move(tables, row.move_call.astype(jnp.int32)), row)
@@ -368,7 +372,9 @@ def _move(
 	color_type = effective_move_type(state, side, row, tables, weather).astype(state.types.dtype)
 	color_target = state.active[foe]
 	color_types = state.types[foe, color_target]
+	# Sheer Force removes the secondary hit that Color Change needs (AfterMoveSecondary).
 	color_trigger = attack_allowed & result.success & color_change & (row.move_category != 2)
+	color_trigger &= ~sheer
 	color_trigger &= (state.hp[foe, color_target] > 0) & (color_type >= 0)
 	color_trigger &= ~jnp.any(color_types == color_type)
 	color_member = (SIDES == foe)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == color_target)
@@ -505,7 +511,6 @@ def _move(
 	state = update_forms(state, tables)
 	hp = state.hp.astype(jnp.int32)
 	boosts = jnp.where((hp[SIDES, state.active] > 0)[:, None], state.boosts, 0)
-	state = write_last_move(state, side, user, last_id, last_moved)
 	return (
 		state._replace(boosts=boosts),
 		pivot,
@@ -657,6 +662,15 @@ def step(state, actions, key, forced, engine_tables):
 		item_rows = gather_active_items(state, t)
 		previous = (state, item_rows, abilities, start_turn)
 		state = switch_actions(state, actions, switching, t, abilities)
+		# runSwitch caches each entrant's speed when it is queued. Its SwitchIn hazards run
+		# before any Imposter or Trace copy, and the copy before the Start effects.
+		entrant_rows = active_abilities(state, t)
+		handler_first = switch_handler_first(
+			state, key, forced, gather_active_items(state, t), entrant_rows
+		)
+		handler_first = jnp.where(start_turn, first_order, handler_first)
+		before = state.hp[SIDES, state.active] > 0
+		state = switch_in_hazards(state, switching, handler_first, t, entrant_rows, previous)
 		# Imposter (onSwitchIn) and Trace (onStart) copy the foe as it stands when this side's
 		# switch-in runs; a foe entering after it is still the old active.
 		view = switch_foe_view(previous[0], state, switching, first_order)
@@ -677,18 +691,34 @@ def step(state, actions, key, forced, engine_tables):
 			& (state.hp[SIDES[::-1], foe_now] > 0)
 		)
 		slots = jnp.arange(TEAM_SLOTS)[None, :] == previous[0].active[:, None]
+		copy_slots = slots & copies[:, None]
 		public = jnp.where(
-			slots & copies[:, None],
+			copy_slots,
 			foe_ability[:, None].astype(state.ability_public.dtype),
 			state.ability_public,
 		)
 		state = state._replace(ability_public=public)
+		# That copy's Start effects (Intimidate, weather setters) run in the same Update, against
+		# the entrant, before its own switch-in. The holder has left, so run from its old slot.
+		copy_state = state._replace(
+			active=jnp.where(copies, previous[0].active, state.active),
+			ability=jnp.where(
+				copy_slots, foe_ability[:, None].astype(state.ability.dtype), state.ability
+			),
+		)
+		copy_state, _ = run_switch_in(copy_state, copies, 0, t, hazards=False)
+		state = copy_state._replace(active=state.active, ability=state.ability)
 		item_rows = gather_active_items(state, t)
 		abilities = active_abilities(state, t)
-		handler_first = switch_handler_first(state, key, forced, item_rows, abilities)
-		handler_first = jnp.where(start_turn, first_order, handler_first)
 		state, abilities = run_switch_in(
-			state, switching, handler_first, t, previous=previous, rows=abilities
+			state,
+			switching,
+			handler_first,
+			t,
+			previous=previous,
+			rows=abilities,
+			hazards=False,
+			before=before,
 		)
 		state = update_active_items(state, jnp.any(switching), item_rows, abilities, tables=t)
 		state = update_hooks(state, t)

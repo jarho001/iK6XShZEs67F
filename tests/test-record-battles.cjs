@@ -499,3 +499,11 @@ test('a tied lead weather war records the handler shuffle and guards queue inser
 		assert.equal(stats.exceptions['equal-speed-runSwitch-insertion'], 1);
 	} finally { battle.destroy(); }
 });
+
+test('pool profile plays pool teams exactly as generated', { skip: !fs.existsSync(path.join(root, 'work/teams/gen5-teams.json')) }, () => {
+	const pool = JSON.parse(fs.readFileSync(path.join(root, 'work/teams/gen5-teams.json'), 'utf8'));
+	const teamIndices = [5, 17, 404, 9999];
+	const record = playBattle(3, 1, pool, [], [], [], { profile: 'pool', teamIndices });
+	assert.ok(record.poolIndices.every(index => teamIndices.includes(index)));
+	record.poolIndices.forEach((index, side) => assert.deepEqual(record.teams[side], pool.teams[index]));
+});

@@ -157,3 +157,34 @@ def test_whole_battle_smoke_runs_both_simulators_and_writes_report(tmp_path, cap
 	assert (stats_dir / "showdown.json").exists()
 	assert (stats_dir / "engine.json").exists()
 	assert all("p_adjusted" in row and "standard_error" in row for row in report["results"])
+
+
+def test_whole_battle_smoke_with_unchanged_pool_teams(tmp_path):
+	"""--unchanged plays pool teams exactly as generated, in both simulators."""
+	stats_dir = tmp_path / "stats"
+	report_path = tmp_path / "report.json"
+	assert (
+		main(
+			[
+				"--battles",
+				"8",
+				"--seed",
+				"3",
+				"--unchanged",
+				"--team-pool",
+				str(DEFAULT_POOL),
+				"--stats-dir",
+				str(stats_dir),
+				"--out",
+				str(report_path),
+			]
+		)
+		== 0
+	)
+	report = json.loads(report_path.read_text())
+	showdown = json.loads((stats_dir / "showdown.json").read_text())
+	assert report["teams"] == showdown["teams"] == "unchanged"
+	generated = json.loads(DEFAULT_POOL.read_text())["teams"]
+	for pair in showdown["teamPairs"]:
+		for team in pair:
+			assert team in generated

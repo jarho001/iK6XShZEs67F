@@ -13,6 +13,13 @@ Showdown commit: `1242c1e2d9763ba5b85d33f13aecb89bae19ae3d`
 | Items | 44 | 44 | 100.0% |
 
 Fully supported teams: 100.0%
+Excluded teams: 0 (0.0%); supported teams for the sampler: 10000.
+
+## Excluded teams
+
+Each excluded team with the unsupported moves, abilities and items that exclude it.
+
+None: every team in the pool is fully supported, so the sampler draws from all.
 
 ## Moves
 

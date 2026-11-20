@@ -5,7 +5,8 @@ from pathlib import Path
 
 import numpy as np
 
-from pokejax.support import support_masks, team_supported
+from pokejax.sampler import ExcludedTeam, excluded_teams
+from pokejax.support import support_masks
 from pokejax.tables import NONE_ROW, Tables, load_tables
 from pokejax.teams import TeamPool, load_npz
 
@@ -20,6 +21,23 @@ PERCENT_SCALE = 100
 
 def _percentage(numerator, denominator):
 	return f"{PERCENT_SCALE * numerator / denominator if denominator else 0:.1f}%"
+
+
+def _ids(ids):
+	return ", ".join(ids) if ids else "-"
+
+
+def _excluded_lines(excluded: tuple[ExcludedTeam, ...]):
+	if not excluded:
+		return ["None: every team in the pool is fully supported, so the sampler draws from all."]
+	return [
+		"| Pool index | Unsupported moves | Unsupported abilities | Unsupported items |",
+		"| ---: | --- | --- | --- |",
+		*(
+			f"| {team.index} | {_ids(team.moves)} | {_ids(team.abilities)} | {_ids(team.items)} |"
+			for team in excluded
+		),
+	]
 
 
 def _counts(values, row_count):
@@ -73,10 +91,23 @@ def render_coverage(pool: TeamPool, tables: Tables) -> str:
 				f"| {table.ids[row]} | {name} | {occurrences[row]} | "
 				f"{_percentage(teams[row], team_count)} | {'yes' if supported[row] else 'no'} |"
 			)
+	excluded = excluded_teams(pool, tables)
+	supported_count = team_count - len(excluded)
+	excluded_line = (
+		f"Excluded teams: {len(excluded)} ({_percentage(len(excluded), team_count)}); "
+		f"supported teams for the sampler: {supported_count}."
+	)
 	lines.extend(
 		[
 			"",
-			f"Fully supported teams: {_percentage(np.count_nonzero(team_supported(pool, tables)), team_count)}",
+			f"Fully supported teams: {_percentage(supported_count, team_count)}",
+			excluded_line,
+			"",
+			"## Excluded teams",
+			"",
+			"Each excluded team with the unsupported moves, abilities and items that exclude it.",
+			"",
+			*_excluded_lines(excluded),
 		]
 	)
 	return "\n".join(lines + sections) + "\n"

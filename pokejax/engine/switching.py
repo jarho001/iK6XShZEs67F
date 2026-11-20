@@ -222,23 +222,25 @@ def switch_handler_first(state, key, forced, items, rows):
 	return jnp.where(speed[0] == speed[1], tie, jnp.where(speed[0] > speed[1], 0, 1))
 
 
-def run_switch_in(
-	state, switchers, first, tables, mold_source=None, previous=None, rows=None, hazards=True
-):
-	"""Resolve hazards and Start effects in the order of their holders.
+def _early_entrant(switchers, first, previous):
+	"""The faster entrant of a sequential switch-in: its effects see the other side's old active."""
+	if previous is None:
+		return jnp.zeros((2,), jnp.bool_)
+	return (SIDES == first) & previous[3] & jnp.all(switchers)
 
-	hazards=False runs only the Start effects of a copied ability (Trace, Transform, Imposter).
+
+def switch_in_hazards(
+	state, switchers, first, tables, rows, previous=None, mold_source=None, hazards=True
+):
+	"""SwitchIn hazards of the entrants. They run before any Imposter or Trace copy.
+
+	A sequential earlier entrant's weather still applies to a later entrant's hazards.
 	"""
-	if rows is None:
-		rows = active_abilities(state, tables)
 	before = state.hp[SIDES, state.active] > 0
-	ongoing = state.winner == ONGOING
-	faster = SIDES == first
-	early = jnp.zeros((2,), jnp.bool_)
 	weather = effective_weather(state, rows)
 	if previous is not None:
-		old, old_items, old_abilities, sequential = previous
-		early = faster & sequential & jnp.all(switchers)
+		old, _, old_abilities, _ = previous
+		early = _early_entrant(switchers, first, previous)
 		old_target = early[::-1]
 		old_alive = old.hp[SIDES, old.active] > 0
 		first_rows = jnp.where(old_target[:, None], old_abilities, rows)
@@ -250,7 +252,7 @@ def run_switch_in(
 	# the other entrant's hazard weather or terminate its pending callbacks.
 	single = mold_source is not None
 	hazard_rows = move_abilities(rows, mold_source) if single else rows
-	state = apply_active_switch_hazards(
+	return apply_active_switch_hazards(
 		state,
 		state.active,
 		switchers & hazards,
@@ -261,6 +263,40 @@ def run_switch_in(
 		None if single else rows,
 		single=single,
 	)
+
+
+def run_switch_in(
+	state,
+	switchers,
+	first,
+	tables,
+	mold_source=None,
+	previous=None,
+	rows=None,
+	hazards=True,
+	before=None,
+):
+	"""Resolve hazards and Start effects in the order of their holders.
+
+	hazards=False runs only the Start effects of a copied ability (Trace, Transform, Imposter).
+	before is each side's HP before this switch-in's hazards; by default it is read here.
+	"""
+	if rows is None:
+		rows = active_abilities(state, tables)
+	if before is None:
+		before = state.hp[SIDES, state.active] > 0
+	ongoing = state.winner == ONGOING
+	faster = SIDES == first
+	single = mold_source is not None
+	early = _early_entrant(switchers, first, previous)
+	if previous is not None:
+		old, old_items, old_abilities, _ = previous
+		old_target = early[::-1]
+		old_alive = old.hp[SIDES, old.active] > 0
+	if hazards is not False:
+		state = switch_in_hazards(
+			state, switchers, first, tables, rows, previous, mold_source, hazards
+		)
 	alive = state.hp[SIDES, state.active] > 0
 	starts = switchers & alive & ongoing
 	if not single:

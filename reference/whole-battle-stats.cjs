@@ -3,6 +3,8 @@
 
 /* Generate isolation teams with the recorder's builder and play them on Showdown.
  * The JSON output includes the exact constructor teams so the engine can reuse them.
+ * --unchanged plays pool teams exactly as generated (no isolation, no replacements), drawn
+ * from the supported indices of pokejax.sampler; the default is isolation teams.
  */
 
 const fs = require('node:fs');
@@ -75,12 +77,14 @@ function playBattle(index, masterSeed, teamPair, policySeedWords) {
 function makeBattleInputs(count, seed, pool, moves, options) {
 	const teamPairs = [];
 	const policySeeds = [];
+	const drawTeam = policy => (options.teamIndices ?
+		options.teamIndices[policy.random(options.teamIndices.length)] : policy.random(pool.teams.length));
 	for (let index = 0; index < count; index++) {
 		const policySeed = seedFor(seed, index, 'policy');
 		const policy = new PRNG(policySeed);
-		const indices = [policy.random(pool.teams.length), policy.random(pool.teams.length)];
+		const indices = [drawTeam(policy), drawTeam(policy)];
 		teamPairs.push(indices.map(teamIndex => pool.teams[teamIndex].map(member =>
-			isolationMember(member, moves, options, policy))));
+			options.unchanged ? structuredClone(member) : isolationMember(member, moves, options, policy))));
 		policySeeds.push(policySeed);
 	}
 	return { teamPairs, policySeeds };
@@ -91,7 +95,8 @@ async function main() {
 		battles: { type: 'string', default: '4000' },
 		seed: { type: 'string', default: '1' },
 		pool: { type: 'string', default: 'work/teams/gen5-teams.json' },
-		allowed: { type: 'string' },		out: { type: 'string', default: 'work/stats/showdown.json' },
+		allowed: { type: 'string' },		unchanged: { type: 'boolean', default: false },
+		out: { type: 'string', default: 'work/stats/showdown.json' },
 	} });
 	const count = Number(values.battles);
 	const seed = Number(values.seed);
@@ -113,6 +118,12 @@ async function main() {
 		items: [...new Set([...supported.items, ...(extra.items || []).map(id => dex.toID(id))])].sort(),
 	};
 	assert(moves.length >= 4);
+	if (values.unchanged) {
+		options.unchanged = true;
+		options.teamIndices = JSON.parse(execFileSync('python', ['-m', 'pokejax.sampler',
+			path.resolve(root, values.pool)], { cwd: root, encoding: 'utf8', maxBuffer: 1 << 26 }));
+	}
+	const teamMode = values.unchanged ? 'unchanged' : 'isolation';
 	const { teamPairs, policySeeds } = makeBattleInputs(count, seed, pool, moves, options);
 	const battles = [];
 	for (let index = 0; index < count; index++) {
@@ -130,7 +141,8 @@ async function main() {
 		format: 'gen5randombattle',
 		seed,
 		count,
-		allowed: options,
+		teams: teamMode,
+		allowed: { taskMoves: options.taskMoves, abilities: options.abilities, items: options.items },
 		acceptedMoves: moves,
 		policy: 'uniform over the legal-action mask for both sides at every request',
 		teamPairs,
