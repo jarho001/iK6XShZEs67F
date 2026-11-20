@@ -90,8 +90,9 @@ Gates, measured 2026-11-20 on an idle NVIDIA GeForce RTX 3060 Ti, JAX 0.12.0.1, 
 Phase 2 exit code (`python -m pokejax.bench --json`, batch 4,096, engine only, median of three
 fresh processes, after performance pass 7): 3,419,031 steps/s (runs 3,404,191 to 3,425,404),
 48,183 battles/s, mean battle length 70.99 steps, cold first call 29.05 s (29.01 to 29.20 s).
-Cold compile under 60 s: pass. Engine throughput against the 5,000,000 steps/s target:
-**fail**. Throughput fell from 7.62M after performance pass 4 to 3.32M as tasks 11 to 14 added
+Cold compile under 60 s: pass. Engine throughput against the 3,000,000 steps/s target: pass
+(the target was 5,000,000 until the owner lowered it at the end of Phase 2; see ROADMAP.md,
+Gates). Throughput fell from 7.62M after performance pass 4 to 3.32M as tasks 11 to 14 added
 the remaining mechanics. Performance pass 5 recovered 4%; a structural attempt (pass 6, a
 working copy of the active Pokemon) did not help and was not committed; pass 7 (move identity
 before row loads, prepared team inputs, shared damage facts) gained 3% and cut compile time.

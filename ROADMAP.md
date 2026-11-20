@@ -117,11 +117,17 @@ These decisions are fixed. Changing one needs the owner's agreement.
   most small fixture files. Never commit logs, profiles or run outputs.
 - **Gates, checked at the end of every phase from Phase 1 on:**
   - Throughput on the 3060 Ti with a random legal policy at a batch of 4,096,
-    engine only: target 5,000,000 steps per second. Phase 1 measured a median
+    engine only: target 3,000,000 steps per second. Phase 1 measured a median
     of 25,134,430 steps per second with status moves, abilities and items still
-    inactive. The target leaves room for roughly a 5x slowdown from Phase 2
-    mechanics while staying far above what PPO training consumes. A group that
-    costs more than 10% needs a reason written into its commit message.
+    inactive. The target was 5,000,000 until the end of Phase 2 (changed by the
+    owner on 2026-11-20): the full Phase 2 mechanics cost about 7x, not the 5x
+    it allowed for, and three performance passes brought the step back only to
+    3,419,031 (performance pass 7, 60245e4). 3,000,000 is still about 60x what
+    the PPO smoke test consumes (about 52,000 steps per second). 5,000,000
+    remains a goal for later work such as custom GPU kernels; larger batches on
+    the RTX 6000 machines are a training choice, not a way to pass this gate. A
+    group that costs more than 10% needs a reason written into its commit
+    message.
   - Cold compile of the step function under 60 seconds on the GPU machine.
 
 For reference, Showdown itself ran about 4,900 decisions per second on one
