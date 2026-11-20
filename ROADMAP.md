@@ -259,9 +259,55 @@ out by the sampler and listed in `COVERAGE.md`.
   unrevealed opponent data.
 - Auto-reset, reward (win or loss, optional shaping behind a flag), and
   self-play plumbing that treats both sides as agents.
-- Baseline opponents inside JAX: random, and max-damage.
+- Baseline opponents inside JAX: random, random-move, max-damage, and
+  poke-env's simple heuristics player.
 
-Exit: batched rollouts with both baselines run at the gated throughput.
+Tasks, in order. Each is one commit with its tests, and states the benchmark
+change.
+
+1. Observation, final version, engine side: everything a player can know at
+   a decision point. Own team in full; the opponent as revealed; both actives'
+   public volatiles (Substitute, Encore, Taunt, Disable and its move, Leech
+   Seed, Yawn, Curse, Transform, and the ones already observed; choice lock
+   for the own side only); field and side state (weather, hazards, Trick
+   Room, pending Wish and Healing Wish). Last turn's visible events, as a
+   small fixed record that step writes per side: action order, move used,
+   switch or drag-in, miss, failure, critical hit, effectiveness, damage and
+   healing in protocol percent, status inflicted, faint. The no-leak test
+   covers every new field and every private counter. State the cost with
+   `bench --with-observation`.
+2. Observation checked against Showdown: a Node module that builds the same
+   observation for one player from that player's requests and protocol
+   lines only, which the Phase 5 player will reuse, and a differential test
+   that compares it field by field with the engine observation at every
+   decision point of recorded pool battles, for both sides. A difference is
+   a leak, a missing public fact or an engine bug.
+3. Environment: reset and step over a batch with teams from the sampler,
+   auto-reset inside step, observations, rewards and done flags for both
+   sides (win 1, loss -1, tie 0; optional shaping behind a flag, off by
+   default), truncation at a step cap kept apart from termination, and
+   episode statistics. Self-play treats both sides as agents; a wrapper plays
+   one side with a fixed opponent policy and a random side per battle. The
+   PPO smoke test moves onto it and must still beat random.
+4. Baselines and phase exit: four policies as JAX functions of the state,
+   the same four in the Node statistics tool, and whole-battle statistics of
+   each against random in both simulators (the Phase 5 comparison needs a
+   baseline to behave the same in both). Random picks any legal action.
+   Random-move picks a random legal move and switches only when it must.
+   Max-damage scores each legal move by a fixed formula over public data
+   (power, STAB, type effectiveness, accuracy, attack and defense stats with
+   boosts) and switches only when it must. Heuristics ports poke-env's
+   `SimpleHeuristicsPlayer` (src/poke_env/player/baselines.py at commit
+   bab3673, singles path, without Dynamax and Terastallization) and reads
+   only public information. Then the exit benchmark and a Phase 3 results
+   section in the README.
+
+Exit: batched rollouts with each baseline run at the gated throughput,
+measured as environment steps per second at a batch of 4,096: engine, team
+draws, auto-reset, rewards and the baseline policies on both sides, without
+observations (baselines read the state). The cost of observing both sides is
+measured and reported next to it. Before Phase 3, observing both sides
+already brought the engine from 3,419,031 to 2,434,930 steps per second.
 
 ### Phase 4: maskable Recurrent PPO
 
