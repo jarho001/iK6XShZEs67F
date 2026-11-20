@@ -35,6 +35,7 @@ for the defending Pokemon and 2 * hit index + 1 for the attacker. effect_spore
 is Showdown random(100). Harvest and residual_chance address their end-of-turn
 ability chances by holder side.
 
+forced=None is an unforced run: every outcome samples, and the rollout and bench pass it.
 A step keeps the key's two words and hashes each address (kind, side, occurrence) when
 it is used. integer requires n>0; chance requires 0<=numerator<=denominator and denominator>0.
 These are caller preconditions. A forced integer must be less than n at its
@@ -180,8 +181,17 @@ def _fmix32(value):
 	return value ^ (value >> 16)
 
 
+def forced_at(forced, kind, side, occ):
+	"""The forced value at one address; None (an unforced run) means every outcome samples."""
+	if forced is None:
+		return jnp.asarray(NOT_FORCED, jnp.int8)
+	return forced[kind, side, occ]
+
+
 def _sample_or_force(key, forced, kind, side, occ, n):
 	sample = (address_bits(key, kind, side, occ) % jnp.asarray(n, jnp.uint32)).astype(jnp.int32)
+	if forced is None:
+		return sample
 	value = forced[kind, side, occ].astype(jnp.int32)
 	return jnp.where(value >= 0, value, sample)
 
@@ -202,15 +212,15 @@ def hit_count(key, forced, side, hit_min, hit_max):
 	span = (hit_max - hit_min + 1).astype(jnp.uint32)
 	uniform = low + bits % span
 	sample = jnp.where((hit_min == 2) & (hit_max == 5), gen5_count, uniform)
-	value = forced[HIT_COUNT, side, 0].astype(jnp.int32)
+	value = forced_at(forced, HIT_COUNT, side, 0).astype(jnp.int32)
 	return jnp.where(value >= 0, value, sample.astype(jnp.int32))
 
 
 def chance(key, forced, kind, side, occ, numerator, denominator):
 	"""Return a forced boolean or randomChance(numerator, denominator)."""
 	# Convert the sample to an outcome before forcing: forced 0/1 is not a draw.
-	sample = integer(key, UNFORCED, kind, side, occ, denominator) < numerator
-	value = forced[kind, side, occ]
+	sample = integer(key, None, kind, side, occ, denominator) < numerator
+	value = forced_at(forced, kind, side, occ)
 	return jnp.where(value >= 0, value != 0, sample)
 
 

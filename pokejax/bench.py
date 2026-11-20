@@ -13,8 +13,7 @@ import numpy as np
 from pokejax.engine.actions import legal_actions
 from pokejax.engine.data import build_engine_tables
 from pokejax.engine.observation import observe
-from pokejax.engine.randomness import UNFORCED
-from pokejax.engine.reset import Teams, check_teams, reset
+from pokejax.engine.reset import Teams, check_teams, prepare_teams, reset
 from pokejax.engine.state import ONGOING, TEAM_SLOTS
 from pokejax.engine.step import step
 from pokejax.sampler import sample_team_indices
@@ -27,20 +26,27 @@ DEFAULT_STEPS = 256
 DEFAULT_REPETITIONS = 3
 
 
-def _new_states(key, pool, tables, batch_size, team_indices=None):
-	"""Reset a batch on teams drawn from the whole pool, or from team_indices (pokejax.sampler)."""
+def _new_states(key, pool, tables, batch_size, team_indices=None, prepared=None):
+	"""Reset a batch on teams drawn from the whole pool, or from team_indices (pokejax.sampler).
+
+	prepared is prepare_teams(pool, tables); a rollout passes it in once instead of per step.
+	"""
+	if prepared is None:
+		prepared = prepare_teams(pool, tables)
 	index_key, reset_key = jax.random.split(key)
 	if team_indices is None:
 		indices = jax.random.randint(index_key, (batch_size, 2), 0, pool.species.shape[0])
 	else:
 		indices = sample_team_indices(index_key, team_indices, batch_size)
 	teams = jax.tree.map(lambda column: column[indices], pool)
+	member_inputs = jax.tree.map(lambda column: column[indices], prepared)
 	keys = jax.random.split(reset_key, batch_size)
-	return jax.vmap(reset, in_axes=(0, 0, None))(keys, teams, tables)
+	return jax.vmap(lambda k, t, p: reset(k, t, tables, None, p))(keys, teams, member_inputs)
 
 
 def rollout(carry, pool, tables, steps, with_observation=False):
 	"""Advance a batch and return completed count and total completed lengths."""
+	prepared = prepare_teams(pool, tables)
 
 	def advance(carry, _):
 		state, key, lengths = carry
@@ -49,9 +55,7 @@ def rollout(carry, pool, tables, steps, with_observation=False):
 		logits = jnp.where(mask, 0.0, -jnp.inf)
 		actions = jax.random.categorical(action_key, logits, axis=-1)
 		keys = jax.random.split(step_key, state.winner.shape[0])
-		state = jax.vmap(step, in_axes=(0, 0, 0, None, None))(
-			state, actions, keys, UNFORCED, tables
-		)
+		state = jax.vmap(step, in_axes=(0, 0, 0, None, None))(state, actions, keys, None, tables)
 		# Consume every observation leaf so XLA cannot discard observation work.
 		checksum = jnp.float32(0)
 		if with_observation:
@@ -62,7 +66,7 @@ def rollout(carry, pool, tables, steps, with_observation=False):
 		finished = state.winner != ONGOING
 		lengths = lengths + 1
 		completed_length = jnp.sum(jnp.where(finished, lengths, 0))
-		fresh = _new_states(reset_key, pool, tables, state.winner.shape[0])
+		fresh = _new_states(reset_key, pool, tables, state.winner.shape[0], prepared=prepared)
 		state = jax.tree.map(
 			lambda new, old: jnp.where(
 				finished.reshape((finished.shape[0],) + (1,) * (old.ndim - 1)), new, old

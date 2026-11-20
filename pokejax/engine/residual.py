@@ -43,6 +43,7 @@ from .randomness import (
 	RESIDUAL_CHANCE,
 	RESIDUAL_ORDER,
 	chance,
+	forced_at,
 	integer,
 )
 from .restrictions import encore_residual, taunt_residual
@@ -86,8 +87,8 @@ class ResidualRow(NamedTuple):
 def _residual_tie_first(key, forced, context, kind=ORDER):
 	"""Read current row addresses and retain older schema-v2 context-2 records."""
 	sampled = integer(key, forced, kind, 0, context, 2)
-	current = forced[kind, 0, context].astype(jnp.int32)
-	legacy = forced[ORDER, 0, RESIDUAL_ORDER].astype(jnp.int32)
+	current = forced_at(forced, kind, 0, context).astype(jnp.int32)
+	legacy = forced_at(forced, ORDER, 0, RESIDUAL_ORDER).astype(jnp.int32)
 	if kind != ORDER:
 		return jnp.where(current >= 0, current, sampled)
 	return jnp.where(current >= 0, current, jnp.where(legacy >= 0, legacy, sampled))

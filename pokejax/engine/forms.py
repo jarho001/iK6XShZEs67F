@@ -13,8 +13,6 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from pokejax.mechanics.stats import derive_stored_stats
-
 from .abilities import (
 	FLOWER_GIFT_NUM,
 	FORECAST_NUM,
@@ -98,8 +96,8 @@ def sync_weather_formes(state, tables, rows):
 def relic_song_forme(state, enabled, tables):
 	"""Relic Song (onAfterMoveSecondarySelf): a Meloetta toggles between its two formes.
 
-	Pirouette's Atk..Spe are derived for the active member; the base Meloetta stats are the
-	saved row, taken when the change first leaves the base forme.
+	Pirouette's Atk..Spe are precomputed at reset from the member's immutable inputs; the base
+	Meloetta stats are the saved row, taken when the change first leaves the base forme.
 	"""
 	active = state.active
 	base = tables.species_num[state.species_base[SIDES, active].astype(jnp.int32)]
@@ -114,20 +112,7 @@ def relic_song_forme(state, enabled, tables):
 	)
 	state = state._replace(saved_stats=saved.astype(state.saved_stats.dtype))
 	state = set_species(state, meloetta, target, tables)
-	ivs = state.ivs[SIDES, active].astype(jnp.int32)
-	evs = state.evs[SIDES, active].astype(jnp.int32)
-	nature = tables.nature_multipliers[state.nature[SIDES, active].astype(jnp.int32)].astype(
-		jnp.int32
-	)
-	level = state.level[SIDES, active].astype(jnp.int32)
-	derived = derive_stored_stats(
-		tables.species_base_stats[pirouette].astype(jnp.int32)[None, :],
-		level,
-		ivs,
-		evs,
-		nature,
-		False,
-	)[..., 1:]
+	derived = state.pirouette_stats[SIDES, active]
 	stats = jnp.where(to_pirouette[:, None], derived, state.saved_stats)
 	return write_stats(state, member_mask(state, meloetta), stats)
 
@@ -135,18 +120,19 @@ def relic_song_forme(state, enabled, tables):
 def restore_form(state, leaving, tables):
 	"""clearVolatile for a member that leaves the field: base species, and own stats and moves
 	when a Transform or a Meloetta forme change had replaced them (Castform and Cherrim keep
-	their stats across formes)."""
+	their stats across formes).
+
+	Every write is team-wide under a mask of the leaving member: no gather keys on the active
+	slot, so the restore costs no dependent kernel.
+	"""
 	mask = member_mask(state, leaving)
-	was = leaving & (state.volatiles[:, TRANSFORMED] > 0)
-	active = state.active
-	base_num = tables.species_num[state.species_base[SIDES, active].astype(jnp.int32)]
+	transformed = state.volatiles[:, TRANSFORMED] > 0
+	was = mask & transformed[:, None]
+	base_is_meloetta = tables.species_num[state.species_base.astype(jnp.int32)] == MELOETTA_NUM
 	meloetta_changed = (
-		(state.species[SIDES, active] != state.species_base[SIDES, active])
-		& (base_num == MELOETTA_NUM)
-		& (state.volatiles[:, TRANSFORMED] == 0)
+		(state.species != state.species_base) & base_is_meloetta & ~transformed[:, None]
 	)
-	restore_stats = leaving & (was | meloetta_changed)
-	moved = member_mask(state, was)[..., None]
+	moved = was[..., None]
 	state = state._replace(
 		species=jnp.where(mask, state.species_base, state.species),
 		types=jnp.where(mask[..., None], state.base_types, state.types),
@@ -155,7 +141,7 @@ def restore_form(state, leaving, tables):
 		max_pp=jnp.where(moved, state.saved_max_pp[:, None, :], state.max_pp),
 		revealed_moves=jnp.where(moved, state.saved_revealed[:, None, :], state.revealed_moves),
 	)
-	return write_stats(state, member_mask(state, restore_stats), state.saved_stats)
+	return write_stats(state, mask & (was | meloetta_changed), state.saved_stats)
 
 
 class FoeView(NamedTuple):

@@ -18,7 +18,6 @@ from pokejax.bench import DEFAULT_POOL, _new_states
 from pokejax.engine.actions import legal_actions
 from pokejax.engine.data import build_engine_tables
 from pokejax.engine.observation import observe
-from pokejax.engine.randomness import UNFORCED
 from pokejax.engine.reset import Teams, check_teams
 from pokejax.engine.state import ONGOING
 from pokejax.engine.step import step
@@ -166,7 +165,7 @@ class Trainer:
 			env.state,
 			actions,
 			jax.random.split(step_key, action.shape[0]),
-			UNFORCED,
+			None,
 			self.tables,
 		)
 		done = state.winner != ONGOING

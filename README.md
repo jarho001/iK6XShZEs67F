@@ -88,13 +88,14 @@ environment steps.
 
 Gates, measured 2026-11-20 on an idle NVIDIA GeForce RTX 3060 Ti, JAX 0.12.0.1, with the
 Phase 2 exit code (`python -m pokejax.bench --json`, batch 4,096, engine only, median of three
-fresh processes): 3,323,719 steps/s (runs 3,323,012 to 3,327,847), 46,912 battles/s, mean
-battle length 70.99 steps, cold first call 33.34 s (33.18 to 33.52 s). Cold compile under 60 s:
-pass. Engine throughput against the 5,000,000 steps/s target: **fail**. Throughput fell
-from 7.62M after performance pass 4 to 3.32M as tasks 11 to 14 added the remaining mechanics.
-Performance pass 5 recovered 4%, and a structural attempt (pass 6, a working copy of the
-active Pokemon) did not help and was not committed. The CPU cold compile at batch 64 is
-about 146 s.
+fresh processes, after performance pass 7): 3,419,031 steps/s (runs 3,404,191 to 3,425,404),
+48,183 battles/s, mean battle length 70.99 steps, cold first call 29.05 s (29.01 to 29.20 s).
+Cold compile under 60 s: pass. Engine throughput against the 5,000,000 steps/s target:
+**fail**. Throughput fell from 7.62M after performance pass 4 to 3.32M as tasks 11 to 14 added
+the remaining mechanics. Performance pass 5 recovered 4%; a structural attempt (pass 6, a
+working copy of the active Pokemon) did not help and was not committed; pass 7 (move identity
+before row loads, prepared team inputs, shared damage facts) gained 3% and cut compile time.
+The CPU cold compile at batch 64 is about 125 s.
 
 Coverage (`COVERAGE.md`, generated): all 223 moves, 126 abilities and 44 items in the
 10,000-team pool are supported, so 100.0% of teams are fully supported. The excluded set is

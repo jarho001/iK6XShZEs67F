@@ -24,7 +24,6 @@ import numpy as np
 from pokejax.engine.actions import legal_actions, move_availability
 from pokejax.engine.data import build_engine_tables
 from pokejax.engine.items import showdown_item_consumed
-from pokejax.engine.randomness import UNFORCED
 from pokejax.engine.reset import check_teams, reset, teams_from_pool
 from pokejax.engine.state import (
 	BURN,
@@ -190,7 +189,7 @@ def _rollout_batch(teams, policy_keys, engine_tables):
 		)
 		switches_trace = switches_trace.at[decision].set(is_switch)
 		new_state = jax.vmap(step, in_axes=(0, 0, 0, None, None))(
-			state, actions, step_keys, UNFORCED, engine_tables
+			state, actions, step_keys, None, engine_tables
 		)
 		statuses = jnp.where(new_state.hp > 0, new_state.status, 0).astype(jnp.int8)
 		fainted = new_state.hp == 0

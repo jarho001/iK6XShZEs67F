@@ -191,6 +191,9 @@ class BattleState(NamedTuple):
 	saved_pp: jax.Array  # uint8 [2, 4]
 	saved_max_pp: jax.Array  # uint8 [2, 4]
 	saved_revealed: jax.Array  # uint8 [2, 4]
+	# Atk..Spe a Meloetta member takes in Pirouette forme, derived at reset from its immutable
+	# level, IVs, EVs and nature (other members hold unused values).
+	pirouette_stats: jax.Array  # int16 [2, 6, 5]
 	shown_species: jax.Array  # int16 [2, 6]
 	# Showdown's side.pokemon order (array index to team slot). Index 0 is the active member;
 	# a switch-in swaps the entering and leaving positions. Illusion's disguise reads it.

@@ -55,7 +55,7 @@ from .items import (
 	update_active_items,
 	update_item_state,
 )
-from .move_data import read_move
+from .move_data import move_column, read_move
 from .order import action_order
 from .randomness import BOUNCE_HIT, random_bits
 from .residual import residual
@@ -155,7 +155,7 @@ def _move(
 	state,
 	side,
 	action,
-	row,
+	queued,
 	enabled,
 	first,
 	opponent_pending,
@@ -170,7 +170,8 @@ def _move(
 	item_rows = gather_active_items(state, tables)
 	rows = move_abilities(ability_rows, side)
 	weather = effective_weather(state, rows)
-	sheer = has_hook(rows[side], SHEER_FORCE) & row.move_sheer_force
+	# Sheer Force reads the queued move, before any Encore override (as before this pass).
+	sheer = has_hook(rows[side], SHEER_FORCE) & move_column(tables, queued, "move_sheer_force")
 	enabled &= (state.hp[side, user] > 0) & alive_before[foe] & (state.winner == ONGOING)
 	started = enabled
 	charging = state.volatiles[side, TWO_TURN_MOVE] > 0
@@ -185,9 +186,10 @@ def _move(
 		jnp.where(started, 1, state.volatiles[side, FAKE_OUT_USED]),
 	)
 	# Encore's OverrideAction swaps a chosen non-Struggle move before BeforeMove.
-	encore_on, encored, encore_slot = encore_override(state, side, row.id, tables)
+	# The effective move ID is resolved before its wide row is loaded (one gather per use).
+	encore_on, encored, encore_slot = encore_override(state, side, queued, tables)
 	encore_on &= ~continuation & ~recharge
-	row = select_row(encore_on, read_move(tables, encored), row)
+	row = read_move(tables, jnp.where(encore_on, encored, queued))
 	action = jnp.where(encore_on, encore_slot, action)
 	state, enabled = before_move(
 		state, side, row, enabled, key, forced, tables, ability_rows, recharge=recharge
@@ -220,15 +222,15 @@ def _move(
 	can_call, call_slot = choose_called_slot(state, side, tables, key, forced)
 	sleep_call &= can_call
 	called_id = state.moves[side, user, call_slot].astype(jnp.int32)
-	called_row = read_move(tables, called_id)
 	pp_cost = pp_cost_for(row, pressure, pressure_target_alive, user_types, tables)
-	called_extra = pp_cost_for(called_row, pressure, pressure_target_alive, user_types, tables) - 1
-	pp_cost += sleep_call.astype(jnp.int32) * called_extra
-	# A called move's Pressure surcharge is charged to the caller's slot (useMove sourceEffect).
+	# Sleep Talk's called move and Nature Power's static call are disjoint (the move table
+	# has no move with both flags), so one resolved ID and one wide row serve both calls.
 	natured = row.move_call > 0
-	nature_row = read_move(tables, row.move_call.astype(jnp.int32))
-	nature_extra = pp_cost_for(nature_row, pressure, pressure_target_alive, user_types, tables) - 1
-	pp_cost += natured.astype(jnp.int32) * nature_extra
+	calling = sleep_call | natured
+	call_row = read_move(tables, jnp.where(sleep_call, called_id, row.move_call.astype(jnp.int32)))
+	# A called move's Pressure surcharge is charged to the caller's slot (useMove sourceEffect).
+	call_extra = pp_cost_for(call_row, pressure, pressure_target_alive, user_types, tables) - 1
+	pp_cost += calling.astype(jnp.int32) * call_extra
 	new_pp = jnp.maximum(pp - consume_pp.astype(jnp.int32) * pp_cost, 0).astype(state.pp.dtype)
 	revealed = state.revealed_moves[side, user, slot] | (enabled & ~recharge & ~struggle)
 	selected_move = slot_mask(state, side, user, slot)
@@ -242,8 +244,7 @@ def _move(
 	# Showdown's moveUsed runs before the hit, so an Encore reflected back at this user reads it.
 	state = write_last_move(state, side, user, last_id, last_moved)
 	# Nature Power is a static call: the user uses Earthquake, and Nature Power keeps its PP.
-	row = select_row(sleep_call, called_row, row)
-	row = select_row(natured, read_move(tables, row.move_call.astype(jnp.int32)), row)
+	row = select_row(calling, call_row, row)
 	struggle = row.id == tables.struggle_id
 	will_act = (side == first) & opponent_pending
 	state, stalled = try_stalling_move(state, side, row, enabled, will_act, key, forced, tables)
@@ -316,9 +317,7 @@ def _move(
 	# A reflected move (Magic Bounce) is used by the holder against the original user: its own
 	# accuracy check decides it, and the effects below act for the holder (acting) through the
 	# same effect calls, so each effect kind is compiled once.
-	bounce_hit = accuracy_hit(
-		state, foe, row.id, key, forced, tables, rows, weather, kind=BOUNCE_HIT
-	)
+	bounce_hit = accuracy_hit(state, foe, row, key, forced, tables, rows, weather, kind=BOUNCE_HIT)
 	bounced = reflect & bounce_hit & (state.hp[side, user] > 0)
 	acting = jnp.where(reflect, foe, side)
 	effect_on = attack_allowed | reflect
@@ -539,7 +538,7 @@ def update_forms(state, tables):
 	return sync_weather_formes(state, tables, active_abilities(state, tables))
 
 
-def _resolve_action_winner(state, alive_before, alive, side, row, last_first=False):
+def _resolve_action_winner(state, alive_before, alive, side, self_faint, last_first=False):
 	"""Resolve a move's faint result before the next queued Showdown action.
 
 	With both sides out, checkWin names the side of the last faint processed. The queue
@@ -549,9 +548,7 @@ def _resolve_action_winner(state, alive_before, alive, side, row, last_first=Fal
 	"""
 	del alive_before
 	winner = jnp.where(~alive[0], 1, 0)
-	double_ko_winner = jnp.where(
-		last_first | (row.move_self_faint == SELF_FAINT_ALWAYS), 1 - side, side
-	)
+	double_ko_winner = jnp.where(last_first | (self_faint == SELF_FAINT_ALWAYS), 1 - side, side)
 	winner = jnp.where(~jnp.any(alive), double_ko_winner, winner)
 	winner = jnp.where(jnp.all(alive), ONGOING, winner).astype(state.winner.dtype)
 	return state._replace(winner=jnp.where(state.winner == ONGOING, winner, state.winner))
@@ -630,13 +627,13 @@ def step(state, actions, key, forced, engine_tables):
 		enabled = run_moves & state.turn_pending[side]
 		enabled &= ~jnp.any(pivot_sides) | pursuit_behind_pivot
 		enabled &= state.winner == ONGOING
-		row = read_move(t, state.turn_moves[side])
+		queued = state.turn_moves[side].astype(jnp.int32)
 		leaving = switching | pivot_sides
 		state, pivot, dragged, abilities, alive, last_first = _move(
 			state,
 			side,
 			state.turn_actions[side],
-			row,
+			queued,
 			enabled,
 			queue_first,
 			state.turn_pending[foe],
@@ -650,7 +647,9 @@ def step(state, actions, key, forced, engine_tables):
 		pivot_sides = pivot_sides | ((SIDES == side) & pivot & (state.winner == ONGOING))
 		pending = state.turn_pending & ~((SIDES == side) & enabled) & ~dragged
 		state = state._replace(turn_pending=pending)
-		state = _resolve_action_winner(state, alive_before, alive, side, row, last_first)
+		state = _resolve_action_winner(
+			state, alive_before, alive, side, move_column(t, queued, "move_self_faint"), last_first
+		)
 		return state, abilities, pivot_sides, alive
 
 	def cancel_pursued_switches(state, switching):

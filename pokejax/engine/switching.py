@@ -37,7 +37,7 @@ from .forms import foe_view, restore_form, reveal_ability_ids, transform_copy
 from .illusion import enter_illusion
 from .items import reveal_active_items, update_item_state
 from .order import action_speed
-from .randomness import DRAG_IN, SWITCH_HANDLER_ORDER, UNFORCED, first_side, integer
+from .randomness import DRAG_IN, SWITCH_HANDLER_ORDER, first_side, forced_at, integer
 from .state import (
 	DEF,
 	HEALTHY,
@@ -82,33 +82,31 @@ def copy_on_entry(state, switching, copy_mask, tables, view):
 	return trace_enter(state, switching, tables, view), changed
 
 
-def switch_members(state, switch_mask, targets, tables=None, rows=None):
+def switch_members(state, switch_mask, targets, tables, rows=None):
 	"""Replace selected active members, clearing active-only state densely."""
 	outgoing = state.active
-	if tables is not None:
-		# clearVolatile: the outgoing member's base species, stats and own moves come back.
-		state = restore_form(state, switch_mask, tables)
-	if rows is None and tables is not None:
+	# clearVolatile: the outgoing member's base species, types, stats and own moves come back.
+	state = restore_form(state, switch_mask, tables)
+	if rows is None:
 		rows = active_abilities(state, tables)
-	if rows is not None:
-		old_hp = state.hp[SIDES, outgoing].astype(jnp.int32)
-		maximum = state.stats[SIDES, outgoing, HP].astype(jnp.int32)
-		old_status = state.status[SIDES, outgoing]
-		regenerator = (rows[:, SWITCH_OUT] == SWITCH_OUT_REGENERATOR) & (old_hp > 0)
-		natural_cure = (rows[:, SWITCH_OUT] == SWITCH_OUT_NATURAL_CURE) & (old_hp > 0)
-		healed = jnp.minimum(maximum, old_hp + jnp.maximum(maximum // 3, 1))
-		old_slots = jnp.arange(TEAM_SLOTS)[None, :] == outgoing[:, None]
-		heal_write = old_slots & switch_mask[:, None] & regenerator[:, None]
-		cure_write = old_slots & switch_mask[:, None] & natural_cure[:, None]
-		state = state._replace(
-			hp=jnp.where(heal_write, healed[:, None].astype(state.hp.dtype), state.hp),
-			status=jnp.where(cure_write, HEALTHY, state.status),
-			status_counter=jnp.where(cure_write, 0, state.status_counter),
-		)
-		# Regenerator's Gen 5 HP change has no protocol ability tag. Natural
-		# Cure does, through its explicit curestatus message.
-		revealed = natural_cure & (old_status != HEALTHY)
-		state = reveal_abilities(state, switch_mask & revealed)
+	old_hp = state.hp[SIDES, outgoing].astype(jnp.int32)
+	maximum = state.stats[SIDES, outgoing, HP].astype(jnp.int32)
+	old_status = state.status[SIDES, outgoing]
+	regenerator = (rows[:, SWITCH_OUT] == SWITCH_OUT_REGENERATOR) & (old_hp > 0)
+	natural_cure = (rows[:, SWITCH_OUT] == SWITCH_OUT_NATURAL_CURE) & (old_hp > 0)
+	healed = jnp.minimum(maximum, old_hp + jnp.maximum(maximum // 3, 1))
+	old_slots = jnp.arange(TEAM_SLOTS)[None, :] == outgoing[:, None]
+	heal_write = old_slots & switch_mask[:, None] & regenerator[:, None]
+	cure_write = old_slots & switch_mask[:, None] & natural_cure[:, None]
+	state = state._replace(
+		hp=jnp.where(heal_write, healed[:, None].astype(state.hp.dtype), state.hp),
+		status=jnp.where(cure_write, HEALTHY, state.status),
+		status_counter=jnp.where(cure_write, 0, state.status_counter),
+	)
+	# Regenerator's Gen 5 HP change has no protocol ability tag. Natural
+	# Cure does, through its explicit curestatus message.
+	revealed = natural_cure & (old_status != HEALTHY)
+	state = reveal_abilities(state, switch_mask & revealed)
 	active = jnp.where(switch_mask, targets, outgoing).astype(state.active.dtype)
 	state = state._replace(party=swap_party(state.party, switch_mask, targets, outgoing))
 	boosts = jnp.where(switch_mask[:, None], 0, state.boosts)
@@ -116,14 +114,13 @@ def switch_members(state, switch_mask, targets, tables=None, rows=None):
 	side_condition = (columns == QUICK_GUARD) | (columns == WIDE_GUARD)
 	clear_volatile = switch_mask[:, None] & ~side_condition[None, :]
 	volatiles = jnp.where(clear_volatile, 0, state.volatiles)
-	if tables is not None:
-		incoming_rows = tables.ability_hooks[state.ability[SIDES, targets].astype(jnp.int32)]
-		starts_slow = incoming_rows[:, RESIDUAL] == RESIDUAL_SLOW_START
-		volatiles = jnp.where(
-			switch_mask[:, None] & (columns[None, :] == SLOW_START),
-			jnp.where(starts_slow, 5, 0)[:, None],
-			volatiles,
-		)
+	incoming_rows = tables.ability_hooks[state.ability[SIDES, targets].astype(jnp.int32)]
+	starts_slow = incoming_rows[:, RESIDUAL] == RESIDUAL_SLOW_START
+	volatiles = jnp.where(
+		switch_mask[:, None] & (columns[None, :] == SLOW_START),
+		jnp.where(starts_slow, 5, 0)[:, None],
+		volatiles,
+	)
 
 	slots = jnp.arange(TEAM_SLOTS)
 	outgoing_mask = slots[None, :] == outgoing[:, None]
@@ -131,10 +128,6 @@ def switch_members(state, switch_mask, targets, tables=None, rows=None):
 	clear_fainted = switch_mask & (outgoing != targets) & (state.hp[SIDES, outgoing] == 0)
 	status_team = jnp.where(outgoing_mask & clear_fainted[:, None], 0, state.status)
 	status_counter_team = jnp.where(outgoing_mask & clear_fainted[:, None], 0, state.status_counter)
-	restore_roost = switch_mask
-	types = jnp.where(
-		(restore_roost[:, None] & outgoing_mask)[:, :, None], state.base_types, state.types
-	)
 	target_seen = state.seen_order[SIDES, targets]
 	next_seen = jnp.max(state.seen_order, axis=1) + 1
 	seen_order = jnp.where(
@@ -157,19 +150,16 @@ def switch_members(state, switch_mask, targets, tables=None, rows=None):
 		active_turns=active_turns,
 		boosts=boosts,
 		volatiles=volatiles,
-		types=types,
 		status=status_team,
 		status_counter=status_counter_team,
 		seen_order=seen_order,
 		last_move=last_move.astype(state.last_move.dtype),
 	)
 	state = healing_wish_switch_in(state, switch_mask, targets)
-	if tables is not None:
-		state = enter_illusion(state, switch_mask, tables)
-	return state
+	return enter_illusion(state, switch_mask, tables)
 
 
-def switch_actions(state, actions, switch_mask, tables=None, rows=None):
+def switch_actions(state, actions, switch_mask, tables, rows=None):
 	"""Translate action IDs 4..8 to fixed team slots and switch both sides."""
 	choices = jnp.clip(actions - 4, 0, 4)
 	targets = choices + (choices >= state.active)
@@ -192,11 +182,11 @@ def drag_in(
 	slots = jnp.arange(TEAM_SLOTS)
 	eligible = (state.hp[side] > 0) & (slots != state.active[side])
 	count = jnp.sum(eligible.astype(jnp.int32))
-	rank = integer(key, UNFORCED, DRAG_IN, side, 0, jnp.maximum(count, 1))
+	rank = integer(key, None, DRAG_IN, side, 0, jnp.maximum(count, 1))
 	cumulative = jnp.cumsum(eligible.astype(jnp.int32))
 	selected = eligible & (cumulative == rank + 1)
 	sampled = jnp.sum(jnp.where(selected, slots, 0))
-	forced_slot = forced[DRAG_IN, side, 0].astype(jnp.int32)
+	forced_slot = forced_at(forced, DRAG_IN, side, 0).astype(jnp.int32)
 	target = jnp.where(forced_slot >= 0, forced_slot, sampled)
 	forced_valid = (forced_slot < 0) | eligible[jnp.clip(forced_slot, 0, TEAM_SLOTS - 1)]
 	active = enabled & (count > 0) & forced_valid

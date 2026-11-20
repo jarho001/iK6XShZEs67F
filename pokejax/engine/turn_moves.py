@@ -10,6 +10,7 @@ from .randomness import (
 	STALL_SUCCESS,
 	TRAP_DURATION,
 	address_bits,
+	forced_at,
 	integer,
 )
 from .state import (
@@ -76,7 +77,7 @@ def try_stalling_move(state, side, move, enabled, will_act, key, forced, tables)
 	mask = jnp.maximum(counter - 1, 0).astype(jnp.uint32)
 	bits = address_bits(key, STALL_SUCCESS, side, 0)
 	sample = jnp.where(counter >= 256, bits == 0, (bits & mask) == 0)
-	forced_value = forced[STALL_SUCCESS, side, 0]
+	forced_value = forced_at(forced, STALL_SUCCESS, side, 0)
 	passed = jnp.where(forced_value >= 0, forced_value != 0, sample)
 	succeeded = enabled & will_act & (kind > 0) & ((counter == 0) | passed)
 	failed = enabled & will_act & (kind > 0) & ~succeeded

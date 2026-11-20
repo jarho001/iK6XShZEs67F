@@ -15,7 +15,6 @@ from .data import EngineTables
 from .forms import foe_view
 from .illusion import enter_illusion
 from .items import gather_active_items, update_active_items
-from .randomness import UNFORCED
 from .state import (
 	FIRST_TURN,
 	MOVE,
@@ -96,9 +95,17 @@ def check_teams(teams: Teams, tables: Tables):
 		raise ValueError("Each member needs 1..4 moves with empty slots at the end")
 
 
-def reset(key, teams: Teams, engine_tables: EngineTables, forced=UNFORCED) -> BattleState:
-	"""Derive compact member data and resolve the lead switch-ins."""
-	t = engine_tables
+class PreparedTeams(NamedTuple):
+	"""Member inputs that depend only on one team, prepared once per team (prepare_teams)."""
+
+	stats: jax.Array  # int16 [..., 2, 6, 6]: stored HP, Atk, Def, SpA, SpD, Spe
+	max_pp: jax.Array  # [..., 2, 6, 4]
+	types: jax.Array  # [..., 2, 6, 2]: initial types; a Multitype holder has its species' types
+	pirouette_stats: jax.Array  # int16 [..., 2, 6, 5]: Atk..Spe in Meloetta's Pirouette forme
+
+
+def prepare_teams(teams: Teams, t: EngineTables) -> PreparedTeams:
+	"""Derive stats, max PP, initial types and Pirouette stats; batched over leading axes."""
 	stats = derive_stored_stats(
 		t.species_base_stats[teams.species].astype(jnp.int32),
 		teams.level.astype(jnp.int32),
@@ -108,11 +115,37 @@ def reset(key, teams: Teams, engine_tables: EngineTables, forced=UNFORCED) -> Ba
 		t.species_shedinja[teams.species],
 	).astype(jnp.int16)
 	max_pp = t.move_max_pp[teams.moves]
-	initial_types = jnp.where(
+	pirouette_stats = derive_stored_stats(
+		jnp.broadcast_to(
+			t.species_base_stats[t.meloetta_forms[1]].astype(jnp.int32),
+			(*stats.shape[:-1], NUM_STATS),
+		),
+		teams.level.astype(jnp.int32),
+		teams.ivs.astype(jnp.int32),
+		teams.evs.astype(jnp.int32),
+		t.nature_multipliers[teams.nature].astype(jnp.int32),
+		False,
+	)[..., 1:].astype(jnp.int16)
+	types = jnp.where(
 		(teams.ability == t.multitype_id)[..., None],
 		t.species_types[teams.species],
 		t.species_plain_types[teams.species],
 	)
+	return PreparedTeams(stats, max_pp, types, pirouette_stats)
+
+
+def reset(
+	key, teams: Teams, engine_tables: EngineTables, forced=None, prepared=None
+) -> BattleState:
+	"""Derive compact member data and resolve the lead switch-ins.
+
+	prepared (from prepare_teams) replaces the per-team derivation; the state is identical.
+	"""
+	t = engine_tables
+	if prepared is None:
+		prepared = prepare_teams(teams, t)
+	stats, max_pp = prepared.stats, prepared.max_pp
+	initial_types, pirouette_stats = prepared.types, prepared.pirouette_stats
 	lead_rows = t.ability_hooks[teams.ability[:, 0].astype(jnp.int32)]
 	lead_slow_start = lead_rows[:, RESIDUAL] == RESIDUAL_SLOW_START
 	initial_volatiles = jnp.zeros((NUM_SIDES, NUM_VOLATILES), jnp.int16)
@@ -180,6 +213,7 @@ def reset(key, teams: Teams, engine_tables: EngineTables, forced=UNFORCED) -> Ba
 		saved_pp=jnp.zeros((NUM_SIDES, MOVE_SLOTS), jnp.uint8),
 		saved_max_pp=jnp.zeros((NUM_SIDES, MOVE_SLOTS), jnp.uint8),
 		saved_revealed=jnp.zeros((NUM_SIDES, MOVE_SLOTS), jnp.uint8),
+		pirouette_stats=pirouette_stats,
 		shown_species=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.int16),
 		party=jnp.broadcast_to(jnp.arange(TEAM_SLOTS, dtype=jnp.int8), (NUM_SIDES, TEAM_SLOTS)),
 	)

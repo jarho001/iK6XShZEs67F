@@ -40,6 +40,7 @@ from .abilities import (
 )
 from .actions import SIDES
 from .damage import accuracy_hit, damage_for_hits, move_damage_bases, type_matchup
+from .facts import active_facts
 from .field import effective_move_type
 from .items import CONTACT_ROCKY_HELMET, damage_survival
 from .move_data import read_move
@@ -224,6 +225,7 @@ def apply_damage_effects(
 ):
 	"""Resolve a fixed five-hit axis with one move-level damage calculation."""
 	row = read_move(tables, move)
+	facts = active_facts(state)
 	t = tables
 	foe = 1 - side
 	user, target = state.active[side], state.active[foe]
@@ -247,7 +249,7 @@ def apply_damage_effects(
 	)
 	count = jnp.where(has_hook(rows[side], SKILL_LINK), row.move_hit_max, count)
 	type_ = effective_move_type(state, side, row, t, weather)
-	immune, exponent, levitate = type_matchup(state, side, row.id, type_, t, rows)
+	immune, exponent, levitate = type_matchup(state, side, row.id, type_, t, rows, facts)
 	immune_for_move = immune & ((row.move_category != 2) | row.move_checks_immunity)
 	absorbed = absorption(
 		state,
@@ -285,10 +287,11 @@ def apply_damage_effects(
 		sheer,
 		analytic,
 		switching_foe=switching_foe,
+		facts=facts,
 	)
 	hit_indices = jnp.arange(MAX_HITS, dtype=jnp.int32)
 	damage, can_damage = damage_for_hits(
-		state, side, row, hit_indices, bases, key, forced, t, item_rows, rows, type_
+		state, side, row, hit_indices, bases, key, forced, t, item_rows, rows, type_, facts
 	)
 	move_success = enabled & ~blocked & checked_hit & can_damage
 	scheduled = (hit_indices < count) & move_success

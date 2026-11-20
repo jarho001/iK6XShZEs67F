@@ -35,6 +35,7 @@ from .abilities import (
 	has_hook,
 	skip_burn,
 )
+from .facts import active_facts
 from .field import WEATHER_ACCURACY_ALWAYS, effective_move_type
 from .items import (
 	BERRY_LUM,
@@ -54,7 +55,6 @@ from .state import (
 	EVASION,
 	FLASH_FIRE,
 	HEALTHY,
-	HP,
 	POISON,
 	SLOW_START,
 	SMACKDOWN,
@@ -125,10 +125,12 @@ def accuracy_hit(
 	)
 
 
-def type_matchup(state, side, move, type_, tables, rows):
+def type_matchup(state, side, move, type_, tables, rows, facts=None):
 	"""Apply type-chart immunities and groundedness before TryHit ability hooks."""
+	if facts is None:
+		facts = active_facts(state)
 	foe = 1 - side
-	target_types = state.types[foe, state.active[foe]]
+	target_types = facts.types[foe]
 	present = target_types >= 0
 	safe_types = jnp.maximum(target_types, 0)
 	ground = type_ == tables.ground_type
@@ -162,9 +164,12 @@ def move_damage_bases(
 	sheer=False,
 	analytic=False,
 	switching_foe=False,
+	facts=None,
 ):
 	"""Compute the non-crit and crit pre-roll damage bases once per move."""
 	row = read_move(tables, move)
+	if facts is None:
+		facts = active_facts(state)
 	if rows is None:
 		rows = active_abilities(state, tables)
 	if weather is None:
@@ -172,13 +177,12 @@ def move_damage_bases(
 	if type_ is None:
 		type_ = effective_move_type(state, side, row, tables, weather)
 	if immune is None:
-		immune, exponent, _ = type_matchup(state, side, row.id, type_, tables, rows)
+		immune, exponent, _ = type_matchup(state, side, row.id, type_, tables, rows, facts)
 	t = tables
 	foe = 1 - side
-	user, target = state.active[side], state.active[foe]
 	struggle = row.id == t.struggle_id
 	item_type = jnp.where(struggle, -1, type_)
-	target_types = state.types[foe, target]
+	target_types = facts.types[foe]
 	present = target_types >= 0
 	safe_types = jnp.maximum(target_types, 0)
 	physical = row.move_category == 0
@@ -188,23 +192,22 @@ def move_damage_bases(
 	defense_index = jnp.where(defends_with_defense, 2, 4)
 	# Foul Play uses the target's Attack and stage; the user's modifiers still apply.
 	attacker = jnp.where(foul_play, foe, side)
-	attacker_slot = state.active[attacker]
 	atk_boost = state.boosts[attacker, attack_index - 1].astype(jnp.int32)
 	def_boost = state.boosts[foe, defense_index - 1].astype(jnp.int32)
 	atk_boost = jnp.where(has_hook(rows[foe], IGNORE_BOOSTS), 0, atk_boost)
 	def_boost = jnp.where(has_hook(rows[side], IGNORE_BOOSTS), 0, def_boost)
 	crit_atk_boost = jnp.where(atk_boost < 0, 0, atk_boost)
 	crit_def_boost = jnp.where(def_boost > 0, 0, def_boost)
-	attack = state.stats[attacker, attacker_slot, attack_index].astype(jnp.int32)
-	defense = state.stats[foe, target, defense_index].astype(jnp.int32)
+	attack = facts.stats[attacker, attack_index]
+	defense = facts.stats[foe, defense_index]
 	attack_stages = jnp.stack((atk_boost, crit_atk_boost))
 	defense_stages = jnp.stack((def_boost, crit_def_boost))
 	attack_effective = scale_stat_stage(attack, attack_stages)
 	defense_effective = scale_stat_stage(defense, defense_stages)
 	fire = type_ == t.fire_type
-	user_status = state.status[side, user]
-	user_hp = state.hp[side, user].astype(jnp.int32)
-	user_max = state.stats[side, user, HP].astype(jnp.int32)
+	user_status = facts.status[side]
+	user_hp = facts.hp[side]
+	user_max = facts.maximum[side]
 	low_hp_half = (2 * user_hp <= user_max) & (user_max > 0)
 	low_hp_third = (3 * user_hp <= user_max) & (user_max > 0)
 	flash_boost = fire & (state.volatiles[side, FLASH_FIRE] > 0)
@@ -240,7 +243,7 @@ def move_damage_bases(
 		),
 	)
 	marvel = defends_with_defense & (rows[foe, DEFENSE] == DEFENSE_MARVEL_SCALE)
-	statused = state.status[foe, target] != HEALTHY
+	statused = facts.status[foe] != HEALTHY
 	# In the supported move table Twineedle is the multi-hit move that can
 	# inflict a status during the sequence. Its first poison can change Def
 	# before hit two, unless the target's Lum Berry activates between hits.
@@ -253,7 +256,7 @@ def move_damage_bases(
 		defense_effective, foe, defense_index, item_rows, jnp.where(marvel & statused, 6144, 4096)
 	)
 	defense_later = apply_stat_modifier(defense_effective, foe, defense_index, item_rows, 6144)
-	level = state.level[side, user].astype(jnp.int32)
+	level = facts.level[side]
 	power = base_power(state, side, row, t, switching_foe, rows, item_rows, gem_trigger)
 	magnitude = integer(key, forced, MAGNITUDE, side, 0, 100)
 	magnitude_power = jnp.where(
@@ -320,7 +323,7 @@ def move_damage_bases(
 		level,
 		jnp.where(
 			damage_kind == HALF_CURRENT_DAMAGE,
-			jnp.maximum(1, state.hp[foe, target].astype(jnp.int32) // 2),
+			jnp.maximum(1, facts.hp[foe] // 2),
 			row.move_fixed_damage.astype(jnp.int32),
 		),
 	)
@@ -344,10 +347,12 @@ def move_damage_bases(
 
 
 def damage_for_hits(
-	state, side, move, hit_indices, bases, key, forced, tables, item_rows, rows, type_
+	state, side, move, hit_indices, bases, key, forced, tables, item_rows, rows, type_, facts=None
 ):
 	"""Apply each hit's crit and roll to the shared damage bases."""
 	row = read_move(tables, move)
+	if facts is None:
+		facts = active_facts(state)
 	(
 		base_normal,
 		base_crit,
@@ -368,9 +373,8 @@ def damage_for_hits(
 		5,
 	)
 	denominator = CRIT_DENOMINATORS[ratio]
-	user, target = state.active[side], state.active[1 - side]
-	stab = jnp.any(state.types[side, user] == type_)
-	burned = (state.status[side, user] == BURN) & ~skip_burn(rows[side])
+	stab = jnp.any(facts.types[side] == type_)
+	burned = (facts.status[side] == BURN) & ~skip_burn(rows[side])
 
 	crit_roll = chance(key, forced, CRIT, side, hit_indices, 1, denominator)
 	critical = row.move_crit_always | ((ratio > 0) & crit_roll)
@@ -404,11 +408,11 @@ def damage_for_hits(
 			4096,
 		),
 	).astype(jnp.int32)
-	full_hp = (hit_indices == 0) & (state.hp[1 - side, target] >= state.stats[1 - side, target, HP])
+	full_hp = (hit_indices == 0) & (facts.hp[1 - side] >= facts.maximum[1 - side])
 	damage = (
 		modify(damage, final_damage_modifier(rows, side, critical, exponent, full_hp, modifier))
 		& 65535
 	)
 	damage = jnp.where(damage_kind > 0, fixed, damage)
-	can_damage &= state.hp[1 - side, target] > 0
+	can_damage &= facts.hp[1 - side] > 0
 	return damage, can_damage

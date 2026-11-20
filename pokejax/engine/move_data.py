@@ -149,6 +149,11 @@ def build_move_table(**columns):
 	return MoveTable(jnp.asarray(rows), tuple(layout))
 
 
+def move_column(tables, move, name):
+	"""One column of one move, without loading the whole row."""
+	return tables.move_table.column(name)[move]
+
+
 def read_move(tables, move):
 	"""Load one move's parameters, then use static slices of the row."""
 	if isinstance(move, MoveRow):

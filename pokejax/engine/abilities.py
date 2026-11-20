@@ -397,7 +397,9 @@ def active_abilities(state, tables):
 	rows = tables.ability_hooks[state.ability[SIDES, state.active]]
 	base = tables.species_num[state.species_base[SIDES, state.active].astype(jnp.int32)]
 	form = rows[:, FORM]
-	return rows.at[:, FORM].set(jnp.where(form == base, form, 0))
+	# Only the FORM column changes: it is cleared when the base species is not the ability's.
+	form_column = jnp.arange(rows.shape[-1]) == FORM
+	return jnp.where(form_column & (form != base)[:, None], 0, rows)
 
 
 def has_hook(rows, flag):
