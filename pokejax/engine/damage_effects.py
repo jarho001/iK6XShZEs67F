@@ -22,6 +22,8 @@ from .abilities import (
 	CONTACT_ROUGH_SKIN,
 	CONTACT_STATIC,
 	CONTACT_WEAK_ARMOR,
+	ITEM_GUARD,
+	ITEM_GUARD_STICKY_HOLD,
 	MAGIC_GUARD,
 	MUMMY_IMMUNE,
 	OBLIVIOUS,
@@ -33,6 +35,7 @@ from .abilities import (
 	STATUS_SUN,
 	absorb_hit,
 	absorption,
+	absorption_no_effect,
 	apply_boost_delta,
 	effective_weather,
 	has_hook,
@@ -40,6 +43,7 @@ from .abilities import (
 )
 from .actions import SIDES
 from .damage import accuracy_hit, damage_for_hits, move_damage_bases, type_matchup
+from .events import EFFECT_IMMUNE, EFFECT_NEUTRAL, EFFECT_NONE, EFFECT_RESISTED, EFFECT_SUPER
 from .facts import active_facts
 from .field import effective_move_type
 from .items import CONTACT_ROCKY_HELMET, damage_survival
@@ -52,6 +56,7 @@ from .randomness import (
 	hit_count,
 	integer,
 )
+from .restrictions import VOLATILE_LEECH_SEED
 from .state import (
 	ATK,
 	BURN,
@@ -85,6 +90,17 @@ class HitResult(NamedTuple):
 	ability_reveals: jax.Array
 	sub_hit: jax.Array
 	instafaint_kill: jax.Array
+	# The move's visible outcome (events.py): -miss, -immune from this move's own type or ability
+	# immunity, a Protect-style block, the critical flag, the effectiveness class, and the hits.
+	missed: jax.Array
+	immune: jax.Array
+	guarded: jax.Array
+	critical: jax.Array
+	effect: jax.Array
+	hits: jax.Array
+	heal_full: jax.Array
+	sub_refused: jax.Array
+	reach: jax.Array
 
 
 def _round_fraction(value, numerator, denominator):
@@ -290,7 +306,7 @@ def apply_damage_effects(
 		facts=facts,
 	)
 	hit_indices = jnp.arange(MAX_HITS, dtype=jnp.int32)
-	damage, can_damage = damage_for_hits(
+	damage, can_damage, critical = damage_for_hits(
 		state, side, row, hit_indices, bases, key, forced, t, item_rows, rows, type_, facts
 	)
 	move_success = enabled & ~blocked & checked_hit & can_damage
@@ -421,13 +437,17 @@ def apply_damage_effects(
 	post_faint = enabled & (self_faint_kind == SELF_FAINT_ON_HIT) & connected
 	user_hp = jnp.where(post_faint, 0, user_hp)
 	user_hp = jnp.where(pre_faint, 0, user_hp)
+	# Read before absorb_hit changes the stage, the HP or Flash Fire.
+	absorbed_no_effect = absorption_no_effect(state, foe, rows[foe], absorbed) | (
+		oblivious & enabled
+	)
 	state, absorbed_hp = absorb_hit(state, foe, rows[foe], absorbed, target_hp_before)
 	active_hp = state.hp[SIDES, state.active].astype(jnp.int32)
 	active_hp = jnp.where(SIDES == foe, jnp.maximum(absorbed_hp - total_damage, 0), active_hp)
 	active_hp = jnp.where(SIDES == side, user_hp, active_hp)
 	# These move-table effects are mutually exclusive with primary move effects.
 	# Resolve them in this common HP write so every action scatters active HP once.
-	state, active_hp, _ = apply_healing_active(
+	state, active_hp, _, heal_full = apply_healing_active(
 		state, side, row, enabled & ~blocked, checked_hit, active_hp, t, weather
 	)
 	active_slots = jnp.arange(state.hp.shape[1])[None, :] == state.active[:, None]
@@ -493,6 +513,54 @@ def apply_damage_effects(
 	sub_left = (sub_hp - jnp.sum(sub_dealt)).astype(state.volatiles.dtype)
 	state = state._replace(volatiles=jnp.where(sub_mask, sub_left, state.volatiles))
 	state = record_damage_taken(state, side, row, hit_landed, dealt)
+	# Visible outcome. A TryHit block (Protect, an absorption) or a type immunity stops the move
+	# before its accuracy check, and an invulnerable target reports a miss before TryHit
+	# (Showdown trySpreadMoveHit steps 0-4). An absorbed hit prints -immune only if it had no effect.
+	reached = hit_landed | sub_hits
+	# Leech Seed is refused by a Grass-type target, and Trick or Switcheroo by a Sticky Hold
+	# target, before the accuracy check (TryImmunity), each with -immune.
+	grass_seed = (
+		enabled
+		& (row.move_volatile_status == VOLATILE_LEECH_SEED)
+		& jnp.any(state.types[foe, target] == t.grass_type)
+	)
+	sticky_swap = enabled & row.move_item_swap & (rows[foe, ITEM_GUARD] == ITEM_GUARD_STICKY_HOLD)
+	absorb_stop = absorbed | oblivious | grass_seed | sticky_swap
+	# A move aimed at a fainted target stops at [notarget] (-fail), before any immunity or miss.
+	target_alive = target_hp_before > 0
+	immune_line = (
+		enabled & target_alive & (immune_for_move | absorbed_no_effect | grass_seed | sticky_swap)
+	)
+	missed = (enabled & target_alive & invulnerable) | (
+		enabled & target_alive & ~guarded & ~absorb_stop & ~immune_for_move & ~checked_hit
+	)
+	damaging = row.move_category != 2
+	# Showdown prints the effectiveness of a hit on the target. Fixed-damage moves print none
+	# (neutral), and a hit that only breaks a substitute prints no effectiveness or damage line.
+	# Super and resisted lines print for a hit on a substitute too; neutral needs the damage line.
+	damaged = jnp.any(hit_landed)
+	fixed = row.move_damage_kind > 0
+	effect = jnp.where(
+		immune_line,
+		EFFECT_IMMUNE,
+		jnp.where(
+			fixed,
+			jnp.where(enabled & damaging & damaged, EFFECT_NEUTRAL, EFFECT_NONE),
+			jnp.where(
+				enabled & damaging & (exponent > 0) & jnp.any(reached),
+				EFFECT_SUPER,
+				jnp.where(
+					enabled & damaging & (exponent < 0) & jnp.any(reached),
+					EFFECT_RESISTED,
+					jnp.where(enabled & damaging & damaged, EFFECT_NEUTRAL, EFFECT_NONE),
+				),
+			),
+		),
+	).astype(jnp.int32)
+	# A status move into a substitute fails (TryPrimaryHit: its damage is 0, so -fail).
+	sub_refused = (
+		enabled & ~guarded & ~invulnerable & sub_target & (row.move_category == 2) & checked_hit
+	)
 	return state, HitResult(
 		success,
 		effect_hit,
@@ -503,4 +571,13 @@ def apply_damage_effects(
 		contact_reveals | ((SIDES == foe) & reveal_ability),
 		jnp.any(sub_hits),
 		instafaint_kill,
+		missed,
+		immune_line,
+		guarded & enabled,
+		jnp.any(critical & reached) & (row.move_damage_kind == 0),
+		effect,
+		jnp.where(row.move_hit_max > 1, jnp.sum(reached), 0).astype(jnp.int32),
+		heal_full,
+		sub_refused,
+		enabled & ~blocked & checked_hit,
 	)

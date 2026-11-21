@@ -49,7 +49,10 @@ def foe_move_usable(state, foe, move):
 
 
 def apply_restrictions(state, side, row, hit, foe_pending, tables, rows, weather):
-	"""Encore, Taunt, Disable, Yawn and Leech Seed on the foe, from this move's hit."""
+	"""Encore, Taunt, Disable, Yawn and Leech Seed on the foe, from this move's hit.
+
+	Returns (state, failed): failed is a hit whose volatile was refused (Showdown's -fail).
+	"""
 	foe = 1 - side
 	target = state.active[foe]
 	foe_sides = SIDES == foe
@@ -98,7 +101,14 @@ def apply_restrictions(state, side, row, hit, foe_pending, tables, rows, weather
 	grass = jnp.any(state.types[foe, target] == tables.grass_type)
 	seed = hit & (status == VOLATILE_LEECH_SEED) & (volatiles[foe, LEECH_SEED] == 0) & ~grass
 	volatiles = _write(volatiles, foe_sides, seed, LEECH_SEED, 1)
-	return state._replace(volatiles=volatiles)
+	failed = (
+		(hit & (status == VOLATILE_ENCORE) & ~encore)
+		| (hit & (status == VOLATILE_TAUNT) & ~taunt)
+		| (hit & (status == VOLATILE_DISABLE) & ~disable)
+		| (hit & (status == VOLATILE_YAWN) & ~yawn)
+		| (hit & (status == VOLATILE_LEECH_SEED) & ~seed)
+	)
+	return state._replace(volatiles=volatiles), failed
 
 
 def encore_override(state, side, move_id, tables):

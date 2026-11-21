@@ -48,6 +48,25 @@ class Config:
 	log_every: int = 10
 
 
+# Observation fields that the policy embeds; every other field is read as a float by name.
+EMBEDDED_FIELDS = ("species", "moves", "types")
+# Top-level fields that are per-side or scalar and read as floats (events.py perspective order).
+TOP_FIELDS = (
+	"weather",
+	"weather_age",
+	"hazards",
+	"trick_room",
+	"trick_room_age",
+	"wish",
+	"wish_age",
+	"healing_wish",
+)
+
+
+def flat_features(x, batch):
+	return x.astype(jnp.float32).reshape(batch, -1)
+
+
 class Policy(nn.Module):
 	config: Config
 	species_count: int
@@ -57,6 +76,7 @@ class Policy(nn.Module):
 	@nn.compact
 	def __call__(self, obs, hidden):
 		c = self.config
+		batch = hidden.shape[0]
 		features = []
 		for name, count in (
 			("species", self.species_count),
@@ -65,10 +85,23 @@ class Policy(nn.Module):
 		):
 			embed = nn.Embed(count, c.embedding_size, name=name)
 			for side in (obs.own, obs.opponent):
-				features.append(embed(getattr(side, name)).reshape(hidden.shape[0], -1))
+				features.append(embed(getattr(side, name)).reshape(batch, -1))
 		for side in (obs.own, obs.opponent):
-			features.extend(x.reshape(hidden.shape[0], -1) for x in side[3:])
-		features.extend((obs.turn[:, None], obs.request, obs.legal_actions.astype(jnp.float32)))
+			for name, x in zip(side._fields, side):
+				if name not in EMBEDDED_FIELDS:
+					features.append(flat_features(x, batch))
+		for name, x in zip(obs.events._fields, obs.events):
+			features.append(flat_features(x, batch))
+		for name in TOP_FIELDS:
+			features.append(flat_features(getattr(obs, name), batch))
+		features.extend(
+			(
+				obs.turn[:, None],
+				obs.mid_turn[:, None],
+				obs.request,
+				obs.legal_actions.astype(jnp.float32),
+			)
+		)
 		x = nn.tanh(nn.Dense(c.hidden_size)(jnp.concatenate(features, axis=-1)))
 		x = nn.tanh(nn.Dense(c.hidden_size)(x))
 		hidden, x = nn.GRUCell(c.hidden_size)(hidden, x)

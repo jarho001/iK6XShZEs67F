@@ -16,13 +16,20 @@ from .state import HP, PARTIAL_TRAP_SOURCE, PARTIALLY_TRAPPED, SUBSTITUTE, TEAM_
 SELF_SUBSTITUTE = 3
 
 
+def substitute_allowed(state, side):
+	"""onTryHit: no standing substitute, the user above a quarter of its HP, and not Shedinja."""
+	user = state.active[side]
+	maximum = state.stats[side, user, HP].astype(jnp.int32)
+	hp = state.hp[side, user].astype(jnp.int32)
+	return (state.volatiles[side, SUBSTITUTE] == 0) & (4 * hp > maximum) & (maximum > 1)
+
+
 def apply_substitute(state, side, enabled):
 	"""The Substitute move for one side: HP cost, volatile HP and partial-trap removal."""
 	user = state.active[side]
 	maximum = state.stats[side, user, HP].astype(jnp.int32)
 	hp = state.hp[side, user].astype(jnp.int32)
-	allowed = enabled & (state.volatiles[side, SUBSTITUTE] == 0)
-	allowed &= (4 * hp > maximum) & (maximum > 1)
+	allowed = enabled & substitute_allowed(state, side)
 	sub_hp = maximum // 4
 	cost = jnp.maximum(sub_hp, 1)
 	sides = SIDES == side

@@ -21,6 +21,7 @@ from .abilities import (
 	suppresses_weather,
 )
 from .actions import SIDES
+from .events import EV_STATUS, write_event
 from .move_data import read_move
 from .randomness import WEATHER_CHANGE_ORDER, WEATHER_ORDER, first_side
 from .state import (
@@ -48,6 +49,7 @@ from .variable_moves import move_type_id
 WEATHER_ACCURACY_ALWAYS = -2
 WEATHER_ACCURACY_BASE = -1
 WEATHER_DURATION = 5
+MAX_AGE = 127  # int8 counters saturate here; no effect reads an age past a few turns.
 
 
 def effective_move_type(state, side, move, tables, weather=None):
@@ -57,7 +59,10 @@ def effective_move_type(state, side, move, tables, weather=None):
 
 
 def set_weather(state, weather, enabled, duration, ability=False):
-	"""An ability can replace existing finite weather of the same kind in Gen 5."""
+	"""An ability can replace existing finite weather of the same kind in Gen 5.
+
+	A new weather (or a replacing one) starts its public age at zero, as its -weather line does.
+	"""
 	change = enabled & (weather > 0)
 	change &= (weather != state.weather) | (ability & (state.weather_turns != 0))
 	return state._replace(
@@ -65,6 +70,7 @@ def set_weather(state, weather, enabled, duration, ability=False):
 		weather_turns=jnp.where(change, duration, state.weather_turns).astype(
 			state.weather_turns.dtype
 		),
+		weather_age=jnp.where(change, 0, state.weather_age).astype(state.weather_age.dtype),
 	), change
 
 
@@ -176,7 +182,7 @@ def apply_active_switch_hazards(
 	side_alive = bench_alive | (after > 0)
 	loser = jnp.where(ended[0], 0, 1)
 	winner = jnp.where(jnp.any(ended & side_alive[::-1]), 1 - loser, loser)
-	return state._replace(
+	state = state._replace(
 		hp=jnp.where(member_mask, after[:, None].astype(state.hp.dtype), state.hp),
 		hazards=jnp.where(clear, 0, state.hazards),
 		hazard_order=jnp.where(clear, 0, state.hazard_order),
@@ -184,6 +190,7 @@ def apply_active_switch_hazards(
 		status_counter=jnp.where(poison_slots, 0, state.status_counter),
 		winner=jnp.where(jnp.any(ended), winner, state.winner).astype(state.winner.dtype),
 	)
+	return write_event(state, poison, EV_STATUS, inflicted)
 
 
 def apply_switch_hazards(state, side, slot, enabled, tables):
@@ -205,6 +212,11 @@ def weather_residual(state, enabled, key, forced, tables, rows=None, speed=None)
 	expired = decrement & (turns == 1)
 	new_turns = jnp.where(decrement, jnp.maximum(turns - 1, 0), turns)
 	new_weather = jnp.where(expired, 0, weather)
+	# The public age counts the weather's upkeep lines: one per residual while it stands.
+	upkeep = enabled & (weather > 0) & ~expired
+	age = state.weather_age.astype(jnp.int32)
+	new_age = jnp.where(upkeep, jnp.minimum(age + 1, MAX_AGE), age)
+	new_age = jnp.where(new_weather == 0, 0, new_age)
 	# clearWeather emits WeatherChange when a finite weather expires.
 	_ = first_side(key, forced, WEATHER_CHANGE_ORDER)
 
@@ -275,5 +287,6 @@ def weather_residual(state, enabled, key, forced, tables, rows=None, speed=None)
 		hp=hp,
 		weather=new_weather.astype(state.weather.dtype),
 		weather_turns=new_turns.astype(state.weather_turns.dtype),
+		weather_age=new_age.astype(state.weather_age.dtype),
 		winner=jnp.where(ended, winner, state.winner).astype(state.winner.dtype),
 	)

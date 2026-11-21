@@ -349,7 +349,10 @@ def move_damage_bases(
 def damage_for_hits(
 	state, side, move, hit_indices, bases, key, forced, tables, item_rows, rows, type_, facts=None
 ):
-	"""Apply each hit's crit and roll to the shared damage bases."""
+	"""Apply each hit's crit and roll to the shared damage bases.
+
+	Returns (damage, can_damage, critical): critical is the per-hit crit flag (events.py).
+	"""
 	row = read_move(tables, move)
 	if facts is None:
 		facts = active_facts(state)
@@ -415,4 +418,4 @@ def damage_for_hits(
 	)
 	damage = jnp.where(damage_kind > 0, fixed, damage)
 	can_damage &= facts.hp[1 - side] > 0
-	return damage, can_damage
+	return damage, can_damage, critical

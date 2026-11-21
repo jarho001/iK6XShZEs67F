@@ -24,7 +24,7 @@ from .abilities import (
 	reveal_abilities,
 )
 from .actions import SIDES, move_availability
-from .boosts import apply_boosts
+from .boosts import BELLY_DRUM, apply_boosts
 from .damage import accuracy_hit
 from .damage_effects import SELF_FAINT_ALWAYS, apply_damage_effects, apply_poison_touch
 from .delayed import (
@@ -37,6 +37,22 @@ from .delayed import (
 	apply_trick_room,
 	apply_wish,
 	faint_active,
+)
+from .events import (
+	CANT_FOCUS_PUNCH,
+	CANT_NONE,
+	EFFECT_IMMUNE,
+	EFFECT_NONE,
+	OUTCOME_CRIT,
+	OUTCOME_FAILED,
+	OUTCOME_MISS,
+	clear_events,
+	entry_kinds,
+	finish_events,
+	first_cut,
+	record_step_bounds,
+	write_attempt,
+	write_entry,
 )
 from .field import apply_move_field_effects, effective_move_type
 from .forms import (
@@ -80,9 +96,11 @@ from .state import (
 	QUICK_GUARD,
 	ROOST,
 	SLEEP,
+	SPIKES,
 	SUN,
 	SWITCH,
 	TEAM_SLOTS,
+	TOXIC_SPIKES,
 	TRACE_SEEK,
 	TURN_IDLE,
 	TURN_MOVES,
@@ -92,7 +110,7 @@ from .state import (
 	WIDE_GUARD,
 )
 from .status import after_hit, apply_move, before_move
-from .substitute import SELF_SUBSTITUTE, apply_substitute
+from .substitute import SELF_SUBSTITUTE, apply_substitute, substitute_allowed
 from .switching import (
 	copy_on_entry,
 	drag_in,
@@ -191,11 +209,13 @@ def _move(
 	encore_on &= ~continuation & ~recharge
 	row = read_move(tables, jnp.where(encore_on, encored, queued))
 	action = jnp.where(encore_on, encore_slot, action)
-	state, enabled = before_move(
+	state, enabled, cant = before_move(
 		state, side, row, enabled, key, forced, tables, ability_rows, recharge=recharge
 	)
 	# Focus Punch's beforeMoveCallback fails before any PP is spent.
+	before = enabled
 	enabled &= ~((row.move_success_rule == SUCCESS_FOCUS_PUNCH) & state.focus_lost[side])
+	cant = first_cut(cant, before, enabled, CANT_FOCUS_PUNCH)
 	move_enabled = enabled
 	choice_start = move_enabled & item_rows.choice[side]
 	choice_start &= state.volatiles[side, CHOICE_MOVE] == 0
@@ -221,6 +241,8 @@ def _move(
 	sleep_call = row.move_sleep_talk & enabled & (state.status[side, user] == SLEEP)
 	can_call, call_slot = choose_called_slot(state, side, tables, key, forced)
 	sleep_call &= can_call
+	# Sleep Talk fails while its user is awake or has no move to call (onTry, onHit).
+	talk_fail = row.move_sleep_talk & enabled & ~sleep_call
 	called_id = state.moves[side, user, call_slot].astype(jnp.int32)
 	pp_cost = pp_cost_for(row, pressure, pressure_target_alive, user_types, tables)
 	# Sleep Talk's called move and Nature Power's static call are disjoint (the move table
@@ -245,9 +267,19 @@ def _move(
 	state = write_last_move(state, side, user, last_id, last_moved)
 	# Nature Power is a static call: the user uses Earthquake, and Nature Power keeps its PP.
 	row = select_row(calling, call_row, row)
+	# A move aimed at a fainted foe is retargeted to nothing: |move| with [notarget], then -fail.
+	# Curse used by a non-Ghost targets its user (Showdown onModifyMove), so it has no foe target.
+	curse_self = (row.move_volatile_status == 5) & ~jnp.any(
+		state.types[side, state.active[side]] == tables.ghost_type
+	)
+	target_gone = (
+		started & row.move_target_foe & ~curse_self & (state.hp[foe, state.active[foe]] == 0)
+	)
 	struggle = row.id == tables.struggle_id
 	will_act = (side == first) & opponent_pending
 	state, stalled = try_stalling_move(state, side, row, enabled, will_act, key, forced, tables)
+	# Protect fails when no action follows it in the queue, or its StallMove check fails (onPrepareHit).
+	stall_failed = enabled & (row.move_stall_kind > 0) & ~stalled
 	stall_kind = row.move_stall_kind
 	move_allowed = enabled & ((stall_kind == 0) | stalled)
 	fakeout_fails = row.move_fakeout & fakeout_used
@@ -256,7 +288,9 @@ def _move(
 	charge_start = move_allowed & row.move_charge & ~charging & ~solar_skip
 	charge_attack = ~row.move_charge | charging | solar_skip
 	attack_allowed = move_allowed & ~charge_start & charge_attack & ~recharge
-	attack_allowed &= success_allowed(state, side, row, tables, rows)
+	succeeds = success_allowed(state, side, row, tables, rows)
+	attack_allowed &= succeeds
+	success_fail = move_allowed & ~charge_start & charge_attack & ~recharge & ~succeeds
 	state = set_active_volatile(
 		state,
 		side,
@@ -274,6 +308,11 @@ def _move(
 			state.volatiles[side, TWO_TURN_MOVE],
 		),
 	)
+	sub_fail = (
+		attack_allowed
+		& (row.move_self_volatile == SELF_SUBSTITUTE)
+		& ~substitute_allowed(state, side)
+	)
 	state = apply_substitute(
 		state, side, attack_allowed & (row.move_self_volatile == SELF_SUBSTITUTE)
 	)
@@ -281,10 +320,14 @@ def _move(
 		state, side, attack_allowed & (row.move_self_volatile == SELF_DESTINY_BOND)
 	)
 	state = apply_trick_room(state, attack_allowed & row.move_trick_room)
+	wish_fail = (
+		attack_allowed & (row.move_slot_condition == SLOT_WISH) & (state.wish_turns[side] != 0)
+	)
 	state = apply_wish(state, side, attack_allowed & (row.move_slot_condition == SLOT_WISH))
 	state, healing_placed = apply_healing_wish(
 		state, side, attack_allowed & (row.move_slot_condition == SLOT_HEALING_WISH)
 	)
+	healing_fail = attack_allowed & (row.move_slot_condition == SLOT_HEALING_WISH) & ~healing_placed
 	breaks_guard = attack_allowed & row.move_breaks_protect
 	state = clear_broken_guards(state, side, breaks_guard)
 	guarded, invulnerable = target_move_guards(state, side, row, tables, rows)
@@ -322,12 +365,41 @@ def _move(
 	acting = jnp.where(reflect, foe, side)
 	effect_on = attack_allowed | reflect
 	effect_hit = jnp.where(reflect, bounced, hit)
-	state, status_reveals = apply_move(
-		state, acting, row, effect_on, effect_hit, key, forced, tables, rows, weather
+	state, status_reveals, status_immune, status_failed = apply_move(
+		state,
+		acting,
+		row,
+		effect_on,
+		effect_hit,
+		key,
+		forced,
+		tables,
+		rows,
+		weather,
+		reach=jnp.where(reflect, reflect & bounce_hit, result.reach),
 	)
 	state = reveal_abilities(state, result.ability_reveals | status_reveals)
-	state, _ = apply_item_swap(state, side, attack_allowed & row.move_item_swap & hit, tables, rows)
+	# Roar and Whirlwind fail when the foe has no living bench member to drag in (canSwitch).
+	no_bench = ~jnp.any((state.hp[foe] > 0) & (jnp.arange(TEAM_SLOTS) != state.active[foe]))
+	drag_fail = attack_allowed & row.move_force_switch & hit & no_bench & (row.move_category == 2)
+	state, swapped = apply_item_swap(
+		state, side, attack_allowed & row.move_item_swap & hit, tables, rows
+	)
+	trick_fail = attack_allowed & row.move_item_swap & hit & ~swapped
 	item_rows = gather_active_items(state, tables)
+	# Belly Drum fails at or below half HP, at +6 Attack, and for a 1-HP user (onHit).
+	drum_fail = (
+		attack_allowed
+		& (row.move_boost_effect == BELLY_DRUM)
+		& (
+			(
+				2 * state.hp[side, user].astype(jnp.int32)
+				<= state.stats[side, user, 0].astype(jnp.int32)
+			)
+			| (state.boosts[side, 0] >= 6)
+			| (state.stats[side, user, 0] <= 1)
+		)
+	)
 	state = apply_boosts(
 		state,
 		acting,
@@ -345,7 +417,7 @@ def _move(
 		key,
 		forced,
 	)
-	state, lum_between_hits = apply_secondaries(
+	state, lum_between_hits, sync_failed, sync_immune = apply_secondaries(
 		state,
 		side,
 		row,
@@ -389,6 +461,14 @@ def _move(
 	state = state._replace(types=types, roost_types=roost_types)
 	state = reveal_abilities(state, (SIDES == foe) & color_trigger)
 	state = after_hit(state, side, row, attack_allowed & result.success, tables, weather)
+	# A Spikes or Toxic Spikes move with the layers already at their cap, or a weather move that
+	# repeats the standing weather, fails (Field.setWeather -fail, the hazard's maximum).
+	field_hit = jnp.where(reflect, bounced, result.field_hit)
+	field_fail = (effect_on & field_hit) & (
+		((row.move_hazard == 1) & (state.hazards[1 - acting, SPIKES] >= 3))
+		| ((row.move_hazard == 2) & (state.hazards[1 - acting, TOXIC_SPIKES] >= 2))
+		| ((row.move_weather > 0) & (row.move_weather == state.weather))
+	)
 	state = apply_move_field_effects(
 		state,
 		acting,
@@ -413,7 +493,7 @@ def _move(
 		connected=attack_allowed & connected,
 	)
 	state = apply_autotomize(state, side, attack_allowed & row.move_autotomize, tables)
-	state = apply_restrictions(
+	state, restrict_failed = apply_restrictions(
 		state, acting, row, effect_hit, opponent_pending & ~reflect, tables, rows, weather
 	)
 	# Relic Song (onAfterMoveSecondarySelf): a Meloetta changes forme after a connecting hit.
@@ -510,6 +590,60 @@ def _move(
 	state = update_forms(state, tables)
 	hp = state.hp.astype(jnp.int32)
 	boosts = jnp.where((hp[SIDES, state.active] > 0)[:, None], state.boosts, 0)
+	# Event record (events.py): this side's move attempt. A reflected move is the holder's attempt.
+	user = (SIDES == side) & started
+	user_immune = status_immune & ~reflect
+	acting_fail = status_failed | restrict_failed | field_fail | status_immune
+	failed = (
+		sync_failed
+		| result.guarded
+		| result.immune
+		| target_gone
+		| trick_fail
+		| result.heal_full
+		| result.sub_refused
+		| drum_fail
+		| drag_fail
+		| stall_failed
+		| fakeout_fails
+		| success_fail
+		| talk_fail
+		| sub_fail
+		| wish_fail
+		| healing_fail
+		| (acting_fail & ~reflect)
+	)
+	outcome = (
+		jnp.where(result.missed, OUTCOME_MISS, 0)
+		| jnp.where(failed, OUTCOME_FAILED, 0)
+		| jnp.where(result.critical, OUTCOME_CRIT, 0)
+	)
+	effect = jnp.where(user_immune | sync_immune, EFFECT_IMMUNE, result.effect)
+	state = write_attempt(
+		state,
+		user,
+		move=jnp.where(move_enabled, row.id, 0),
+		cant=jnp.where(move_enabled, CANT_NONE, cant),
+		outcome=jnp.where(move_enabled, outcome, 0),
+		effect=jnp.where(move_enabled, effect, EFFECT_NONE),
+		hits=jnp.where(move_enabled, result.hits, 0),
+		order=True,
+	)
+	holder = (SIDES == foe) & reflect
+	holder_failed = acting_fail & reflect
+	holder_immune = status_immune & reflect
+	holder_outcome = jnp.where(reflect & ~bounce_hit, OUTCOME_MISS, 0) | jnp.where(
+		holder_failed, OUTCOME_FAILED, 0
+	)
+	state = write_attempt(
+		state,
+		holder,
+		move=row.id,
+		cant=CANT_NONE,
+		outcome=holder_outcome,
+		effect=jnp.where(holder_immune, EFFECT_IMMUNE, EFFECT_NONE),
+		hits=0,
+	)
 	return (
 		state._replace(boosts=boosts),
 		pivot,
@@ -575,6 +709,9 @@ def step(state, actions, key, forced, engine_tables):
 	key = random_bits(key)
 	ongoing = state.winner == ONGOING
 	requests = state.request
+	state = clear_events(state, ongoing)
+	bounds = record_step_bounds(state)
+	entries = entry_kinds(state, requests, bounds)
 	start_turn = (state.turn_stage == TURN_IDLE) & jnp.any(requests == MOVE) & ongoing
 	legacy_replacement = (state.turn_stage == TURN_IDLE) & jnp.any(requests == SWITCH) & ongoing
 
@@ -658,6 +795,7 @@ def step(state, actions, key, forced, engine_tables):
 
 	def switch_block(state, abilities, switching):
 		"""Voluntary and requested switches: one dense switch-out and switch-in path."""
+		state = write_entry(state, switching, entries)
 		item_rows = gather_active_items(state, t)
 		previous = (state, item_rows, abilities, start_turn)
 		state = switch_actions(state, actions, switching, t, abilities)
@@ -839,4 +977,4 @@ def step(state, actions, key, forced, engine_tables):
 		turn=state.turn + finish_turn.astype(jnp.int32),
 	)
 	clear_plan = finish_turn | ended
-	return _clear_turn_plan(state, clear_plan)
+	return _clear_turn_plan(finish_events(state, bounds, ongoing), clear_plan)

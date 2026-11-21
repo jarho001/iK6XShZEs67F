@@ -12,6 +12,7 @@ from pokejax.teams import TeamPool
 
 from .abilities import RESIDUAL, RESIDUAL_SLOW_START, active_abilities
 from .data import EngineTables
+from .events import EVENT_FIELDS
 from .forms import foe_view
 from .illusion import enter_illusion
 from .items import gather_active_items, update_active_items
@@ -216,6 +217,11 @@ def reset(
 		pirouette_stats=pirouette_stats,
 		shown_species=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.int16),
 		party=jnp.broadcast_to(jnp.arange(TEAM_SLOTS, dtype=jnp.int8), (NUM_SIDES, TEAM_SLOTS)),
+		event=jnp.zeros((NUM_SIDES, EVENT_FIELDS), jnp.int8),
+		event_move=jnp.zeros(NUM_SIDES, jnp.int16),
+		weather_age=jnp.asarray(0, jnp.int8),
+		trick_room_age=jnp.asarray(0, jnp.int8),
+		wish_age=jnp.zeros(NUM_SIDES, jnp.int8),
 	)
 	both = jnp.ones(NUM_SIDES, jnp.bool_)
 	state = enter_illusion(state, both, t)

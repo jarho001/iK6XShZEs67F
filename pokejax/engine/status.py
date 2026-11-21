@@ -18,6 +18,19 @@ from .abilities import (
 	TRUANT as TRUANT_ABILITY,
 )
 from .actions import SIDES
+from .events import (
+	CANT_DISABLE,
+	CANT_FREEZE,
+	CANT_NONE,
+	CANT_PARALYSIS,
+	CANT_RECHARGE,
+	CANT_SLEEP,
+	CANT_TAUNT,
+	CANT_TRUANT,
+	EV_STATUS,
+	first_cut,
+	write_event,
+)
 from .field import effective_move_type
 from .move_data import read_move
 from .randomness import FULL_PARALYSIS, SLEEP_DURATION, THAW, chance, integer
@@ -63,6 +76,7 @@ def before_move(state, side, move, enabled, key, forced, tables, ability_rows, r
 
 	Sleep (10), flinch (8), Disable (7), Taunt (5), confusion (3), paralysis (1),
 	then Destiny Bond (-1), which only clears when no earlier handler stopped the move.
+	Returns (state, can_act, cant): cant is the events.py reason of the first check that stopped it.
 	"""
 	row = read_move(tables, move)
 	started = enabled
@@ -74,7 +88,10 @@ def before_move(state, side, move, enabled, key, forced, tables, ability_rows, r
 		MUST_RECHARGE,
 		jnp.where(recharge_now, 0, state.volatiles[side, MUST_RECHARGE]),
 	)
+	reason = CANT_NONE
+	before = enabled
 	enabled &= ~recharge_now
+	reason = first_cut(reason, before, enabled, CANT_RECHARGE)
 	slot = state.active[side]
 	status = state.status[side, slot]
 	counter = state.status_counter[side, slot]
@@ -92,7 +109,12 @@ def before_move(state, side, move, enabled, key, forced, tables, ability_rows, r
 		status_counter=jnp.where(member_mask, jnp.where(clear, 0, counter), state.status_counter),
 	)
 	# Sleep Talk and the other sleep-usable moves may be used while asleep.
-	enabled &= ~(sleeping & ~wake & ~row.move_sleep_usable) & ~frozen
+	before = enabled
+	enabled &= ~(sleeping & ~wake & ~row.move_sleep_usable)
+	reason = first_cut(reason, before, enabled, CANT_SLEEP)
+	before = enabled
+	enabled &= ~frozen
+	reason = first_cut(reason, before, enabled, CANT_FREEZE)
 	truant_ability = has_hook(ability_rows[side], TRUANT_ABILITY)
 	truant_active = truant_ability & (state.volatiles[side, TRUANT_VOLATILE] > 0)
 	truant_block = enabled & ~recharge_now & truant_active
@@ -103,17 +125,27 @@ def before_move(state, side, move, enabled, key, forced, tables, ability_rows, r
 	)
 	truant_value = jnp.where(recharge_now, 0, truant_value)
 	state = set_active_volatile(state, side, TRUANT_VOLATILE, truant_value)
+	before = enabled
 	enabled &= ~truant_block
+	reason = first_cut(reason, before, enabled, CANT_TRUANT)
 	state = reveal_abilities(state, (SIDES == side) & truant_block)
 	disabled = (state.volatiles[side, DISABLE_REMAINING] > 0) & (
 		row.id == state.volatiles[side, DISABLE_MOVE]
 	)
-	enabled &= ~disabled & ~taunt_blocks(state, side, row)
-	state, enabled = volatile_before_move(
+	before = enabled
+	enabled &= ~disabled
+	reason = first_cut(reason, before, enabled, CANT_DISABLE)
+	before = enabled
+	enabled &= ~taunt_blocks(state, side, row)
+	reason = first_cut(reason, before, enabled, CANT_TAUNT)
+	state, enabled, volatile_reason = volatile_before_move(
 		state, side, enabled, key, forced, tables, ability_rows[side]
 	)
+	reason = jnp.where(reason == CANT_NONE, volatile_reason, reason)
+	before = enabled
 	paralyzed = enabled & (status == PARALYSIS) & chance(key, forced, FULL_PARALYSIS, side, 0, 1, 4)
 	can_act = enabled & ~paralyzed
+	reason = first_cut(reason, before, can_act, CANT_PARALYSIS)
 	# Destiny Bond ends when its user attempts any other move: its BeforeMove handler (priority
 	# -1) still runs after a sleep, flinch or paralysis check has stopped the move.
 	destiny_clear = started & (row.move_self_volatile != 4)
@@ -129,7 +161,7 @@ def before_move(state, side, move, enabled, key, forced, tables, ability_rows, r
 		TWO_TURN_MOVE,
 		jnp.where(was_charging & started & ~can_act, 0, state.volatiles[side, TWO_TURN_MOVE]),
 	)
-	return state, can_act
+	return state, can_act, reason
 
 
 def inflict_status(
@@ -172,6 +204,7 @@ def inflict_status(
 	state = state._replace(
 		status=status, status_counter=counter, sleep_start=start, sleep_from_foe=source
 	)
+	state = write_event(state, (SIDES == side) & apply, EV_STATUS, inflicted)
 	# Synchronize supplies a status-like pseudo effect, which Showdown treats
 	# like a named move status in the immunity protocol.
 	if reveal_immunity:
@@ -204,8 +237,16 @@ def synchronize_status(
 	return reveal_abilities(state, revealed)
 
 
-def apply_move(state, side, move, enabled, hit, key, forced, tables, abilities, weather):
-	"""Apply move status effects with dense team masks and one field write."""
+def apply_move(
+	state, side, move, enabled, hit, key, forced, tables, abilities, weather, reach=None
+):
+	"""Apply move status effects with dense team masks and one field write.
+
+	reach is the move reaching its target (accuracy passed, nothing blocked it); a status the
+	target refuses (immunity, a status it already has) fails with a reach even when the move's
+	effect is not applied (Showdown's TryHit and trySetStatus). Defaults to hit.
+	"""
+	reach = hit if reach is None else reach
 	row = read_move(tables, move)
 	foe = 1 - side
 	user, target = state.active[side], state.active[foe]
@@ -291,8 +332,78 @@ def apply_move(state, side, move, enabled, hit, key, forced, tables, abilities, 
 		sleep_from_foe=source,
 		hp=hp,
 	)
+	state = write_event(
+		state,
+		((SIDES == foe) & inflict) | ((SIDES == side) & rest),
+		EV_STATUS,
+		jnp.where(SIDES == side, SLEEP, inflicted),
+	)
 	state = synchronize_status(state, foe, side, inflicted, inflict, key, forced, tables, abilities)
-	return state, revealed
+	# The status is refused by the target's type, the weather or its ability (-immune).
+	# Showdown's trySetStatus refuses an already-statused target (-fail) before its immunity check.
+	status_immune = (
+		enabled
+		& reach
+		& ~row.move_status_self
+		& (state.hp[foe, target] > 0)
+		& (inflicted != HEALTHY)
+		& (target_status == HEALTHY)
+		& (immune | ability_immune)
+	)
+	# Synchronize copies the status back to the user, which can refuse it with -immune.
+	copy_src_types = state.types[side, user]
+	copy_immune = jnp.any(
+		(copy_src_types >= 0) & tables.status_immune[inflicted, jnp.maximum(copy_src_types, 0)]
+	)
+	copy_immune |= tables.weather_status_immune[weather, inflicted] | status_immunity(
+		abilities[side], inflicted, weather
+	)
+	statusable = (inflicted == BURN) | (inflicted == POISON) | (inflicted == TOXIC)
+	statusable |= inflicted == PARALYSIS
+	synchronize_holder = (
+		inflict & statusable & (abilities[foe, STATUS_EVENT] == STATUS_EVENT_SYNCHRONIZE)
+	)
+	synchronize_refused = synchronize_holder & (user_status == HEALTHY) & copy_immune
+	status_immune = status_immune | synchronize_refused
+	# A copy onto a user that already has a status fails (-fail), with no immunity shown.
+	synchronize_busy = synchronize_holder & (user_status != HEALTHY)
+	# When the user copies the status back (it is Synchronize too), the holder already has it:
+	# Showdown prints that chained -fail on the holder during the user's move.
+	synchronize_chain = (
+		synchronize_holder
+		& (user_status == HEALTHY)
+		& ~copy_immune
+		& (abilities[side, STATUS_EVENT] == STATUS_EVENT_SYNCHRONIZE)
+	)
+	# A status move that does not inflict its status fails (already statused, a refusal, Sleep
+	# Clause); Rest fails at full HP, while asleep, or against an immune sleeper (onTry).
+	# Sleep Clause refuses a second sleeper with a message and hint only, not a -fail.
+	clause_refusal = (inflicted == SLEEP) & clause & (target_status == HEALTHY)
+	# Psycho Shift transfers the user's status; with none to transfer it fails.
+	transfer_fail = enabled & hit & (effect == TRANSFER) & (user_status == HEALTHY)
+	# Refresh fails unless it cures a burn, poison, toxic or paralysis of its user (onHit).
+	refresh_fail = (
+		enabled
+		& (effect == REFRESH)
+		& ((user_status == HEALTHY) | (user_status == SLEEP) | (user_status == FREEZE))
+	)
+	status_failed = (
+		(
+			enabled
+			& reach
+			& ~row.move_status_self
+			& (state.hp[foe, target] > 0)
+			& (inflicted != HEALTHY)
+			& ~inflict
+			& ~clause_refusal
+		)
+		| (enabled & (effect == REST) & ~rest)
+		| refresh_fail
+		| transfer_fail
+		| synchronize_busy
+		| synchronize_chain
+	)
+	return state, revealed, status_immune, status_failed
 
 
 def after_hit(state, side, move, enabled, tables, weather=None):

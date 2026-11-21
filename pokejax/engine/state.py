@@ -123,6 +123,9 @@ class BattleState(NamedTuple):
 	an int8 enum (0 clear, 1 rain, 2 sun, 3 sand, 4 hail); zero turns means
 	permanent weather or no weather. Hazards and their private switch-in creation
 	order are int8 [side, spikes/toxic spikes].
+	The event record (events.py) is cleared at the start of each step and holds only that
+	step's visible events. weather_age, trick_room_age and wish_age count turns since each
+	effect started, from the protocol; the observation exposes those, never a remaining count.
 	"""
 
 	species: jax.Array
@@ -198,3 +201,8 @@ class BattleState(NamedTuple):
 	# Showdown's side.pokemon order (array index to team slot). Index 0 is the active member;
 	# a switch-in swaps the entering and leaving positions. Illusion's disguise reads it.
 	party: jax.Array  # int8 [2, 6]
+	event: jax.Array  # int8 [2, EVENT_FIELDS]: the step's visible events (events.py columns)
+	event_move: jax.Array  # int16 [2]: the move each side last used in the step
+	weather_age: jax.Array  # int8 scalar: turns since the current weather started (0 if none)
+	trick_room_age: jax.Array  # int8 scalar: turns since Trick Room started (0 if inactive)
+	wish_age: jax.Array  # int8 [2]: turns since each side's pending Wish was used

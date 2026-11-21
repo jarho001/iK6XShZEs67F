@@ -478,6 +478,26 @@ def absorption(state, side, ability, type_, exponent, immune, enabled, move, tab
 	return eligible & (match | wonder)
 
 
+def absorption_no_effect(state, foe, ability, absorbed):
+	"""Showdown's -immune for an absorbed hit: the heal, boost or Flash Fire had no effect.
+
+	Water/Volt Absorb and Dry Skin print -immune when the heal fails (full HP), the stat
+	boosts print -immune when the stage is already +6, Flash Fire when it already stands, and
+	Wonder Guard always does. An absorption with an effect prints its -heal, -boost or -start.
+	"""
+	kind = ability[ABSORB]
+	member = state.active[foe]
+	maximum = state.stats[foe, member, HP].astype(jnp.int32)
+	hp = state.hp[foe, member].astype(jnp.int32)
+	boost_stat = jnp.where(kind == ABSORB_ATK, 0, jnp.where(kind == ABSORB_SPA, 2, 4))
+	stage = state.boosts[foe, boost_stat].astype(jnp.int32)
+	heal_full = (kind == ABSORB_HEAL) & (hp >= maximum)
+	boost_capped = (kind >= ABSORB_ATK) & (stage >= 6)
+	flash_on = (kind == ABSORB_FLASH) & (state.volatiles[foe, FLASH_FIRE] > 0)
+	wonder = kind == ABSORB_WONDER
+	return absorbed & (heal_full | boost_capped | flash_on | wonder)
+
+
 def absorb_hit(state, foe, row, absorbed, hp):
 	kind = row[ABSORB]
 	maximum = state.stats[foe, state.active[foe], HP].astype(jnp.int32)

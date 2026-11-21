@@ -32,6 +32,7 @@ from .abilities import (
 )
 from .actions import SIDES
 from .delayed import healing_wish_switch_in
+from .events import ENTRY_DRAGGED, write_entry
 from .field import apply_active_switch_hazards, set_weather
 from .forms import foe_view, restore_form, reveal_ability_ids, transform_copy
 from .illusion import enter_illusion
@@ -193,6 +194,7 @@ def drag_in(
 	switch_mask = (SIDES == side) & active
 	targets = jnp.where(switch_mask, target, state.active)
 	state = switch_members(state, switch_mask, targets, tables, rows)
+	state = write_entry(state, switch_mask, ENTRY_DRAGGED)
 	if copy_mask is None:
 		copy_mask = jnp.zeros((2,), jnp.bool_)
 	view = foe_view(state, state.active[::-1])

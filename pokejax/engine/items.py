@@ -19,6 +19,7 @@ from .abilities import (
 	reveal_abilities,
 	status_immunity,
 )
+from .events import EV_STATUS, write_event
 from .modifiers import chain, modify
 from .move_data import read_move
 from .state import (
@@ -546,4 +547,5 @@ def apply_residual_status_items(state, enabled, key, forced, tables, rows, abili
 		status_counter=jnp.where(write, 0, state.status_counter),
 		sleep_from_foe=jnp.where(write, 0, state.sleep_from_foe),
 	)
+	state = write_event(state, applied, EV_STATUS, status)
 	return reveal_active_items(state, applied)

@@ -19,7 +19,11 @@ def _heal_fraction(value, numerator, denominator, callback):
 
 
 def apply_healing_active(state, side, move, enabled, hit, active_hp, tables, weather=None):
-	"""Apply table-driven recovery to active HP and update Roost's type fields."""
+	"""Apply table-driven recovery to active HP and update Roost's type fields.
+
+	Returns (state, active_hp, healed, full): full is a heal that found the user at full HP
+	(Showdown's -fail heal).
+	"""
 	row = read_move(tables, move)
 	t = tables
 	foe = 1 - side
@@ -60,17 +64,19 @@ def apply_healing_active(state, side, move, enabled, hit, active_hp, tables, wea
 	columns = jnp.arange(NUM_VOLATILES)
 	roost_mask = (SIDES == side)[:, None] & (columns[None, :] == ROOST) & roost
 	volatiles = jnp.where(roost_mask, 1, state.volatiles)
+	full = enabled & hit & (numerator > 0) & (hp > 0) & (hp >= maximum)
 	return (
 		state._replace(types=types, roost_types=roost_types, volatiles=volatiles),
 		active_hp,
 		healed,
+		full,
 	)
 
 
 def apply_healing(state, side, move, enabled, hit, tables):
 	"""Apply recovery and update the standalone state for focused rule checks."""
 	active_hp = state.hp[SIDES, state.active].astype(jnp.int32)
-	state, active_hp, healed = apply_healing_active(
+	state, active_hp, healed, _ = apply_healing_active(
 		state, side, move, enabled, hit, active_hp, tables
 	)
 	active_slots = jnp.arange(state.hp.shape[1])[None, :] == state.active[:, None]

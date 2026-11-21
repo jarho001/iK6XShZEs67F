@@ -10,6 +10,7 @@ from pokejax.mechanics.stat_stage import scale_stat_stage
 
 from .abilities import reveal_abilities
 from .actions import SIDES
+from .events import CANT_CONFUSION, CANT_FLINCH, CANT_NONE, first_cut
 from .items import DAMAGE_TAKEN_KIND, damage_survival, update_item_state
 from .randomness import (
 	CONFUSION_DAMAGE_ROLL,
@@ -91,7 +92,10 @@ def advance_active_turns(state, enabled):
 
 
 def before_move(state, side, enabled, key, forced, tables, ability_row):
+	"""Flinch, then confusion's self-hit. Returns (state, enabled, cant reason)."""
+	before = enabled
 	enabled &= state.volatiles[side, FLINCH] == 0
+	reason = first_cut(CANT_NONE, before, enabled, CANT_FLINCH)
 	counter = state.volatiles[side, CONFUSION]
 	confused = enabled & (counter > 0)
 	counter = jnp.where(confused, counter - 1, counter)
@@ -112,10 +116,16 @@ def before_move(state, side, enabled, key, forced, tables, ability_row):
 	active_slot = (SIDES == side)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == slot)
 	columns = jnp.arange(NUM_VOLATILES)
 	confusion_column = (SIDES == side)[:, None] & (columns[None, :] == CONFUSION)
-	return state._replace(
-		volatiles=jnp.where(confusion_column, counter, state.volatiles),
-		hp=jnp.where(active_slot, hp.astype(state.hp.dtype), state.hp),
-	), enabled & ~self_hit
+	after = enabled & ~self_hit
+	reason = first_cut(reason, enabled, after, CANT_CONFUSION)
+	return (
+		state._replace(
+			volatiles=jnp.where(confusion_column, counter, state.volatiles),
+			hp=jnp.where(active_slot, hp.astype(state.hp.dtype), state.hp),
+		),
+		after,
+		reason,
+	)
 
 
 def end_turn(state, enabled, key, forced, expire_roost=None):

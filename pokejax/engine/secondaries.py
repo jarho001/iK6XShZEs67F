@@ -11,6 +11,8 @@ from .abilities import (
 	OWN_TEMPO,
 	SERENE_GRACE,
 	SHIELD_DUST,
+	STATUS_EVENT,
+	STATUS_EVENT_SYNCHRONIZE,
 	apply_boost_delta,
 	berry_allowed,
 	boost_delta,
@@ -19,6 +21,7 @@ from .abilities import (
 	status_immunity,
 )
 from .actions import SIDES
+from .events import EV_STATUS, write_event
 from .items import BERRY_LUM
 from .move_data import read_move
 from .randomness import (
@@ -31,7 +34,7 @@ from .randomness import (
 	chance,
 	integer,
 )
-from .state import CONFUSION, FLINCH, HEALTHY, POISON, SLEEP, TEAM_SLOTS
+from .state import BURN, CONFUSION, FLINCH, HEALTHY, PARALYSIS, POISON, SLEEP, TEAM_SLOTS, TOXIC
 from .status import synchronize_status
 
 
@@ -164,8 +167,30 @@ def apply_secondaries(
 		boosts=boosts,
 		volatiles=volatiles,
 	)
+	state = write_event(state, set_status, EV_STATUS, inflicted_by_side)
+	# A Synchronize holder copies a secondary status back to the user; the user's immunity can
+	# refuse the copy, which Showdown reports as -immune on the user (events.py FAILED, IMMUNE).
+	user_slot = state.active[side]
+	user_healthy = state.status[side, user_slot] == HEALTHY
+	user_types = state.types[side, user_slot]
+	sync_refused = jnp.zeros((), jnp.bool_)
+	sync_busy = jnp.zeros((), jnp.bool_)
 	for index in range(SECONDARY_SLOTS):
 		sync_trigger = can_inflict[index] & (targets[index] != side)
+		inflicted_index = inflicted[index]
+		copy_immune = jnp.any(
+			(user_types >= 0) & tables.status_immune[inflicted_index, jnp.maximum(user_types, 0)]
+		)
+		copy_immune |= tables.weather_status_immune[weather, inflicted_index] | status_immunity(
+			abilities[side], inflicted_index, weather
+		)
+		statusable = (
+			(inflicted_index == BURN) | (inflicted_index == POISON) | (inflicted_index == TOXIC)
+		)
+		statusable |= inflicted_index == PARALYSIS
+		holder = abilities[targets[index], STATUS_EVENT] == STATUS_EVENT_SYNCHRONIZE
+		sync_refused |= sync_trigger & statusable & holder & user_healthy & copy_immune
+		sync_busy |= sync_trigger & statusable & holder & ~user_healthy
 		state = synchronize_status(
 			state,
 			targets[index],
@@ -178,4 +203,4 @@ def apply_secondaries(
 			abilities,
 		)
 	state = reveal_abilities(state, defiant_revealed)
-	return state, (SIDES == foe) & lum_between_hits
+	return state, (SIDES == foe) & lum_between_hits, sync_refused | sync_busy, sync_refused

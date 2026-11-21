@@ -1,4 +1,4 @@
-"""Public information boundaries exercised on real-team random rollouts."""
+"""Public information boundaries exercised on real-team random rollouts and forced outcomes."""
 
 import json
 import subprocess
@@ -9,11 +9,23 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from pokejax.engine import events as EV
 from pokejax.engine import state as S
 from pokejax.engine.actions import legal_actions
 from pokejax.engine.data import build_engine_tables
 from pokejax.engine.observation import Observation, observe
-from pokejax.engine.randomness import CRIT, DAMAGE_ROLL, HIT, ORDER, UNFORCED
+from pokejax.engine.randomness import (
+	ACTION_ORDER,
+	CONFUSION_HIT,
+	CRIT,
+	DAMAGE_ROLL,
+	DRAG_IN,
+	FULL_PARALYSIS,
+	HIT,
+	HIT_COUNT,
+	ORDER,
+	UNFORCED,
+)
 from pokejax.engine.reset import reset, teams_from_pool
 from pokejax.engine.state import MOVE, NONE, SWITCH
 from pokejax.engine.step import step
@@ -23,6 +35,7 @@ from pokejax.teams import load_team_pool
 KEY = jax.random.key(83)
 RUN = jax.jit(step)
 OBSERVE = jax.jit(observe)
+FORCED = UNFORCED.at[HIT, :, 0].set(1).at[CRIT, :, :].set(0).at[DAMAGE_ROLL, :, :].set(0)
 
 
 @pytest.fixture(scope="module")
@@ -70,6 +83,34 @@ def assert_equal(a, b):
 		np.testing.assert_array_equal(x, y)
 
 
+def play(s, actions, t, forced=UNFORCED):
+	return RUN(s, jnp.array(actions), KEY, forced, t)
+
+
+def set_active_move(s, tables, side, slot, name):
+	member = s.active[side]
+	return s._replace(
+		moves=s.moves.at[side, member, slot].set(tables.moves.index[name]),
+		pp=s.pp.at[side, member, slot].set(10),
+	)
+
+
+def set_active_types(s, tables, side, names):
+	member = s.active[side]
+	types = [tables.types.index[name] for name in names] + [-1] * (2 - len(names))
+	return s._replace(types=s.types.at[side, member].set(jnp.array(types, jnp.int8)))
+
+
+def no_items(s):
+	"""Held items add their own HP changes (Life Orb recoil, Leftovers); the HP tests clear them."""
+	return s._replace(item=jnp.zeros_like(s.item))
+
+
+def alive_bench(s, side):
+	slots = np.arange(6)
+	return int(next(x for x in slots if x != int(s.active[side]) and int(s.hp[side, x]) > 0))
+
+
 @pytest.mark.parametrize("side", [0, 1])
 def test_no_hidden_information(battles, side):
 	_, t, _, states = battles
@@ -110,6 +151,68 @@ def test_no_hidden_information(battles, side):
 	assert_equal(get(states, side, t), get(changed, side, t))
 	assert np.any(np.asarray(states.seen_order) == 0)
 	assert np.any(np.asarray(states.revealed_moves) != 0)
+
+
+PRIVATE_COUNTERS = (
+	S.CONFUSION,
+	S.ENCORE_REMAINING,
+	S.TAUNT,
+	S.DISABLE_REMAINING,
+	S.YAWN,
+	S.SLOW_START,
+	S.SUBSTITUTE,
+)
+
+
+@pytest.mark.parametrize("side", [0, 1])
+def test_private_counters_and_durations_do_not_leak(battles, side):
+	"""Counters and HP that the protocol never states, on both sides, change no observation."""
+	_, t, _, states = battles
+	# Give every battle the restricting volatiles, so the counters are live for both sides.
+	volatiles = states.volatiles
+	for column, value in (
+		(S.CONFUSION, 3),
+		(S.ENCORE_REMAINING, 3),
+		(S.ENCORE_MOVE, 5),
+		(S.TAUNT, 3),
+		(S.DISABLE_REMAINING, 4),
+		(S.DISABLE_MOVE, 6),
+		(S.YAWN, 2),
+		(S.SLOW_START, 5),
+		(S.SUBSTITUTE, 9),
+	):
+		volatiles = volatiles.at[:, :, column].set(value)
+	states = states._replace(
+		volatiles=volatiles,
+		trick_room=jnp.full_like(states.trick_room, 5),
+		weather=jnp.full_like(states.weather, S.RAIN),
+		weather_turns=jnp.full_like(states.weather_turns, 8),
+		wish_turns=jnp.full_like(states.wish_turns, 2),
+		wish_hp=jnp.full_like(states.wish_hp, 60),
+	)
+
+	def change(s):
+		volatiles = s.volatiles
+		for column in PRIVATE_COUNTERS:
+			# Presence is kept (a counter stays positive), the value is not.
+			keep = volatiles[:, column] > 0
+			volatiles = volatiles.at[:, column].set(
+				jnp.where(keep, jnp.where(volatiles[:, column] > 2, 2, 5), 0)
+			)
+		volatiles = volatiles.at[:, S.SUBSTITUTE].set(
+			jnp.where(s.volatiles[:, S.SUBSTITUTE] > 0, 1, 0)
+		)
+		return s._replace(
+			volatiles=volatiles,
+			trick_room=jnp.full_like(s.trick_room, 1),
+			weather_turns=jnp.full_like(s.weather_turns, 1),
+			wish_turns=jnp.full_like(s.wish_turns, 1),
+			wish_hp=jnp.full_like(s.wish_hp, 7),
+		)
+
+	get = jax.jit(jax.vmap(observe, in_axes=(0, None, None)))
+	changed = jax.jit(jax.vmap(change))(states)
+	assert_equal(get(states, side, t), get(changed, side, t))
 
 
 @pytest.mark.parametrize("side", [0, 1])
@@ -213,18 +316,41 @@ def test_public_status_uses_seen_order(battles):
 	np.testing.assert_array_equal(o.opponent.status, [1, 6, 3, 0, 0, 0])
 
 
-def test_weather_and_hazards_are_public_and_perspective_ordered(battles):
+def test_weather_trick_room_and_wish_are_ages_and_flags(battles):
 	_, t, s, _ = battles
 	s = s._replace(
-		weather=jnp.int8(3),
-		weather_turns=jnp.int8(2),
+		weather=jnp.int8(S.RAIN),
+		weather_turns=jnp.int8(8),
+		weather_age=jnp.int8(3),
 		hazards=jnp.asarray([[2, 1], [3, 0]], jnp.int8),
+		trick_room=jnp.int8(4),
+		trick_room_age=jnp.int8(2),
+		wish_turns=jnp.asarray([2, 0], jnp.int8),
+		wish_age=jnp.asarray([1, 0], jnp.int8),
+		healing_wish=jnp.asarray([False, True]),
 	)
 	for side, expected in ((0, [[2, 1], [3, 0]]), (1, [[3, 0], [2, 1]])):
 		o = OBSERVE(s, side, t)
-		assert int(o.weather) == 3
-		assert float(o.weather_turns) == 2
+		assert int(o.weather) == S.RAIN
+		assert float(o.weather_age) == 3
+		assert not hasattr(o, "weather_turns")
 		np.testing.assert_array_equal(o.hazards, expected)
+		assert float(o.trick_room) == 1 and float(o.trick_room_age) == 2
+		if side == 0:
+			np.testing.assert_array_equal(o.wish, [1, 0])
+			np.testing.assert_array_equal(o.wish_age, [1, 0])
+			np.testing.assert_array_equal(o.healing_wish, [0, 1])
+		else:
+			np.testing.assert_array_equal(o.wish, [0, 1])
+			np.testing.assert_array_equal(o.wish_age, [0, 1])
+			np.testing.assert_array_equal(o.healing_wish, [1, 0])
+	# The remaining counts are private: changing them changes nothing public.
+	changed = s._replace(
+		weather_turns=jnp.int8(1),
+		trick_room=jnp.int8(1),
+		wish_turns=jnp.asarray([1, 0], jnp.int8),
+	)
+	assert_equal(OBSERVE(s, 0, t), OBSERVE(changed, 0, t))
 
 
 def test_hp_against_pinned_protocol(battles):
@@ -269,6 +395,88 @@ def test_hp_against_pinned_protocol(battles):
 	)
 
 
+def test_public_volatiles_follow_the_protocol(battles):
+	"""Each public flag and count is set from the state that the matching protocol line sets."""
+	tables, t, s, _ = battles
+	s = set_active_move(s, tables, 0, 0, "tackle")
+	volatiles = s.volatiles.at[1, S.SUBSTITUTE].set(3)
+	volatiles = (
+		volatiles.at[1, S.ENCORE_REMAINING]
+		.set(2)
+		.at[1, S.ENCORE_MOVE]
+		.set(tables.moves.index["tackle"])
+	)
+	volatiles = volatiles.at[1, S.TAUNT].set(3).at[1, S.DISABLE_REMAINING].set(4)
+	volatiles = volatiles.at[1, S.DISABLE_MOVE].set(tables.moves.index["tackle"])
+	volatiles = volatiles.at[1, S.LEECH_SEED].set(1).at[1, S.YAWN].set(2).at[1, S.CURSE].set(1)
+	volatiles = volatiles.at[1, S.DESTINY_BOND].set(1).at[1, S.TRANSFORMED].set(1)
+	volatiles = volatiles.at[1, S.FLASH_FIRE].set(1).at[1, S.SLOW_START].set(5)
+	volatiles = volatiles.at[1, S.AUTOTOMIZE].set(2).at[1, S.PROTECT].set(1)
+	volatiles = volatiles.at[1, S.ROOST].set(1)
+	s2 = s._replace(volatiles=volatiles)
+	o = OBSERVE(s2, 0, t)
+	opp = o.opponent
+	assert float(opp.substitute) == 1
+	assert float(opp.encore) == 1 and int(opp.encore_move) == tables.moves.index["tackle"]
+	assert float(opp.taunt) == 1 and float(opp.disable) == 1
+	assert int(opp.disabled_move) == tables.moves.index["tackle"]
+	assert float(opp.leech_seed) == 1 and float(opp.yawn) == 1 and float(opp.curse) == 1
+	assert float(opp.destiny_bond) == 1 and float(opp.transformed) == 1
+	assert float(opp.flash_fire) == 1 and float(opp.slow_start) == 1
+	assert float(opp.autotomize) == 2 and float(opp.protect) == 1 and float(opp.roost) == 1
+	# Without the counter, the move ID is not shown; the flag follows the remaining count only.
+	cleared = s2._replace(volatiles=volatiles.at[1, S.ENCORE_REMAINING].set(0))
+	o = OBSERVE(cleared, 0, t)
+	assert float(o.opponent.encore) == 0 and int(o.opponent.encore_move) == 0
+	# The same fields for the own side, from its own volatiles.
+	own = OBSERVE(s2._replace(volatiles=volatiles.at[0, S.TAUNT].set(1)), 0, t).own
+	assert float(own.taunt) == 1 and float(own.substitute) == 0
+
+
+def test_choice_lock_is_own_only(battles):
+	tables, t, s, _ = battles
+	s = set_active_move(s, tables, 0, 0, "tackle")
+	member = s.active[0]
+	s = s._replace(
+		item=s.item.at[0, member].set(tables.items.index["choiceband"]),
+		volatiles=s.volatiles.at[0, S.CHOICE_MOVE].set(tables.moves.index["tackle"]),
+	)
+	o = OBSERVE(s, 0, t)
+	assert float(o.own.choice_locked) == 1
+	assert int(o.own.choice_move) == tables.moves.index["tackle"]
+	assert not hasattr(o.opponent, "choice_locked")
+	# A lock without a Choice item is inert, and the opponent's lock is never shown.
+	inert = s._replace(item=s.item.at[0, member].set(0))
+	assert float(OBSERVE(inert, 0, t).own.choice_locked) == 0
+	foe_locked = s._replace(volatiles=s.volatiles.at[1, S.LOCKED_MOVE].set(3))
+	assert not hasattr(OBSERVE(foe_locked, 0, t).opponent, "choice_locked")
+
+
+def test_opponent_types_follow_disguise_and_roost(battles):
+	tables, t, s, _ = battles
+	s = set_active_types(s, tables, 1, ["fire", "flying"])
+	member = s.active[1]
+	o = OBSERVE(s, 0, t)
+	np.testing.assert_array_equal(
+		o.opponent.types[int(np.argmax(np.asarray(o.opponent.is_active)))],
+		[tables.types.index["fire"] + 1, tables.types.index["flying"] + 1],
+	)
+	# Roost's Flying removal is not announced: the observation shows the pre-roost types.
+	roosting = s._replace(
+		volatiles=s.volatiles.at[1, S.ROOST].set(1),
+		types=s.types.at[1, member].set(jnp.array([tables.types.index["fire"], -1], jnp.int8)),
+		roost_types=s.roost_types.at[1, member].set(
+			jnp.array([tables.types.index["fire"], tables.types.index["flying"]], jnp.int8)
+		),
+	)
+	o = OBSERVE(roosting, 0, t)
+	active = int(np.argmax(np.asarray(o.opponent.is_active)))
+	np.testing.assert_array_equal(
+		o.opponent.types[active],
+		[tables.types.index["fire"] + 1, tables.types.index["flying"] + 1],
+	)
+
+
 def test_shapes_dtypes_jit_vmap(battles):
 	_, t, s, states = battles
 	observations = jax.jit(
@@ -286,9 +494,42 @@ def test_shapes_dtypes_jit_vmap(battles):
 	o_boosted = OBSERVE(boosted, 0, t)
 	assert o_boosted.own.boosts[0] == -1
 	assert o_boosted.opponent.boosts[1] == 0.5
+	integer_fields = {"species", "types", "moves", "status", "item", "ability"}
+	integer_fields |= {"encore_move", "disabled_move", "choice_move"}
+	scalar_fields = {
+		"confused",
+		"charging",
+		"recharging",
+		"locked",
+		"trapped",
+		"substitute",
+		"encore",
+		"encore_move",
+		"taunt",
+		"disable",
+		"disabled_move",
+		"leech_seed",
+		"yawn",
+		"curse",
+		"destiny_bond",
+		"transformed",
+		"flash_fire",
+		"slow_start",
+		"autotomize",
+		"protect",
+		"roost",
+		"choice_locked",
+		"choice_move",
+	}
+	shapes = {
+		"types": (6, 2),
+		"moves": (6, 4),
+		"pp": (6, 4),
+		"stats": (6, 6),
+		"boosts": (7,),
+	}
 	for team in (o.own, o.opponent):
 		for name, x in zip(team._fields, team):
-			integer_fields = {"species", "types", "moves", "status", "item", "ability"}
 			boolean_fields = {"item_consumed", "item_knocked_off"} if team is o.own else set()
 			assert x.dtype == (
 				jnp.int16
@@ -296,41 +537,48 @@ def test_shapes_dtypes_jit_vmap(battles):
 				else jnp.bool_
 				if name in boolean_fields
 				else jnp.float32
-			)
-			assert x.shape == {
-				"types": (6, 2),
-				"moves": (6, 4),
-				"pp": (6, 4),
-				"stats": (6, 6),
-				"boosts": (7,),
-				"confused": (),
-				"charging": (),
-				"recharging": (),
-				"locked": (),
-				"trapped": (),
-			}.get(name, (6,))
+			), name
+			if name in shapes:
+				assert x.shape == shapes[name], name
+			elif name in scalar_fields:
+				assert x.shape == (), name
+			else:
+				assert x.shape == (6,), name
+	for name, x in zip(o.events._fields, o.events):
+		assert x.shape == (2,), name
+		want = (
+			jnp.int16
+			if name in {"order", "move", "cant", "effectiveness", "entered", "status"}
+			else jnp.float32
+		)
+		assert x.dtype == want, name
 	assert o.turn.shape == () and o.turn.dtype == jnp.float32
 	assert o.request.shape == (3,) and o.request.dtype == jnp.float32
 	assert o.legal_actions.shape == (9,) and o.legal_actions.dtype == jnp.bool_
 	assert o.weather.shape == () and o.weather.dtype == jnp.int16
-	assert o.weather_turns.shape == () and o.weather_turns.dtype == jnp.float32
+	assert o.weather_age.shape == () and o.weather_age.dtype == jnp.float32
 	assert o.hazards.shape == (2, 2) and o.hazards.dtype == jnp.float32
+	for name in ("trick_room", "trick_room_age"):
+		assert getattr(o, name).shape == () and getattr(o, name).dtype == jnp.float32
+	for name in ("wish", "wish_age", "healing_wish"):
+		assert getattr(o, name).shape == (2,) and getattr(o, name).dtype == jnp.float32
 	np.testing.assert_array_equal(o.legal_actions, legal_actions(s, t)[0])
 	for x in jax.tree.leaves(observations):
 		assert x.shape[:2] == (192, 2)
 		assert np.all(np.isfinite(x))
 	for name, x in zip(o.opponent._fields, o.opponent):
-		if name not in (
-			"unseen",
-			"boosts",
-			"confused",
-			"charging",
-			"recharging",
-			"locked",
-			"trapped",
-		):
-			assert np.all(np.asarray(x)[1:] == 0)
+		if name not in ("unseen", "boosts") and name not in scalar_fields:
+			assert np.all(np.asarray(x)[1:] == 0), name
 	np.testing.assert_array_equal(o.opponent.unseen, [0, 1, 1, 1, 1, 1])
+	# Event codes stay inside their enumerations over every recorded rollout state.
+	events = observations.events
+	assert np.all((np.asarray(events.order) >= 0) & (np.asarray(events.order) <= 2))
+	assert np.all((np.asarray(events.cant) >= 0) & (np.asarray(events.cant) <= 10))
+	assert np.all((np.asarray(events.effectiveness) >= 0) & (np.asarray(events.effectiveness) <= 4))
+	assert np.all((np.asarray(events.entered) >= 0) & (np.asarray(events.entered) <= 4))
+	assert np.all((np.asarray(events.status) >= 0) & (np.asarray(events.status) <= 6))
+	assert np.all(np.asarray(events.hits) <= 5)
+	assert np.all(np.abs(np.asarray(events.hp_change)) <= 1)
 
 
 @pytest.mark.parametrize("side", [0, 1])
@@ -356,3 +604,228 @@ def test_illusion_disguise_hides_the_real_species(battles, side):
 	changed = jax.jit(jax.vmap(hide_real_species))(shown)
 	get = jax.jit(jax.vmap(observe, in_axes=(0, None, None)))
 	assert_equal(get(shown, side, t), get(changed, side, t))
+
+
+@pytest.mark.parametrize("side", [0, 1])
+def test_illusion_identity_is_private(battles, side):
+	"""Which bench member hides behind a disguise is private; the disguise species is shown."""
+	_tables, t, _, states = battles
+	foe = 1 - side
+
+	def disguise(s, offset):
+		active = s.active[foe]
+		bench = (active + offset) % 6
+		volatiles = s.volatiles.at[foe, S.ILLUSION_SLOT].set(bench + 1)
+		shown = s.shown_species.at[foe, active].set(s.species[foe, (active + 1) % 6])
+		return s._replace(volatiles=volatiles, shown_species=shown)
+
+	first = jax.jit(jax.vmap(lambda s: disguise(s, 1)))(states)
+	second = jax.jit(jax.vmap(lambda s: disguise(s, 2)))(states)
+	get = jax.jit(jax.vmap(observe, in_axes=(0, None, None)))
+	assert_equal(get(first, side, t), get(second, side, t))
+
+
+# Event record: each test forces the outcomes of one step and checks the record it leaves.
+
+
+def test_event_record_order_moves_and_outcome(battles):
+	tables, t, s, _ = battles
+	s = no_items(s)
+	s = set_active_move(s, tables, 0, 0, "tackle")
+	s = set_active_move(s, tables, 1, 0, "tackle")
+	s = set_active_types(s, tables, 0, ["normal"])
+	s = set_active_types(s, tables, 1, ["normal"])
+	forced = FORCED.at[ORDER, 0, ACTION_ORDER].set(0)
+	out = play(s, [0, 0], t, forced)
+	event = np.asarray(out.event)
+	# Speed decides the order unless it ties; either way the two moves take positions 1 and 2.
+	assert sorted(event[:, EV.EV_ORDER]) == [1, 2]
+	np.testing.assert_array_equal(out.event_move, [tables.moves.index["tackle"]] * 2)
+	np.testing.assert_array_equal(event[:, EV.EV_CANT], [0, 0])
+	np.testing.assert_array_equal(event[:, EV.EV_OUTCOME], [0, 0])
+	np.testing.assert_array_equal(event[:, EV.EV_EFFECT], [EV.EFFECT_NEUTRAL] * 2)
+	np.testing.assert_array_equal(event[:, EV.EV_ENTRY], [0, 0])
+	np.testing.assert_array_equal(event[:, EV.EV_FAINTED], [0, 0])
+	assert np.all(event[:, EV.EV_HP] < 0)
+	o = OBSERVE(out, 0, t)
+	np.testing.assert_array_equal(o.events.order, event[:, EV.EV_ORDER])
+	np.testing.assert_array_equal(o.events.move, [tables.moves.index["tackle"]] * 2)
+	# The next step clears the record: a switch-only step records only the switch.
+	out2 = play(out, [4, 0], t, FORCED)
+	assert int(out2.event[0, EV.EV_ENTRY]) == EV.ENTRY_CHOSEN
+	assert int(out2.event[0, EV.EV_ORDER]) == 0
+	assert int(out2.event_move[0]) == 0
+
+
+def test_event_record_miss_crit_and_hits(battles):
+	tables, t, s, _ = battles
+	s = no_items(s)
+	s = set_active_move(s, tables, 0, 0, "tackle")
+	s = set_active_move(s, tables, 1, 0, "bulletseed")
+	s = set_active_types(s, tables, 0, ["normal"])
+	s = set_active_types(s, tables, 1, ["normal"])
+	forced = (
+		UNFORCED.at[ORDER, 0, ACTION_ORDER]
+		.set(0)
+		.at[HIT, 0, 0]
+		.set(0)
+		.at[HIT, 1, 0]
+		.set(1)
+		.at[CRIT, 1]
+		.set(1)
+		.at[DAMAGE_ROLL, :, :]
+		.set(0)
+		.at[HIT_COUNT, 1, 0]
+		.set(3)
+	)
+	out = play(s, [0, 0], t, forced)
+	event = np.asarray(out.event)
+	assert event[0, EV.EV_OUTCOME] == EV.OUTCOME_MISS
+	assert event[0, EV.EV_EFFECT] == EV.EFFECT_NONE
+	# Side 0's active is still hit by the bullet seeds, so its change is negative.
+	assert event[0, EV.EV_HP] < 0
+	assert event[1, EV.EV_OUTCOME] & EV.OUTCOME_CRIT
+	assert event[1, EV.EV_HITS] == 3
+	assert event[1, EV.EV_OUTCOME] & EV.OUTCOME_MISS == 0
+	assert event[1, EV.EV_EFFECT] == EV.EFFECT_NEUTRAL
+
+
+def test_event_record_super_resisted_and_neutral(battles):
+	tables, t, s, _ = battles
+	s = set_active_move(s, tables, 0, 0, "ember")
+	s = set_active_move(s, tables, 1, 0, "tackle")
+	for defender, effect in (
+		(["grass"], EV.EFFECT_SUPER),
+		(["water"], EV.EFFECT_RESISTED),
+		(["normal"], EV.EFFECT_NEUTRAL),
+	):
+		case = set_active_types(s, tables, 1, defender)
+		out = play(case, [0, 0], t, FORCED)
+		assert int(out.event[0, EV.EV_EFFECT]) == effect, defender
+
+
+def test_event_record_immunity_and_failure(battles):
+	tables, t, s, _ = battles
+	s = no_items(s)
+	# Toxic on a Poison type is refused with -immune: the attacker's move fails with immunity.
+	s = set_active_move(s, tables, 0, 0, "toxic")
+	s = set_active_move(s, tables, 1, 0, "tackle")
+	s = set_active_types(s, tables, 1, ["poison"])
+	out = play(s, [0, 0], t, FORCED)
+	assert int(out.event[0, EV.EV_EFFECT]) == EV.EFFECT_IMMUNE
+	assert int(out.event[0, EV.EV_OUTCOME]) & EV.OUTCOME_FAILED
+	assert int(out.status[1, out.active[1]]) == 0 and int(out.event[1, EV.EV_STATUS]) == 0
+	# A second Substitute while one stands fails. The foe's move is inert, so nothing breaks it.
+	s = set_active_move(s, tables, 1, 0, "splash")
+	s = set_active_move(s, tables, 0, 0, "substitute")
+	s = s._replace(volatiles=s.volatiles.at[0, S.SUBSTITUTE].set(3))
+	out = play(s, [0, 0], t, FORCED)
+	assert int(out.event[0, EV.EV_OUTCOME]) == EV.OUTCOME_FAILED
+	# Recover at full HP fails (-fail heal).
+	s = set_active_move(s, tables, 0, 0, "recover")
+	member = s.active[0]
+	s = s._replace(hp=s.hp.at[0, member].set(s.stats[0, member, 0]))
+	out = play(s, [0, 0], t, FORCED)
+	assert int(out.event[0, EV.EV_OUTCOME]) == EV.OUTCOME_FAILED
+	# A Wish while one is pending fails.
+	s = set_active_move(s, tables, 0, 0, "wish")
+	s = s._replace(wish_turns=s.wish_turns.at[0].set(2))
+	out = play(s, [0, 0], t, FORCED)
+	assert int(out.event[0, EV.EV_OUTCOME]) == EV.OUTCOME_FAILED
+
+
+@pytest.mark.parametrize(
+	"name, reason",
+	[
+		("paralysis", EV.CANT_PARALYSIS),
+		("sleep", EV.CANT_SLEEP),
+		("flinch", EV.CANT_FLINCH),
+		("confusion", EV.CANT_CONFUSION),
+		("recharge", EV.CANT_RECHARGE),
+	],
+)
+def test_event_record_cant_reasons(battles, name, reason):
+	tables, t, s, _ = battles
+	s = set_active_move(s, tables, 0, 0, "tackle")
+	s = set_active_move(s, tables, 1, 0, "tackle")
+	forced = FORCED
+	member = s.active[0]
+	if name == "paralysis":
+		s = s._replace(status=s.status.at[0, member].set(S.PARALYSIS))
+		forced = forced.at[FULL_PARALYSIS, 0, 0].set(1)
+	elif name == "sleep":
+		s = s._replace(
+			status=s.status.at[0, member].set(S.SLEEP),
+			status_counter=s.status_counter.at[0, member].set(3),
+		)
+	elif name == "flinch":
+		s = s._replace(volatiles=s.volatiles.at[0, S.FLINCH].set(1))
+	elif name == "confusion":
+		s = s._replace(volatiles=s.volatiles.at[0, S.CONFUSION].set(3))
+		forced = forced.at[CONFUSION_HIT, 0, 0].set(1)
+	elif name == "recharge":
+		s = s._replace(volatiles=s.volatiles.at[0, S.MUST_RECHARGE].set(1))
+	out = play(s, [0, 0], t, forced)
+	event = np.asarray(out.event)
+	assert event[0, EV.EV_CANT] == reason
+	assert event[0, EV.EV_ORDER] != 0
+	assert np.asarray(out.event_move)[0] == 0
+	assert event[1, EV.EV_CANT] == 0
+
+
+def test_event_record_entries(battles):
+	tables, t, s, _ = battles
+	# Chosen switch: the bench member enters on a move request.
+	out = play(s, [4, 0], t, FORCED)
+	assert int(out.event[0, EV.EV_ENTRY]) == EV.ENTRY_CHOSEN
+	assert int(out.event[1, EV.EV_ENTRY]) == 0
+	# Dragged in by Roar: the foe is pulled to a chosen bench member.
+	s2 = set_active_move(s, tables, 0, 0, "roar")
+	forced = FORCED.at[DRAG_IN, 1, 0].set(alive_bench(s2, 1))
+	out = play(s2, [0, 0], t, forced)
+	assert int(out.event[1, EV.EV_ENTRY]) == EV.ENTRY_DRAGGED
+	# Replacement after a faint: the KO leaves a SWITCH request, then the bench enters.
+	s3 = set_active_move(s, tables, 0, 0, "tackle")
+	defender = s3.active[1]
+	s3 = s3._replace(hp=s3.hp.at[1, defender].set(1))
+	out = play(s3, [0, 0], t, FORCED.at[ORDER, 0, ACTION_ORDER].set(0))
+	assert int(out.event[1, EV.EV_FAINTED]) == 1
+	assert int(out.request[1]) == SWITCH
+	out = play(out, [0, 4], t, FORCED)
+	assert int(out.event[1, EV.EV_ENTRY]) == EV.ENTRY_REPLACEMENT
+	assert int(out.event[0, EV.EV_ENTRY]) == 0
+
+
+def test_event_record_pivot_entry(battles):
+	tables, t, s, _ = battles
+	s = set_active_move(s, tables, 0, 0, "uturn")
+	s = set_active_move(s, tables, 1, 0, "tackle")
+	out = play(s, [0, 0], t, FORCED.at[ORDER, 0, ACTION_ORDER].set(0))
+	# U-turn leaves the user alive and waiting for its switch.
+	assert int(out.request[0]) == SWITCH and int(out.hp[0, out.active[0]]) > 0
+	out = play(out, [4, 0], t, FORCED)
+	assert int(out.event[0, EV.EV_ENTRY]) == EV.ENTRY_PIVOT
+
+
+def test_event_record_status_hp_and_faint(battles):
+	tables, t, s, _ = battles
+	s = no_items(s)
+	s = set_active_move(s, tables, 0, 0, "thunderwave")
+	s = set_active_move(s, tables, 1, 0, "tackle")
+	s = set_active_types(s, tables, 1, ["normal"])
+	out = play(s, [0, 0], t, FORCED)
+	assert int(out.event[1, EV.EV_STATUS]) == S.PARALYSIS
+	assert int(out.event[0, EV.EV_STATUS]) == 0
+	assert int(out.event[1, EV.EV_HP]) == 0
+	# A KO by a tackle: the foe's percentage falls to zero and the faint is recorded.
+	s = set_active_move(s, tables, 0, 0, "tackle")
+	s = set_active_move(s, tables, 1, 0, "tackle")
+	s = set_active_types(s, tables, 1, ["normal"])
+	defender = s.active[1]
+	s = s._replace(hp=s.hp.at[1, defender].set(1))
+	out = play(s, [0, 0], t, FORCED)
+	assert int(out.event[1, EV.EV_FAINTED]) == 1
+	assert int(out.event[1, EV.EV_HP]) == -1
+	o = OBSERVE(out, 0, t)
+	np.testing.assert_allclose(o.events.hp_change[1], -1 / 100)
+	assert float(o.events.fainted[1]) == 1

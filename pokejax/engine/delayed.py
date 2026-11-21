@@ -22,6 +22,7 @@ SELF_DESTINY_BOND = 4
 SLOT_WISH, SLOT_HEALING_WISH = 1, 2
 WISH_TURNS = 2
 TRICK_ROOM_TURNS = 5
+MAX_AGE = 127
 
 
 def apply_wish(state, side, enabled):
@@ -32,17 +33,28 @@ def apply_wish(state, side, enabled):
 	sides = SIDES == side
 	turns = jnp.where(sides & add, WISH_TURNS, state.wish_turns)
 	amount = jnp.where(sides & add, jnp.maximum(maximum // 2, 1), state.wish_hp)
+	age = jnp.where(sides & add, 0, state.wish_age)
 	return state._replace(
 		wish_turns=turns.astype(state.wish_turns.dtype),
 		wish_hp=amount.astype(state.wish_hp.dtype),
+		wish_age=age.astype(state.wish_age.dtype),
 	)
 
 
 def advance_wish(state, turn_advanced):
-	"""The counter drops from two to one when the turn advances (Showdown counts turns)."""
+	"""The counter drops from two to one when the turn advances (Showdown counts turns).
+
+	The public age (turns since the Wish was used) counts each turn end while a Wish is pending.
+	"""
 	turns = state.wish_turns
 	drop = turn_advanced[None] & (turns == 2)
-	return state._replace(wish_turns=jnp.where(drop, 1, turns).astype(turns.dtype))
+	pending = turn_advanced[None] & (turns > 0)
+	age = state.wish_age.astype(jnp.int32)
+	age = jnp.where(pending, jnp.minimum(age + 1, MAX_AGE), age)
+	return state._replace(
+		wish_turns=jnp.where(drop, 1, turns).astype(turns.dtype),
+		wish_age=age.astype(state.wish_age.dtype),
+	)
 
 
 def wish_residual(state, enabled, key, forced, tables, rows):
@@ -67,24 +79,39 @@ def wish_residual(state, enabled, key, forced, tables, rows):
 		hp=jnp.where(slots, hp[:, None].astype(state.hp.dtype), state.hp),
 		wish_turns=left.astype(state.wish_turns.dtype),
 		wish_hp=jnp.where(resolve, 0, state.wish_hp).astype(state.wish_hp.dtype),
+		wish_age=jnp.where(resolve, 0, state.wish_age).astype(state.wish_age.dtype),
 	)
 
 
 def trick_room_residual(state, enabled, key, forced, tables, rows):
-	"""Trick Room (field order 27): the five turns count down and then end."""
+	"""Trick Room (field order 27): the five turns count down and then end.
+
+	The public age counts the turn ends since it started; it is zero once Trick Room ends.
+	"""
 	del key, forced, tables, rows
 	turns = state.trick_room.astype(jnp.int32)
 	tick = enabled & (turns > 0)
+	left = jnp.where(tick, turns - 1, turns)
+	age = state.trick_room_age.astype(jnp.int32)
+	age = jnp.where(tick & (left > 0), jnp.minimum(age + 1, MAX_AGE), age)
+	age = jnp.where(left == 0, 0, age)
 	return state._replace(
-		trick_room=jnp.where(tick, turns - 1, turns).astype(state.trick_room.dtype)
+		trick_room=left.astype(state.trick_room.dtype),
+		trick_room_age=age.astype(state.trick_room_age.dtype),
 	)
 
 
 def apply_trick_room(state, enabled):
-	"""Using Trick Room while it stands ends it; otherwise it starts for five turns."""
+	"""Using Trick Room while it stands ends it; otherwise it starts for five turns.
+
+	Starting and ending both restart the public age at zero (-fieldstart / -fieldend).
+	"""
 	new = jnp.where(state.trick_room > 0, 0, TRICK_ROOM_TURNS)
 	return state._replace(
-		trick_room=jnp.where(enabled, new, state.trick_room).astype(state.trick_room.dtype)
+		trick_room=jnp.where(enabled, new, state.trick_room).astype(state.trick_room.dtype),
+		trick_room_age=jnp.where(enabled, 0, state.trick_room_age).astype(
+			state.trick_room_age.dtype
+		),
 	)
 
 
