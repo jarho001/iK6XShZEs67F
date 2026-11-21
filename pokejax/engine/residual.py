@@ -30,6 +30,7 @@ from .items import (
 	HARVEST_BERRY,
 	apply_residual_status_items,
 	apply_residual_white_herb,
+	eat_lum_after_status,
 	gather_active_items,
 	residual_hp_item,
 	reveal_active_items,
@@ -75,6 +76,8 @@ from .state import (
 from .status import inflict_status
 from .volatiles import confuse_sides
 
+DEFAULT_ORDER = 99
+
 
 class ResidualRow(NamedTuple):
 	order: int
@@ -94,14 +97,20 @@ def _residual_tie_first(key, forced, context, kind=ORDER):
 	return jnp.where(current >= 0, current, jnp.where(legacy >= 0, legacy, sampled))
 
 
-def _apply_damage(state, damage, enabled, first, bench_alive, healing=0):
-	"""Commit a Pokemon residual row, stopping after a battle-ending KO."""
+def _apply_damage(state, damage, enabled, first, bench_alive, healing=0, gated=True):
+	"""Commit a Pokemon residual row, stopping after a battle-ending KO.
+
+	gated=False applies both sides' effects of one callback whatever either faint (Leech Seed:
+	the seeded loses HP, then the seeder heals or, through Liquid Ooze, loses HP).
+	"""
 	slots = jnp.arange(TEAM_SLOTS)[None, :] == state.active[:, None]
 	before = state.hp[SIDES, state.active].astype(jnp.int32)
 	after = jnp.maximum(before - damage, 0) + healing
 	loses = (damage > 0) & (after == 0) & ~bench_alive
 	first_mask = SIDES == first
-	enabled = enabled & (first_mask | ~jnp.any(loses & first_mask & enabled))
+	enabled = enabled & jnp.ones((2,), jnp.bool_)
+	if gated:
+		enabled = enabled & (first_mask | ~jnp.any(loses & first_mask & enabled))
 	loses &= enabled
 	winner = jnp.where(loses[0], 1, 0).astype(state.winner.dtype)
 	return state._replace(
@@ -235,7 +244,9 @@ def _ability_order28(state, enabled, first, bench_alive, tables, item_rows, rows
 	foe_sleeping = state.status[foe, active[foe]] == SLEEP
 	dreams = live & (hook == RESIDUAL_BAD_DREAMS) & foe_sleeping & (foe_hp > 0)
 	dream_damage = jnp.where(dreams, jnp.maximum(foe_max // 8, 1), 0)
-	dream_damage = jnp.where(has_hook(rows[foe], MAGIC_GUARD), 0, dream_damage)
+	# Gen 5 Magic Guard blocks the damage silently (no -activate), so Bad Dreams is not shown.
+	dreams &= ~has_hook(rows[foe], MAGIC_GUARD)
+	dream_damage = jnp.where(dreams, dream_damage, 0)
 	damage = dream_damage[::-1]
 	state, still_enabled = _apply_damage(state, damage, enabled, first, bench_alive)
 	state = _harvest(state, still_enabled, key, forced, tables, rows)
@@ -245,7 +256,9 @@ def _ability_order28(state, enabled, first, bench_alive, tables, item_rows, rows
 def _harvest(state, enabled, key, forced, tables, rows):
 	active = state.active
 	hp = state.hp[SIDES, active]
-	last_item = state.item_public[SIDES, active].astype(jnp.int32)
+	# lastItem is the berry the member ate, whatever item was named in the protocol since (a Trick
+	# can hand it another one).
+	last_item = state.last_item[SIDES, active].astype(jnp.int32)
 	item_rows = tables.item_hooks.rows[last_item]
 	weather = effective_weather(state, rows)
 	sun = weather == SUN
@@ -260,6 +273,7 @@ def _harvest(state, enabled, key, forced, tables, rows):
 	state = state._replace(
 		item=jnp.where(write, last_item[:, None].astype(state.item.dtype), state.item),
 		item_consumed=jnp.where(write, False, state.item_consumed),
+		last_item=jnp.where(write, 0, state.last_item).astype(state.last_item.dtype),
 		item_revealed=state.item_revealed | write,
 	)
 	return reveal_abilities(state, restore)
@@ -374,9 +388,9 @@ def _leech_pass(state, side, enabled, bench_alive, tables, rows):
 	damage = jnp.where(SIDES == side, dealt, 0) + jnp.where(seeder_side & ooze, dealt, 0)
 	room = jnp.maximum(seeder_max - seeder_hp, 0)
 	healing = jnp.where(seeder_side & ~ooze, jnp.minimum(dealt, room), 0)
-	# The seeded side's faint does not stop the seeder's heal in the same callback, so
-	# the seeder is the first side for the gate.
-	state, _ = _apply_damage(state, damage, live, seeder, bench_alive, healing)
+	# One callback: the seeded side's faint does not stop the seeder's heal, nor the seeder's
+	# faint (Liquid Ooze) the seeded side's damage.
+	state, _ = _apply_damage(state, damage, live, seeder, bench_alive, healing, gated=False)
 	state = reveal_abilities(state, (SIDES == side) & ooze & live)
 	return state, live
 
@@ -403,6 +417,7 @@ def _yawn(state, enabled, first, bench_alive, key, forced, tables, rows):
 	state = state._replace(volatiles=volatiles)
 	for side in (first, 1 - first):
 		state = inflict_status(state, side, SLEEP, ends[side], key, forced, tables, rows)
+		state = eat_lum_after_status(state, (SIDES == side) & ends[side], rows, tables)
 	return state
 
 
@@ -413,7 +428,6 @@ def _yawn(state, enabled, first, bench_alive, key, forced, tables, rows):
 # ability rows come from data/conditions.ts, data/moves.ts, data/items.ts and
 # data/abilities.ts plus Gen 5's inherited condition overrides.
 RESIDUAL_TABLE = (
-	ResidualRow(0, 2, "Locked moves", "global", _locked_move),
 	ResidualRow(1, 5, "weather", "field", weather_residual),
 	ResidualRow(3, 3, "Future Sight", "slot", None),
 	ResidualRow(4, 3, "Wish", "global", wish_residual),
@@ -447,6 +461,9 @@ RESIDUAL_TABLE = (
 	),
 	ResidualRow(28, 3, "Toxic Orb and Flame Orb", "item", apply_residual_status_items),
 	ResidualRow(29, 0, "End-of-turn item hooks", "item", _end_turn_items),
+	# A condition without onResidualOrder (lockedmove) has order false, which sorts after every
+	# numbered order. It sees the status left by Shed Skin, Hydration or Yawn.
+	ResidualRow(DEFAULT_ORDER, 2, "Locked moves", "global", _locked_move),
 )
 
 

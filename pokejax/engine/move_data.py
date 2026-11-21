@@ -100,6 +100,7 @@ class MoveRow(NamedTuple):
 	move_call: jax.Array
 	move_reflectable: jax.Array
 	move_relic_forme: jax.Array
+	move_scripted: jax.Array
 
 
 MOVE_FIELDS = MoveRow._fields[1:]

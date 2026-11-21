@@ -10,7 +10,7 @@ the same rule; Disable gets one less because it starts at five).
 
 import jax.numpy as jnp
 
-from .abilities import status_immunity
+from .abilities import reveal_abilities, status_immunity
 
 SIDES = jnp.arange(2)
 from .state import (
@@ -96,6 +96,14 @@ def apply_restrictions(state, side, row, hit, foe_pending, tables, rows, weather
 		& (state.status[foe, target] == HEALTHY)
 		& ~immune
 	)
+	# TryAddVolatile: Insomnia, Vital Spirit and Leaf Guard (in sun) name themselves and refuse.
+	ability_refused = (
+		hit
+		& (status == VOLATILE_YAWN)
+		& (volatiles[foe, YAWN] == 0)
+		& (state.status[foe, target] == HEALTHY)
+		& immune
+	)
 	volatiles = _write(volatiles, foe_sides, yawn, YAWN, YAWN_TURNS)
 
 	grass = jnp.any(state.types[foe, target] == tables.grass_type)
@@ -108,7 +116,8 @@ def apply_restrictions(state, side, row, hit, foe_pending, tables, rows, weather
 		| (hit & (status == VOLATILE_YAWN) & ~yawn)
 		| (hit & (status == VOLATILE_LEECH_SEED) & ~seed)
 	)
-	return state._replace(volatiles=volatiles), failed
+	state = reveal_abilities(state._replace(volatiles=volatiles), foe_sides & ability_refused)
+	return state, failed
 
 
 def encore_override(state, side, move_id, tables):

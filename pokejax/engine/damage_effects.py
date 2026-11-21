@@ -4,6 +4,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 
 from .abilities import (
@@ -27,12 +28,12 @@ from .abilities import (
 	MAGIC_GUARD,
 	MUMMY_IMMUNE,
 	OBLIVIOUS,
-	POWDER_IMMUNITY,
 	ROCK_HEAD,
 	SHIELD_DUST,
 	SKILL_LINK,
 	STATUS,
 	STATUS_SUN,
+	UNNERVE,
 	absorb_hit,
 	absorption,
 	absorption_no_effect,
@@ -46,7 +47,7 @@ from .damage import accuracy_hit, damage_for_hits, move_damage_bases, type_match
 from .events import EFFECT_IMMUNE, EFFECT_NEUTRAL, EFFECT_NONE, EFFECT_RESISTED, EFFECT_SUPER
 from .facts import active_facts
 from .field import effective_move_type
-from .items import CONTACT_ROCKY_HELMET, damage_survival
+from .items import BERRY_SITRUS, CONTACT_ROCKY_HELMET, damage_survival, eat_lum_after_status
 from .move_data import read_move
 from .move_effects import apply_healing_active
 from .randomness import (
@@ -60,6 +61,7 @@ from .restrictions import VOLATILE_LEECH_SEED
 from .state import (
 	ATK,
 	BURN,
+	DESTINY_BOND,
 	DISABLE_MOVE,
 	DISABLE_REMAINING,
 	ENDURE,
@@ -78,6 +80,15 @@ from .variable_moves import record_damage_taken
 
 NO_SELF_FAINT, SELF_FAINT_ALWAYS, SELF_FAINT_ON_HIT = 0, 1, 2
 MAX_HITS = 5
+# earlier_hit[i, j]: hit j comes before hit i. A masked sum over j replaces a cumulative sum, which
+# fuses with its producers instead of becoming a separate reduce-window kernel.
+_HIT_ORDER = np.arange(MAX_HITS)
+_EARLIER_HIT = _HIT_ORDER[None, :] < _HIT_ORDER[:, None]
+
+
+def _before_sum(values):
+	"""Per hit, the sum of values over the hits before it."""
+	return jnp.sum(jnp.where(_EARLIER_HIT, values[None, :], 0), axis=1)
 
 
 class HitResult(NamedTuple):
@@ -101,6 +112,7 @@ class HitResult(NamedTuple):
 	heal_full: jax.Array
 	sub_refused: jax.Array
 	reach: jax.Array
+	sub_landed: jax.Array
 
 
 def _round_fraction(value, numerator, denominator):
@@ -109,10 +121,11 @@ def _round_fraction(value, numerator, denominator):
 	return lax.div(value * numerator.astype(jnp.int32) + denominator // 2, denominator)
 
 
-def _apply_contact_statuses(state, side, foe, row, hit_landed, key, forced, tables, rows):
+def _apply_contact_statuses(
+	state, side, foe, row, hit_landed, key, forced, tables, rows, attacker_berry
+):
 	"""Resolve contact statuses and Disable across the fixed five-hit axis."""
 	target_hook = rows[foe, CONTACT]
-	powder_allowed = ~has_hook(rows[side], POWDER_IMMUNITY)
 	indices = jnp.arange(MAX_HITS, dtype=jnp.int32)
 	landed = hit_landed & row.move_contact
 	defender_roll = chance(key, forced, ABILITY_CHANCE, foe, 2 * indices, 3, 10)
@@ -137,7 +150,8 @@ def _apply_contact_statuses(state, side, foe, row, hit_landed, key, forced, tabl
 			),
 		),
 	).astype(jnp.int32)
-	attempt = landed & (((static | flame) & defender_roll) | (spore & powder_allowed))
+	# Gen 5 has no powder immunity (Overcoat only blocks weather damage, Grass types are not immune).
+	attempt = landed & (((static | flame) & defender_roll) | spore)
 	attempt &= candidates != HEALTHY
 	slot = state.active[side]
 	active_status = state.status[side, slot]
@@ -171,6 +185,15 @@ def _apply_contact_statuses(state, side, foe, row, hit_landed, key, forced, tabl
 	state = synchronize_status(
 		state, side, foe, inflicted, source_status_applied, key, forced, tables, rows
 	)
+	# Lum Berry eats at once (onAfterSetStatus), before anything that follows the hit, such as the
+	# fatigue confusion that ends Outrage.
+	state = eat_lum_after_status(
+		state,
+		(SIDES == side) & source_status_applied,
+		rows,
+		tables,
+		jnp.where(SIDES == side, attacker_berry, 0),
+	)
 	curse = target_hook == CONTACT_CURSED_BODY
 	curse_trigger = jnp.any(hit_landed & curse & defender_roll)
 	curse_trigger &= state.volatiles[side, DISABLE_REMAINING] == 0
@@ -197,6 +220,21 @@ def _apply_contact_statuses(state, side, foe, row, hit_landed, key, forced, tabl
 	return reveal_abilities(state, ability_reveal), ability_reveal
 
 
+def _burned_after_hits(state, side, foe, row, count, key, forced, tables, rows, indices):
+	"""Hits that follow a Flame Body burn of the attacker. The burn lands between hits and halves
+	the physical damage of the later ones. A hit is assumed to land (a faint ends the move anyway)."""
+	roll = chance(key, forced, ABILITY_CHANCE, foe, 2 * indices, 3, 10)
+	trigger = (rows[foe, CONTACT] == CONTACT_FLAME_BODY) & row.move_contact & roll
+	trigger &= indices < count
+	slot = state.active[side]
+	types = state.types[side, slot]
+	immune = jnp.any((types >= 0) & tables.status_immune[BURN, jnp.maximum(types, 0)])
+	immune |= tables.weather_status_immune[effective_weather(state, rows), BURN]
+	immune |= (rows[side, STATUS] & (1 << BURN)) != 0
+	trigger &= (state.status[side, slot] == HEALTHY) & ~immune
+	return _before_sum(trigger.astype(jnp.int32)) > 0
+
+
 def apply_poison_touch(state, side, row, hit_landed, key, forced, tables, rows):
 	"""Poison Touch runs as onSourceDamagingHit after move secondaries."""
 	foe = 1 - side
@@ -218,7 +256,8 @@ def apply_poison_touch(state, side, row, hit_landed, key, forced, tables, rows):
 		rows,
 	)
 	applied = (before == HEALTHY) & (state.status[foe, state.active[foe]] == POISON)
-	state = synchronize_status(state, side, foe, POISON, applied, key, forced, tables, rows)
+	# The poisoned foe is the status receiver: its Synchronize copies the poison back.
+	state = synchronize_status(state, foe, side, POISON, applied, key, forced, tables, rows)
 	return reveal_abilities(state, (SIDES == side) & applied)
 
 
@@ -250,9 +289,8 @@ def apply_damage_effects(
 	pre_faint = enabled & (self_faint_kind == SELF_FAINT_ALWAYS)
 
 	sub_hp = state.volatiles[foe, SUBSTITUTE].astype(jnp.int32)
-	sub_target = (sub_hp > 0) & row.move_target_foe & ~row.move_bypass_sub
-	# A status move aimed at a substitute fails with no effect (TryPrimaryHit returns null).
-	blocked = guarded | invulnerable | (sub_target & (row.move_category == 2))
+	sub_target = (sub_hp > 0) & (row.move_target_foe | row.move_scripted) & ~row.move_bypass_sub
+	blocked = guarded | invulnerable
 	checked_hit = accuracy_hit(
 		state, side, row, key, forced, t, rows, weather, switching_foe=switching_foe
 	)
@@ -282,7 +320,9 @@ def apply_damage_effects(
 	# A fainted target is retargeted with no effect and shows no immunity (Levitate included).
 	reveal_ability = absorbed | oblivious
 	reveal_ability |= enabled & levitate & immune_for_move & ~invulnerable & (target_hp_before > 0)
-	blocked |= absorbed | oblivious
+	# TryHit (absorbing abilities, Oblivious) runs before the substitute, which then makes a
+	# status move aimed at it fail with no effect (TryPrimaryHit returns null).
+	blocked |= absorbed | oblivious | (sub_target & (row.move_category == 2))
 	gem_trigger = enabled & ~blocked & checked_hit & (row.move_category != 2)
 	gem_trigger &= (row.id != t.struggle_id) & (item_rows.gem_type[side] == type_)
 	gem_trigger &= (target_hp_before > 0) & ~immune
@@ -306,8 +346,21 @@ def apply_damage_effects(
 		facts=facts,
 	)
 	hit_indices = jnp.arange(MAX_HITS, dtype=jnp.int32)
+	burn_after = _burned_after_hits(state, side, foe, row, count, key, forced, t, rows, hit_indices)
 	damage, can_damage, critical = damage_for_hits(
-		state, side, row, hit_indices, bases, key, forced, t, item_rows, rows, type_, facts
+		state,
+		side,
+		row,
+		hit_indices,
+		bases,
+		key,
+		forced,
+		t,
+		item_rows,
+		rows,
+		type_,
+		facts,
+		burn_after,
 	)
 	move_success = enabled & ~blocked & checked_hit & can_damage
 	scheduled = (hit_indices < count) & move_success
@@ -331,15 +384,56 @@ def apply_damage_effects(
 		jnp.maximum(target_hp_before - 1, 0),
 		raw_active_damage,
 	)
-	cumulative = jnp.cumsum(raw_active_damage)
-	prior_damage = cumulative - raw_active_damage
+	prior_damage = _before_sum(raw_active_damage)
 	# Endure retains one HP even after the raw prefix reaches the target's HP.
 	# Those later hits still land and can trigger contact effects.
 	minimum_hp = endure.astype(jnp.int32)
 	hp_before_hits = jnp.maximum(target_hp_before - prior_damage, minimum_hp)
-	dealt = jnp.minimum(raw_active_damage, hp_before_hits - minimum_hp)
+	# A Sitrus Berry goes off in the Update after any hit but the last of a multi-hit move, and
+	# the later hits meet the healed HP. (After a single hit or the last one, the Update that
+	# follows the move eats it.)
+	hp_after_hits = jnp.maximum(hp_before_hits - raw_active_damage, minimum_hp)
+	unnerved = has_hook(rows[side], UNNERVE) & (state.hp[side, user] > 0)
+	sitrus_ready = (item_rows.berry_kind[foe] == BERRY_SITRUS) & ~unnerved
+	eat_after = sitrus_ready & active_hits & (hit_indices < count - 1) & (hp_before_hits > 0)
+	eat_after &= (hp_after_hits > 0) & (2 * hp_after_hits <= target_maximum)
+	eat_after &= hp_after_hits < target_maximum
+	eats_mid_move = jnp.any(eat_after)
+	ate_before = _before_sum(eat_after.astype(jnp.int32)) > 0
+	eaten_now = eat_after & ~ate_before
+	berry_heal = jnp.sum(
+		jnp.where(
+			eaten_now,
+			jnp.minimum(jnp.maximum(target_maximum // 4, 1), target_maximum - hp_after_hits),
+			0,
+		)
+	)
+	hp_before_hits = jnp.maximum(
+		target_hp_before - prior_damage + jnp.where(ate_before, berry_heal, 0), minimum_hp
+	)
 	hit_landed = active_hits & (hp_before_hits > 0)
-	total_damage = jnp.minimum(cumulative[-1], jnp.maximum(target_hp_before - minimum_hp, 0))
+	user_hp = state.hp[side, user].astype(jnp.int32)
+	user_max = state.stats[side, user, HP].astype(jnp.int32)
+	target_hook = rows[foe, CONTACT]
+	magic_guard = has_hook(rows[side], MAGIC_GUARD)
+	# Every landed contact hit costs the user its Rocky Helmet and Rough Skin (or Iron Barbs)
+	# damage, and a user that faints stops the move (hitStepMoveHitLoop): later hits never happen.
+	helm_each = jnp.where(
+		(item_rows.contact_kind[foe] == CONTACT_ROCKY_HELMET) & ~magic_guard,
+		jnp.maximum(user_max // 6, 1),
+		0,
+	)
+	skin_each = jnp.where(
+		((target_hook == CONTACT_ROUGH_SKIN) | (target_hook == CONTACT_IRON_BARBS)) & ~magic_guard,
+		jnp.maximum(user_max // 8, 1),
+		0,
+	)
+	contact_cost = jnp.where(hit_landed & row.move_contact, helm_each + skin_each, 0)
+	user_alive_for_hit = user_hp - _before_sum(contact_cost) > 0
+	hit_landed &= user_alive_for_hit
+	raw_active_damage = jnp.where(user_alive_for_hit, raw_active_damage, 0)
+	dealt = jnp.minimum(raw_active_damage, hp_before_hits - minimum_hp)
+	total_damage = jnp.sum(dealt)
 	success = total_damage > 0
 	drain_fraction = row.move_drain
 	drain = _round_fraction(dealt, drain_fraction[0], drain_fraction[1])
@@ -354,12 +448,10 @@ def apply_damage_effects(
 		0,
 	)
 	drain = drain + jnp.sum(sub_drain)
-	user_hp = state.hp[side, user].astype(jnp.int32)
-	user_max = state.stats[side, user, HP].astype(jnp.int32)
 	contact_hits = jnp.sum(hit_landed & row.move_contact).astype(jnp.int32)
 	helm_damage = jnp.maximum(user_max // 6, 1) * contact_hits
 	helm_trigger = (item_rows.contact_kind[foe] == CONTACT_ROCKY_HELMET) & (helm_damage > 0)
-	target_hook = rows[foe, CONTACT]
+	helm_trigger &= ~magic_guard
 	liquid_ooze = (target_hook == CONTACT_LIQUID_OOZE) & (drain > 0)
 	liquid_damage = jnp.where(liquid_ooze, drain, 0)
 	contact_ability_damage = (target_hook == CONTACT_ROUGH_SKIN) | (
@@ -369,11 +461,10 @@ def apply_damage_effects(
 	contact_ability_damage = jnp.where(
 		contact_ability_damage, jnp.maximum(user_max // 8, 1) * contact_hits, 0
 	)
-	target_hp_after_move = jnp.maximum(target_hp_before - total_damage, 0)
+	target_hp_after_move = jnp.maximum(target_hp_before + berry_heal - total_damage, 0)
 	aftermath = (target_hook == CONTACT_AFTERMATH) & row.move_contact & success
 	aftermath &= (target_hp_before > 0) & (target_hp_after_move == 0)
 	aftermath_damage = jnp.where(aftermath, jnp.maximum(user_max // 4, 1), 0)
-	magic_guard = has_hook(rows[side], MAGIC_GUARD)
 	helm_damage = jnp.where(magic_guard, 0, helm_damage)
 	contact_ability_damage = jnp.where(magic_guard, 0, contact_ability_damage)
 	liquid_damage = jnp.where(magic_guard, 0, liquid_damage)
@@ -386,6 +477,9 @@ def apply_damage_effects(
 	contact_self_damage = contact_ability_damage + jnp.where(helm_trigger, helm_damage, 0)
 	contact_self_damage += aftermath_damage + liquid_damage
 	user_hp = jnp.maximum(user_hp - contact_self_damage, 0)
+	# The DamagingHit contact abilities (Static, Flame Body, Effect Spore, Cursed Body) run after
+	# this damage but before recoil, crash damage and Life Orb: they see this HP.
+	hp_after_contact = user_hp
 	# Aftermath, Rough Skin, Iron Barbs and Rocky Helmet damage are instafaint in Gen 5: the
 	# attacker is processed first in the faint queue, so the holder that fainted in this move
 	# is the last entry (checkWin names the holder's side).
@@ -443,7 +537,9 @@ def apply_damage_effects(
 	)
 	state, absorbed_hp = absorb_hit(state, foe, rows[foe], absorbed, target_hp_before)
 	active_hp = state.hp[SIDES, state.active].astype(jnp.int32)
-	active_hp = jnp.where(SIDES == foe, jnp.maximum(absorbed_hp - total_damage, 0), active_hp)
+	active_hp = jnp.where(
+		SIDES == foe, jnp.maximum(absorbed_hp + berry_heal - total_damage, 0), active_hp
+	)
 	active_hp = jnp.where(SIDES == side, user_hp, active_hp)
 	# These move-table effects are mutually exclusive with primary move effects.
 	# Resolve them in this common HP write so every action scatters active HP once.
@@ -452,21 +548,39 @@ def apply_damage_effects(
 	)
 	active_slots = jnp.arange(state.hp.shape[1])[None, :] == state.active[:, None]
 	hp = jnp.where(active_slots, active_hp[:, None].astype(state.hp.dtype), state.hp)
-	state = state._replace(hp=hp)
-	state, contact_reveals = _apply_contact_statuses(
-		state, side, foe, row, hit_landed, key, forced, t, rows
+	contact_hp = jnp.where(
+		active_slots & (SIDES == side)[:, None], hp_after_contact.astype(hp.dtype), hp
 	)
+	state, contact_reveals = _apply_contact_statuses(
+		state._replace(hp=contact_hp),
+		side,
+		foe,
+		row,
+		hit_landed,
+		key,
+		forced,
+		t,
+		rows,
+		item_rows.berry_kind[side],
+	)
+	state = state._replace(hp=hp)
 	weak_armor = (target_hook == CONTACT_WEAK_ARMOR) & (row.move_category == 0)
-	target_alive_after_move = target_hp_after_move > 0
-	weak_count = jnp.sum(hit_landed & (damage > 0)).astype(jnp.int32)
-	weak_count = jnp.where(target_alive_after_move, weak_count, 0)
+	# Each hit triggers Weak Armor and Justified while the target is still alive after that hit.
+	alive_after_hit = hp_before_hits - dealt > 0
+	weak_count = jnp.sum(hit_landed & (damage > 0) & alive_after_hit).astype(jnp.int32)
 	weak_count = jnp.where(weak_armor, weak_count, 0)
 	justified = (target_hook == CONTACT_JUSTIFIED) & (type_ == t.dark_type)
-	justified &= target_alive_after_move
-	justified_count = jnp.sum(hit_landed & justified).astype(jnp.int32)
+	justified_count = jnp.sum(hit_landed & justified & alive_after_hit).astype(jnp.int32)
 	target_fainted = (target_hp_before > 0) & (target_hp_after_move == 0)
+	mummy_trigger = (target_hook == CONTACT_MUMMY) & (contact_hits > 0)
+	mummy_trigger &= ~has_hook(rows[side], MUMMY_IMMUNE)
+	mummy_trigger &= state.ability[side, user] != t.mummy_id
 	moxie = (rows[side, BOOST_EVENT] == BOOST_EVENT_MOXIE) & target_fainted
 	moxie &= moxie_user_alive
+	# Mummy (a DamagingHit of the same hit) replaces Moxie before the target's faint is processed.
+	moxie &= ~mummy_trigger
+	# A Destiny Bond holder's faint takes the attacker down before Moxie can boost it.
+	moxie &= state.volatiles[foe, DESTINY_BOND] == 0
 	delta = jnp.zeros((2, state.boosts.shape[-1]), state.boosts.dtype)
 	stats = jnp.arange(state.boosts.shape[-1])
 	target_delta = jnp.where(
@@ -485,9 +599,6 @@ def apply_damage_effects(
 	weak_reveals &= (stages_before[foe, 1] > -6) | (stages_before[foe, 4] < 6)
 	justified_reveals = justified & (justified_count > 0) & (stages_before[foe, 0] < 6)
 	moxie_reveals = moxie & (stages_before[side, 0] < 6)
-	mummy_trigger = (target_hook == CONTACT_MUMMY) & (contact_hits > 0)
-	mummy_trigger &= ~has_hook(rows[side], MUMMY_IMMUNE)
-	mummy_trigger &= state.ability[side, user] != t.mummy_id
 	member_mask = (SIDES == side)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == user)
 	state = state._replace(
 		ability=jnp.where(
@@ -495,11 +606,16 @@ def apply_damage_effects(
 		)
 	)
 	state = reveal_abilities(state, (SIDES == side) & mummy_trigger)
+	# Gen 5 Magic Guard blocks the damage silently, so Rough Skin, Iron Barbs and Liquid Ooze stay
+	# unnamed against it.
 	contact_reveals |= (SIDES == foe) & (
 		((target_hook == CONTACT_ROUGH_SKIN) | (target_hook == CONTACT_IRON_BARBS))
 		& (contact_hits > 0)
+		& ~magic_guard
 	)
-	contact_reveals |= (SIDES == foe) & ((aftermath & (aftermath_damage > 0)) | liquid_ooze)
+	contact_reveals |= (SIDES == foe) & (
+		(aftermath & (aftermath_damage > 0)) | (liquid_ooze & ~magic_guard)
+	)
 	contact_reveals |= (SIDES == foe) & weak_reveals
 	contact_reveals |= (SIDES == foe) & justified_reveals
 	contact_reveals |= (SIDES == side) & moxie_reveals
@@ -507,7 +623,7 @@ def apply_damage_effects(
 	contact_reveals |= ((SIDES == side) | (SIDES == foe)) & mummy_trigger
 	state = reveal_abilities(state, contact_reveals)
 	item_consumptions = (SIDES == side) & gem_trigger
-	item_consumptions |= (SIDES == foe) & sash_trigger
+	item_consumptions |= (SIDES == foe) & (sash_trigger | eats_mid_move)
 	sub_mask = (SIDES == foe)[:, None] & sub_target
 	sub_mask &= jnp.arange(state.volatiles.shape[1])[None, :] == SUBSTITUTE
 	sub_left = (sub_hp - jnp.sum(sub_dealt)).astype(state.volatiles.dtype)
@@ -561,6 +677,7 @@ def apply_damage_effects(
 	sub_refused = (
 		enabled & ~guarded & ~invulnerable & sub_target & (row.move_category == 2) & checked_hit
 	)
+	sub_refused &= ~absorbed & ~oblivious
 	return state, HitResult(
 		success,
 		effect_hit,
@@ -580,4 +697,5 @@ def apply_damage_effects(
 		heal_full,
 		sub_refused,
 		enabled & ~blocked & checked_hit,
+		sub_hits,
 	)

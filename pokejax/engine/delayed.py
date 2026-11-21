@@ -134,14 +134,17 @@ def faint_active(state, side, enabled):
 def apply_healing_wish(state, side, enabled):
 	"""Healing Wish needs a living replacement and an empty slot; the user then faints.
 
-	Returns (state, placed). The user faints only when the slot condition is placed.
+	Returns (state, placed, no_replacement). With no living replacement the move's TryHit stops
+	it before anything happens (the user does not faint); with a slot condition already pending
+	it still runs and the user faints.
 	"""
 	user = state.active[side]
 	slots = jnp.arange(TEAM_SLOTS)
 	bench = (state.hp[side] > 0) & (slots != user)
+	no_replacement = enabled & ~jnp.any(bench)
 	placed = enabled & jnp.any(bench) & ~state.healing_wish[side]
 	healing = jnp.where((SIDES == side) & placed, True, state.healing_wish)
-	return state._replace(healing_wish=healing), placed
+	return state._replace(healing_wish=healing), placed, no_replacement
 
 
 def healing_wish_switch_in(state, switch_mask, targets):

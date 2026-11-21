@@ -294,7 +294,8 @@ def build_item_hook_table(tables: Tables) -> ItemHookTable:
 def gather_active_items(state, tables) -> ActiveItemRows:
 	"""Gather each active held-item row and species condition once per hook."""
 	ids = state.item[SIDES, state.active].astype(jnp.int32)
-	species = state.species[SIDES, state.active].astype(jnp.int32)
+	# Light Ball, Thick Club, Soul Dew, Stick and Eviolite read baseSpecies, which Transform keeps.
+	species = state.species_base[SIDES, state.active].astype(jnp.int32)
 	species_number = tables.species_num[species].astype(jnp.int32)
 	rows = tables.item_hooks.rows[ids]
 	stat_species = (rows[:, STAT_SPECIES_RESTRICTED] == 0) | jnp.any(
@@ -350,8 +351,11 @@ def reveal_active_items(state, sides):
 	return update_item_state(state, jnp.zeros((2,), jnp.bool_), sides)
 
 
-def update_item_state(state, consumed_sides, revealed_sides, tables=None):
-	"""Write consumption and reveal events through one dense active-slot mask."""
+def update_item_state(state, consumed_sides, revealed_sides, tables=None, ability_rows=None):
+	"""Write consumption and reveal events through one dense active-slot mask.
+
+	ability_rows (the active abilities' rows, when the caller has them) saves a table gather.
+	"""
 	held = state.item[SIDES, state.active]
 	consume = consumed_sides & (held != 0)
 	reveal = (revealed_sides | consume) & (held != 0)
@@ -360,22 +364,28 @@ def update_item_state(state, consumed_sides, revealed_sides, tables=None):
 	reveal_mask = reveal[:, None] & slots
 	volatiles = state.volatiles
 	if tables is not None:
-		ability_rows = tables.ability_hooks[state.ability[SIDES, state.active].astype(jnp.int32)]
+		if ability_rows is None:
+			ability_rows = tables.ability_hooks[
+				state.ability[SIDES, state.active].astype(jnp.int32)
+			]
 		unburden = (ability_rows[:, SPEED] == SPEED_UNBURDEN) & consume
 		columns = jnp.arange(state.volatiles.shape[1])
 		volatiles = jnp.where(unburden[:, None] & (columns[None, :] == UNBURDEN), 1, volatiles)
 	return state._replace(
 		item=jnp.where(consume_mask, 0, state.item),
 		item_consumed=state.item_consumed | consume_mask,
+		last_item=jnp.where(
+			consume_mask, held[:, None].astype(state.last_item.dtype), state.last_item
+		),
 		item_revealed=state.item_revealed | reveal_mask,
 		item_public=jnp.where(reveal_mask, held[:, None], state.item_public),
 		volatiles=volatiles,
 	)
 
 
-def consume_active_items(state, sides, tables=None):
+def consume_active_items(state, sides, tables=None, ability_rows=None):
 	"""Consume active items through one consolidated dense member write."""
-	return update_item_state(state, sides, jnp.zeros((2,), jnp.bool_), tables)
+	return update_item_state(state, sides, jnp.zeros((2,), jnp.bool_), tables, ability_rows)
 
 
 def item_type_matches(type_, side, rows):
@@ -483,7 +493,37 @@ def update_active_items(state, enabled, rows, abilities=None, ignore_confusion=F
 		hp=hp_team,
 		boosts=boosts,
 	)
-	return consume_active_items(state, consume | white_herb, tables)
+	return consume_active_items(state, consume | white_herb, tables, abilities)
+
+
+def eat_lum_after_status(state, sides, abilities, tables, berry_kind=None):
+	"""Lum Berry's onAfterSetStatus: a holder given a status eats the berry at once.
+
+	The ordinary Update would cure it later; this is for a status set inside the residual
+	(Yawn), where a later residual handler (lockedmove) already sees the cure.
+	"""
+	active = state.active
+	held = state.item[SIDES, active]
+	if berry_kind is None:
+		berry_kind = tables.item_hooks.rows[held.astype(jnp.int32), BERRY_KIND]
+	eat = sides & (berry_kind == BERRY_LUM) & berry_allowed(state, abilities)
+	eat &= (state.status[SIDES, active] != HEALTHY) & (state.hp[SIDES, active] > 0)
+	member = (jnp.arange(TEAM_SLOTS)[None, :] == active[:, None]) & eat[:, None]
+	columns = jnp.arange(state.volatiles.shape[1])[None, :]
+	unburden = eat & (abilities[:, SPEED] == SPEED_UNBURDEN)
+	volatiles = jnp.where(eat[:, None] & (columns == CONFUSION), 0, state.volatiles)
+	volatiles = jnp.where(unburden[:, None] & (columns == UNBURDEN), 1, volatiles)
+	# One write for the cure and the consumption (what update_item_state would do for the berry).
+	return state._replace(
+		status=jnp.where(member, HEALTHY, state.status),
+		status_counter=jnp.where(member, 0, state.status_counter),
+		volatiles=volatiles,
+		item=jnp.where(member, 0, state.item),
+		item_consumed=state.item_consumed | member,
+		last_item=jnp.where(member, held[:, None].astype(state.last_item.dtype), state.last_item),
+		item_revealed=state.item_revealed | member,
+		item_public=jnp.where(member, held[:, None], state.item_public),
+	)
 
 
 def clear_broken_choice_locks(state, tables):

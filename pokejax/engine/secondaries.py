@@ -56,8 +56,15 @@ def apply_secondaries(
 	weather,
 	sheer,
 	items,
+	first_sub=False,
+	later_sub=False,
 ):
-	"""Roll both secondary rows together, then write active effects by side."""
+	"""Roll both secondary rows together, then write active effects by side.
+
+	first_sub and later_sub mark hits that landed on a substitute. Showdown still rolls the
+	secondaries for them (the target is null), so the user's own effects (a self boost such as
+	Flame Charge) apply while the target's effects do not.
+	"""
 	row = read_move(tables, move)
 	rows = jnp.arange(SECONDARY_SLOTS)
 	later_forced = (
@@ -73,12 +80,16 @@ def apply_secondaries(
 		(later_bits % 100) < chance_[0],
 	)
 	any_later = jnp.any(later_passed & later_hits)
+	any_later_self = jnp.any(later_passed & (later_hits | later_sub))
 	required_species = row.move_secondary_user_species
 	user_species = state.species[side, state.active[side]]
 	eligible = (required_species == 0) | (user_species == required_species)
-	first_pass = first_hit & chance(key, forced, SECONDARY, side, rows, chance_, 100)
-	apply = eligible & (first_pass | ((rows == 0) & any_later))
+	rolled = chance(key, forced, SECONDARY, side, rows, chance_, 100)
+	first_pass = first_hit & rolled
 	self_effect = row.move_secondary_self
+	apply_target = first_pass | ((rows == 0) & any_later)
+	apply_self = ((first_hit | first_sub) & rolled) | ((rows == 0) & any_later_self)
+	apply = eligible & jnp.where(self_effect, apply_self, apply_target)
 	apply &= ~sheer & (self_effect | ~has_hook(abilities[1 - side], SHIELD_DUST))
 	targets = jnp.where(self_effect, side, 1 - side)
 	by_side = targets[:, None] == SIDES

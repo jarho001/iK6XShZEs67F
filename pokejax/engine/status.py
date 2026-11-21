@@ -147,8 +147,9 @@ def before_move(state, side, move, enabled, key, forced, tables, ability_rows, r
 	can_act = enabled & ~paralyzed
 	reason = first_cut(reason, before, can_act, CANT_PARALYSIS)
 	# Destiny Bond ends when its user attempts any other move: its BeforeMove handler (priority
-	# -1) still runs after a sleep, flinch or paralysis check has stopped the move.
-	destiny_clear = started & (row.move_self_volatile != 4)
+	# -1) still runs after a sleep, flinch or paralysis check has stopped the move. A stopped
+	# move (even Destiny Bond itself) also ends it through MoveAborted.
+	destiny_clear = started & ((row.move_self_volatile != 4) | ~can_act)
 	state = set_active_volatile(
 		state,
 		side,

@@ -20,6 +20,7 @@ from .abilities import (
 	MELOETTA_NUM,
 	effective_weather,
 	reveal_abilities,
+	start_slow_start,
 )
 from .actions import SIDES
 from .state import ILLUSION_SLOT, NUM_STATS, ROOST, SUBSTITUTE, SUN, TEAM_SLOTS, TRANSFORMED
@@ -91,6 +92,35 @@ def sync_weather_formes(state, tables, rows):
 	changed = (castform | cherrim) & (target != state.species[SIDES, active])
 	# The protocol names the forme with the ability as its source, which reveals the ability.
 	return reveal_abilities(set_species(state, changed, target, tables), changed)
+
+
+def leaving_forme(state, old, old_rows, leaving, weather, tables):
+	"""Forecast and Flower Gift of a Pokemon that is still on the field while a faster entrant's
+	switch-in changes the weather: it changes forme (publicly) before it leaves in its own turn.
+
+	old is the state before the switches and old_rows its active ability rows; only the shown
+	species of the leaver's team slot changes, since leaving restores the base species anyway.
+	"""
+	slot = old.active
+	free = (old.hp[SIDES, slot] > 0) & (old.volatiles[:, TRANSFORMED] == 0)
+	castform = leaving & free & (old_rows[:, FORM] == FORECAST_NUM)
+	cherrim = leaving & free & (old_rows[:, FORM] == FLOWER_GIFT_NUM)
+	target = jnp.where(
+		castform,
+		tables.castform_forms[weather],
+		tables.cherrim_forms[(weather == SUN).astype(jnp.int32)],
+	)
+	changed = (castform | cherrim) & (target != old.species[SIDES, slot])
+	mask = (jnp.arange(TEAM_SLOTS)[None, :] == slot[:, None]) & changed[:, None]
+	held = old.ability[SIDES, slot]
+	return state._replace(
+		shown_species=jnp.where(
+			mask, target[:, None].astype(state.shown_species.dtype), state.shown_species
+		),
+		ability_public=jnp.where(
+			mask, held[:, None].astype(state.ability_public.dtype), state.ability_public
+		),
+	)
 
 
 def relic_song_forme(state, enabled, tables):
@@ -177,14 +207,16 @@ def foe_view(state, slot):
 	)
 
 
-def switch_foe_view(old, new, switching, first):
+def switch_foe_view(old, new, switching, first, replacement=False):
 	"""Each side's view of its foe at the side's own switch-in.
 
 	runSwitch runs the entering Pokemon in action order: a foe that enters after this side is
-	still the old active when this side's switch-in effects run (Imposter, Trace).
+	still the old active when this side's switch-in effects run (Imposter, Trace). Faint
+	replacements are different: both instaswitch actions run before any runSwitch, so each
+	side already sees the new foe.
 	"""
 	foe = 1 - SIDES
-	later = switching[foe] & (first == SIDES)
+	later = switching[foe] & (first == SIDES) & ~jnp.asarray(replacement)
 	old_view = foe_view(old, old.active[foe])
 	new_view = foe_view(new, new.active[foe])
 	return jax.tree.map(
@@ -251,4 +283,5 @@ def transform_copy(state, enabled, tables, view):
 	volatiles = jnp.where(ok_moves & (columns[None, :] == TRANSFORMED), 1, state.volatiles)
 	state = state._replace(volatiles=volatiles.astype(state.volatiles.dtype))
 	changed = ok & (foe_ability != old_ability)
-	return state, changed
+	# setAbility runs the new ability's Start (only when it differs from the old one).
+	return start_slow_start(state, changed, tables), changed

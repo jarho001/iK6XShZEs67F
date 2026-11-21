@@ -4,6 +4,7 @@ Actions must be legal. Random outcomes retain engine.randomness addresses;
 masked arithmetic can evaluate unused outcomes without consuming randomness.
 """
 
+import jax
 import jax.numpy as jnp
 from jax import lax
 
@@ -17,6 +18,9 @@ from .abilities import (
 	PP_COST_PRESSURE,
 	SHEER_FORCE,
 	TRACE,
+	UNNERVE,
+	absorb_hit,
+	absorption,
 	active_abilities,
 	effective_weather,
 	has_hook,
@@ -64,8 +68,10 @@ from .forms import (
 from .illusion import break_illusion
 from .item_moves import apply_item_swap, apply_knock_off
 from .items import (
+	BERRY_SITRUS,
 	apply_after_move_items,
 	clear_broken_choice_locks,
+	consume_active_items,
 	gather_active_items,
 	gather_active_update_hooks,
 	update_active_items,
@@ -86,6 +92,7 @@ from .state import (
 	CONFUSION,
 	DESTINY_BOND,
 	FAKE_OUT_USED,
+	HP,
 	LOCKED_MOVE,
 	LOCKED_REMAINING,
 	LOCKED_TRUE_DURATION,
@@ -102,6 +109,7 @@ from .state import (
 	TEAM_SLOTS,
 	TOXIC_SPIKES,
 	TRACE_SEEK,
+	TRANSFORMED,
 	TURN_IDLE,
 	TURN_MOVES,
 	TURN_REPLACEMENT,
@@ -114,6 +122,7 @@ from .substitute import SELF_SUBSTITUTE, apply_substitute, substitute_allowed
 from .switching import (
 	copy_on_entry,
 	drag_in,
+	reset_status_counters,
 	run_switch_in,
 	switch_actions,
 	switch_handler_first,
@@ -188,8 +197,6 @@ def _move(
 	item_rows = gather_active_items(state, tables)
 	rows = move_abilities(ability_rows, side)
 	weather = effective_weather(state, rows)
-	# Sheer Force reads the queued move, before any Encore override (as before this pass).
-	sheer = has_hook(rows[side], SHEER_FORCE) & move_column(tables, queued, "move_sheer_force")
 	enabled &= (state.hp[side, user] > 0) & alive_before[foe] & (state.winner == ONGOING)
 	started = enabled
 	charging = state.volatiles[side, TWO_TURN_MOVE] > 0
@@ -267,6 +274,9 @@ def _move(
 	state = write_last_move(state, side, user, last_id, last_moved)
 	# Nature Power is a static call: the user uses Earthquake, and Nature Power keeps its PP.
 	row = select_row(calling, call_row, row)
+	# Sheer Force's ModifyMove reads the move that is really used: after an Encore override or a
+	# call by Sleep Talk or Nature Power.
+	sheer = has_hook(rows[side], SHEER_FORCE) & row.move_sheer_force
 	# A move aimed at a fainted foe is retargeted to nothing: |move| with [notarget], then -fail.
 	# Curse used by a non-Ghost targets its user (Showdown onModifyMove), so it has no foe target.
 	curse_self = (row.move_volatile_status == 5) & ~jnp.any(
@@ -324,17 +334,18 @@ def _move(
 		attack_allowed & (row.move_slot_condition == SLOT_WISH) & (state.wish_turns[side] != 0)
 	)
 	state = apply_wish(state, side, attack_allowed & (row.move_slot_condition == SLOT_WISH))
-	state, healing_placed = apply_healing_wish(
-		state, side, attack_allowed & (row.move_slot_condition == SLOT_HEALING_WISH)
-	)
-	healing_fail = attack_allowed & (row.move_slot_condition == SLOT_HEALING_WISH) & ~healing_placed
+	healing_move = attack_allowed & (row.move_slot_condition == SLOT_HEALING_WISH)
+	state, healing_placed, no_replacement = apply_healing_wish(state, side, healing_move)
+	healing_fail = healing_move & ~healing_placed
+	attack_allowed &= ~no_replacement
 	breaks_guard = attack_allowed & row.move_breaks_protect
 	state = clear_broken_guards(state, side, breaks_guard)
 	guarded, invulnerable = target_move_guards(state, side, row, tables, rows)
 	# TryHit: Magic Bounce reflects a reflectable move before its accuracy roll; the original
 	# move then does nothing, and the reflected move runs further down with the holder acting.
 	reflect = attack_allowed & row.move_reflectable & has_hook(rows[foe], MAGIC_BOUNCE)
-	reflect &= ~guarded & ~invulnerable
+	# A fainted target never reaches TryHit: the move already failed with [notarget].
+	reflect &= ~guarded & ~invulnerable & (state.hp[foe, state.active[foe]] > 0)
 	attack_allowed = attack_allowed & ~reflect
 	state, result = apply_damage_effects(
 		state,
@@ -361,7 +372,22 @@ def _move(
 	# accuracy check decides it, and the effects below act for the holder (acting) through the
 	# same effect calls, so each effect kind is compiled once.
 	bounce_hit = accuracy_hit(state, foe, row, key, forced, tables, rows, weather, kind=BOUNCE_HIT)
-	bounced = reflect & bounce_hit & (state.hp[side, user] > 0)
+	# TryHit of the reflected move: the original user's absorbing ability takes it before any
+	# accuracy check (Volt Absorb against a reflected Thunder Wave).
+	holder_types = state.types[side, user]
+	reflect_immune = row.move_checks_immunity & jnp.any(
+		(holder_types >= 0) & tables.type_immune[row.move_type, jnp.maximum(holder_types, 0)]
+	)
+	reflect_absorbed = absorption(
+		state, foe, rows[side], row.move_type, 0, reflect_immune, reflect, row, tables
+	)
+	state, healed_hp = absorb_hit(
+		state, side, rows[side], reflect_absorbed, state.hp[side, user].astype(jnp.int32)
+	)
+	user_slot = (SIDES == side)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == user)
+	state = state._replace(hp=jnp.where(user_slot, healed_hp.astype(state.hp.dtype), state.hp))
+	state = reveal_abilities(state, (SIDES == side) & reflect_absorbed)
+	bounced = reflect & bounce_hit & ~reflect_absorbed & (state.hp[side, user] > 0)
 	acting = jnp.where(reflect, foe, side)
 	effect_on = attack_allowed | reflect
 	effect_hit = jnp.where(reflect, bounced, hit)
@@ -376,7 +402,7 @@ def _move(
 		tables,
 		rows,
 		weather,
-		reach=jnp.where(reflect, reflect & bounce_hit, result.reach),
+		reach=jnp.where(reflect, reflect & bounce_hit & ~reflect_absorbed, result.reach),
 	)
 	state = reveal_abilities(state, result.ability_reveals | status_reveals)
 	# Roar and Whirlwind fail when the foe has no living bench member to drag in (canSwitch).
@@ -430,10 +456,15 @@ def _move(
 		weather,
 		sheer,
 		item_rows,
+		result.sub_landed[0],
+		result.sub_landed[1:],
 	)
 	state = apply_poison_touch(state, side, row, result.landed, key, forced, tables, rows)
 	knock = attack_allowed & row.move_knock_off & jnp.any(result.landed)
 	knock &= state.hp[side, user] > 0
+	# A Focus Sash that saved the target was already used up by its Damage event (takeItem
+	# finds nothing), so the sash counts as consumed, not knocked off.
+	knock &= ~result.item_consumptions[foe]
 	state = apply_knock_off(state, side, knock, tables, rows)
 	item_rows = gather_active_items(state, tables)
 	state = steal_berry(
@@ -445,7 +476,7 @@ def _move(
 	color_types = state.types[foe, color_target]
 	# Sheer Force removes the secondary hit that Color Change needs (AfterMoveSecondary).
 	color_trigger = attack_allowed & result.success & color_change & (row.move_category != 2)
-	color_trigger &= ~sheer
+	color_trigger &= ~sheer & (row.id != tables.struggle_id)
 	color_trigger &= (state.hp[foe, color_target] > 0) & (color_type >= 0)
 	color_trigger &= ~jnp.any(color_types == color_type)
 	color_member = (SIDES == foe)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == color_target)
@@ -469,13 +500,16 @@ def _move(
 		| ((row.move_hazard == 2) & (state.hazards[1 - acting, TOXIC_SPIKES] >= 2))
 		| ((row.move_weather > 0) & (row.move_weather == state.weather))
 	)
+	# Rapid Spin runs as onAfterHit, or onAfterSubDamage on a substitute hit, only while its user
+	# lives: Rocky Helmet or Rough Skin can faint the user first.
+	spin_hit = (effect_hit | result.sub_hit) & (state.hp[side, user] > 0)
 	state = apply_move_field_effects(
 		state,
 		acting,
 		row,
 		effect_on,
 		jnp.where(reflect, bounced, result.field_hit),
-		effect_hit,
+		spin_hit,
 		key,
 		forced,
 		tables,
@@ -504,7 +538,6 @@ def _move(
 	db_trigger &= (state.hp[foe, state.active[foe]] == 0) & (state.hp[side, user] > 0)
 	state = faint_active(state, side, db_trigger)
 	state = faint_active(state, side, healing_placed)
-	user_alive_before_after_move_item = state.hp[side, user] > 0
 	post_ability = tables.ability_hooks[state.ability[side, user].astype(jnp.int32)]
 	post_ability_rows = jnp.where((SIDES == side)[:, None], post_ability[None, :], ability_rows)
 	post_sheer = has_hook(post_ability_rows[side], SHEER_FORCE) & row.move_sheer_force
@@ -549,18 +582,39 @@ def _move(
 	confusion &= ~has_hook(rows[side], OWN_TEMPO)
 	fatigue_only = confusion & (state.volatiles[side, CONFUSION] == 0)
 	state = confuse(state, side, confusion, key, forced)
-	state = clear_broken_choice_locks(state, tables)
 	user_alive = state.hp[side, user] > 0
 	target_alive = state.hp[foe, state.active[foe]] > 0
 	bench_alive = (state.hp[side] > 0) & (jnp.arange(TEAM_SLOTS) != state.active[side])
 	pivot = enabled & row.move_self_switch & connected & user_alive
 	pivot &= jnp.any(bench_alive)
-	drag = enabled & row.move_force_switch & hit & user_alive_before_after_move_item & target_alive
+	# forceSwitch is checked in the same hit, before the contact damage that may faint the user, and
+	# the drag itself happens after the move, so a user that fainted to Rough Skin still drags.
+	drag = enabled & row.move_force_switch & hit & target_alive
 	# Trace's Update copies a copyable foe; its Start effects run with this move's switch-in.
 	state, traced = trace_copy(state, tables)
 	# A reflected Roar or Whirlwind drags the original user; Transform copies for the user.
 	bounce_drag = bounced & row.move_force_switch & (state.hp[side, user] > 0)
 	transform_on = attack_allowed & row.move_transform & hit
+	# Update runs after the hit and before the phazed target leaves, so its berry still goes off
+	# (Sitrus Berry after Dragon Tail). The incoming Pokemon gets its own Update below.
+	dragged_side = jnp.where(reflect, side, foe)
+	dragged_slot = state.active[dragged_side]
+	dragged_hp = state.hp[dragged_side, dragged_slot].astype(jnp.int32)
+	dragged_max = state.stats[dragged_side, dragged_slot, HP].astype(jnp.int32)
+	unnerved = has_hook(rows[1 - dragged_side], UNNERVE) & (
+		state.hp[1 - dragged_side, state.active[1 - dragged_side]] > 0
+	)
+	eats = started & (drag | bounce_drag) & (state.winner == ONGOING) & ~unnerved
+	eats &= item_rows.berry_kind[dragged_side] == BERRY_SITRUS
+	eats &= (dragged_hp > 0) & (2 * dragged_hp <= dragged_max) & (dragged_hp < dragged_max)
+	dragged_member = (SIDES == dragged_side)[:, None] & (
+		jnp.arange(TEAM_SLOTS)[None, :] == dragged_slot
+	)
+	healed = jnp.minimum(dragged_max, dragged_hp + jnp.maximum(dragged_max // 4, 1))
+	state = state._replace(
+		hp=jnp.where(dragged_member & eats, healed.astype(state.hp.dtype), state.hp)
+	)
+	state = consume_active_items(state, (SIDES == dragged_side) & eats)
 	state, dragged, ability_rows = drag_in(
 		state,
 		jnp.where(reflect, side, foe),
@@ -573,6 +627,8 @@ def _move(
 		copy_mask=(SIDES == side) & transform_on,
 		extra_starts=traced,
 	)
+	# The Choice lock ends once its move or item is gone, also when Transform replaced the moves.
+	state = clear_broken_choice_locks(state, tables)
 	# A final hit can run Update before the queue declares the winner.
 	# Fatigue confusion starts later, so only an ongoing game can cure it here.
 	alive_after = jnp.any(state.hp > 0, axis=1)
@@ -741,6 +797,14 @@ def step(state, actions, key, forced, engine_tables):
 	# A Pursuit user whose target chose a switch goes first, before the switch-out.
 	pursuer = pending & (moves == t.pursuit_id) & switch_mask[::-1] & (requests[::-1] == MOVE)
 	first = jnp.where(jnp.any(pursuer), jnp.argmax(pursuer), first_order).astype(jnp.int32)
+	# Pursuit's onBeforeSwitchOut removes the leaving Pokemon's Destiny Bond before it is hit.
+	leaving_pursued = switch_mask & pursuer[::-1]
+	bond_column = jnp.arange(state.volatiles.shape[1]) == DESTINY_BOND
+	state = state._replace(
+		volatiles=jnp.where(
+			leaving_pursued[:, None] & bond_column[None, :], 0, state.volatiles
+		).astype(state.volatiles.dtype)
+	)
 	state = state._replace(
 		turn_stage=jnp.where(start_turn, TURN_MOVES, state.turn_stage).astype(
 			state.turn_stage.dtype
@@ -808,10 +872,19 @@ def step(state, actions, key, forced, engine_tables):
 		handler_first = jnp.where(start_turn, first_order, handler_first)
 		before = state.hp[SIDES, state.active] > 0
 		state = switch_in_hazards(state, switching, handler_first, t, entrant_rows, previous)
+		# Each entrant's status SwitchIn handler runs before its own hazards, in speed order; when
+		# the faster side's hazards end the battle, the slower side's handler never runs.
+		cut_short = (SIDES != handler_first) & (state.winner != ONGOING)
+		cut_short &= state.hp[handler_first, state.active[handler_first]] == 0
+		state = reset_status_counters(state, switching & ~cut_short)
 		# Imposter (onSwitchIn) and Trace (onStart) copy the foe as it stands when this side's
 		# switch-in runs; a foe entering after it is still the old active.
-		view = switch_foe_view(previous[0], state, switching, first_order)
-		state, _ = copy_on_entry(state, switching, jnp.zeros((2,), jnp.bool_), t, view)
+		view = switch_foe_view(
+			previous[0], state, switching, first_order, jnp.any(requests == SWITCH)
+		)
+		state, _ = copy_on_entry(
+			state, switching, jnp.zeros((2,), jnp.bool_), t, view, SIDES == handler_first
+		)
 		# A seeking Trace whose holder leaves after its foe entered copies the new foe in that
 		# Update, before its own switch-out: only the public ability keeps the copy.
 		leaves_late = switching & switching[::-1] & (first_order == 1 - SIDES)
@@ -847,6 +920,9 @@ def step(state, actions, key, forced, engine_tables):
 		state = copy_state._replace(active=state.active, ability=state.ability)
 		item_rows = gather_active_items(state, t)
 		abilities = active_abilities(state, t)
+		# An Imposter whose foe starts first copies it after that Start (its Download boost).
+		late_copy = switching & (state.volatiles[:, TRANSFORMED] > 0)
+		late_copy &= switching[::-1] & (SIDES != handler_first)
 		state, abilities = run_switch_in(
 			state,
 			switching,
@@ -856,6 +932,36 @@ def step(state, actions, key, forced, engine_tables):
 			rows=abilities,
 			hazards=False,
 			before=before,
+			late_copy=late_copy,
+		)
+		# The Update after the faster entrant's switch-in also reaches the Pokemon that has still to
+		# leave: a berry it could not eat under that foe's Unnerve goes off before it leaves.
+		old = previous[0]
+		mid = state._replace(
+			active=jnp.where(leaves_late, old.active, state.active),
+			volatiles=jnp.where(leaves_late[:, None], old.volatiles, state.volatiles),
+			boosts=jnp.where(leaves_late[:, None], old.boosts, state.boosts),
+		)
+		leaver_rows = jax.tree.map(
+			lambda old_rows, new_rows: jnp.where(
+				leaves_late.reshape((2,) + (1,) * (old_rows.ndim - 1)), old_rows, new_rows
+			),
+			previous[1],
+			item_rows,
+		)
+		mid = update_active_items(
+			mid, leaves_late, leaver_rows, jnp.where(leaves_late[:, None], previous[2], abilities)
+		)
+		state = state._replace(
+			hp=mid.hp,
+			status=mid.status,
+			status_counter=mid.status_counter,
+			item=mid.item,
+			item_consumed=mid.item_consumed,
+			last_item=mid.last_item,
+			item_revealed=mid.item_revealed,
+			item_public=mid.item_public,
+			ability_public=mid.ability_public,
 		)
 		state = update_active_items(state, jnp.any(switching), item_rows, abilities, tables=t)
 		state = update_hooks(state, t)

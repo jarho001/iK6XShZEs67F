@@ -8,7 +8,7 @@ own switch-in effects (setAbility runs Start), so Intimidate and the weather set
 
 import jax.numpy as jnp
 
-from .abilities import NOTRACE, TRACE, has_hook, reveal_abilities
+from .abilities import NOTRACE, TRACE, has_hook, reveal_abilities, start_slow_start
 from .actions import SIDES
 from .state import TEAM_SLOTS, TRACE_SEEK
 
@@ -18,7 +18,8 @@ def trace_enter(state, entering, tables, view):
 	a copyable foe at once. `view` is the foe as seen at this switch-in (see forms.py)."""
 	active = state.active
 	rows = tables.ability_hooks[state.ability[SIDES, active].astype(jnp.int32)]
-	holder = entering & has_hook(rows, TRACE)
+	# A holder that a hazard already fainted never starts (fieldEvent skips fainted holders).
+	holder = entering & has_hook(rows, TRACE) & (state.hp[SIDES, active] > 0)
 	seek = holder & (view.ability != tables.noability_id)
 	foe_rows = tables.ability_hooks[view.ability.astype(jnp.int32)]
 	copyable = (
@@ -38,7 +39,7 @@ def trace_enter(state, entering, tables, view):
 		state.volatiles,
 	)
 	state = state._replace(ability=ability, volatiles=volatiles)
-	return reveal_abilities(state, copied)
+	return reveal_abilities(start_slow_start(state, copied, tables, foe_rows), copied)
 
 
 def trace_copy(state, tables):
@@ -65,4 +66,4 @@ def trace_copy(state, tables):
 		copied[:, None] & (columns[None, :] == TRACE_SEEK), 0, state.volatiles
 	).astype(state.volatiles.dtype)
 	state = state._replace(ability=ability, volatiles=volatiles)
-	return reveal_abilities(state, copied), copied
+	return reveal_abilities(start_slow_start(state, copied, tables, foe_rows), copied), copied

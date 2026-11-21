@@ -21,6 +21,7 @@ from .state import (
 	RAIN,
 	SAND,
 	SLEEP,
+	SLOW_START,
 	SMACKDOWN,
 	SUN,
 	TEAM_SLOTS,
@@ -81,11 +82,10 @@ SIDES = jnp.arange(2)
 	MAGIC_GUARD,
 	TRUANT,
 	MUMMY_IMMUNE,
-	POWDER_IMMUNITY,
-) = (1 << bit for bit in range(23))
+) = (1 << bit for bit in range(22))
 # Task 14 flags: Magic Bounce reflects, Trace seeks, Illusion disguises, Imposter copies on
 # switch-in. NOTRACE marks abilities Trace cannot copy (Showdown's notrace flag, Gen 5 list).
-MAGIC_BOUNCE, NOTRACE, ILLUSION, TRACE, IMPOSTER = (1 << bit for bit in range(23, 28))
+MAGIC_BOUNCE, NOTRACE, ILLUSION, TRACE, IMPOSTER = (1 << bit for bit in range(22, 27))
 # FORM holds the national-dex number of the only species whose base form this ability
 # changes (Castform, Cherrim); zero means none. The row is gated by species_base.
 FORECAST_NUM = 351
@@ -194,7 +194,6 @@ def build_ability_hooks(tables):
 		(MAGIC_GUARD, "magicguard"),
 		(TRUANT, "truant"),
 		(MUMMY_IMMUNE, "multitype"),
-		(POWDER_IMMUNITY, "overcoat"),
 		(MAGIC_BOUNCE, "magicbounce"),
 		(NOTRACE, "multitype trace forecast flowergift illusion imposter"),
 		(ILLUSION, "illusion"),
@@ -404,6 +403,22 @@ def active_abilities(state, tables):
 
 def has_hook(rows, flag):
 	return (rows[..., FLAGS] & flag) != 0
+
+
+def start_slow_start(state, sides, tables, rows=None):
+	"""Slow Start's onStart for an ability gained after the switch-in (Trace, Imposter, Transform).
+
+	Showdown keeps the counter in the ability's own state, so setAbility starts it at 5; an
+	ability that was there at the switch-in starts it with the switch itself. rows (the new
+	abilities' rows, when the caller has them) saves a table gather.
+	"""
+	if rows is None:
+		rows = tables.ability_hooks[state.ability[SIDES, state.active].astype(jnp.int32)]
+	begin = sides & (rows[:, RESIDUAL] == RESIDUAL_SLOW_START)
+	begin &= state.volatiles[:, SLOW_START] == 0
+	columns = jnp.arange(state.volatiles.shape[1])
+	volatiles = jnp.where(begin[:, None] & (columns[None, :] == SLOW_START), 5, state.volatiles)
+	return state._replace(volatiles=volatiles.astype(state.volatiles.dtype))
 
 
 def move_abilities(rows, side):

@@ -8,6 +8,7 @@ Step numbers in reports are zero-based; ``initial`` precedes every action.
 import argparse
 import gzip
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -278,8 +279,11 @@ def recorded_state(snapshot, tables, initial_species=None):
 		"volatiles": np.asarray(
 			[[name in _compared_volatiles(side) for name in VOLATILE_KEYS] for side in sides]
 		),
+		# Metal Burst deals 1.5 times the damage, so a substitute can hold x.5 HP in Showdown.
+		# Damage is a whole number, so a x.5 HP substitute and one with HP rounded up break
+		# alike; the engine keeps the rounded-up whole number.
 		"substituteHp": np.asarray(
-			[side.get("volatileCounters", {}).get("substitute", 0) for side in sides]
+			[math.ceil(side.get("volatileCounters", {}).get("substitute", 0)) for side in sides]
 		),
 		"encoreMove": np.asarray(
 			[

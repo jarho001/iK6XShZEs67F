@@ -28,13 +28,20 @@ from .abilities import (
 	has_hook,
 	move_abilities,
 	reveal_abilities,
+	start_slow_start,
 	suppresses_weather,
 )
 from .actions import SIDES
 from .delayed import healing_wish_switch_in
 from .events import ENTRY_DRAGGED, write_entry
 from .field import apply_active_switch_hazards, set_weather
-from .forms import foe_view, restore_form, reveal_ability_ids, transform_copy
+from .forms import (
+	foe_view,
+	leaving_forme,
+	restore_form,
+	reveal_ability_ids,
+	transform_copy,
+)
 from .illusion import enter_illusion
 from .items import reveal_active_items, update_item_state
 from .order import action_speed
@@ -52,6 +59,7 @@ from .state import (
 	SUBSTITUTE,
 	TEAM_SLOTS,
 	TOXIC,
+	TRANSFORMED,
 	WIDE_GUARD,
 )
 from .trace import trace_enter
@@ -69,18 +77,30 @@ def swap_party(party, switch_mask, targets, outgoing):
 	return jnp.where(switch_mask[:, None], swapped, party).astype(party.dtype)
 
 
-def copy_on_entry(state, switching, copy_mask, tables, view):
+def copy_on_entry(state, switching, copy_mask, tables, view, trace_first=None):
 	"""Imposter (onSwitchIn) and Trace (onStart) for the entering members, from the foe's view.
 
 	copy_mask adds Transform's user (not entering). Returns (state, changed): the sides whose
 	ability became a new one, which run their Start effects with the switch-in effects. The
-	copied Imposter ability is public (the protocol names it).
+	copied Imposter ability is public (the protocol names it). trace_first marks the sides whose
+	switch-in effects run first: an Imposter that copies a Trace holder after that Trace has
+	copied its own foe takes the traced ability, not Trace.
 	"""
 	imposter = switching & has_hook(active_abilities(state, tables), IMPOSTER)
 	held = state.ability[SIDES, state.active]
 	state, changed = transform_copy(state, imposter | copy_mask, tables, view)
 	state = reveal_ability_ids(state, changed & imposter, held)
-	return trace_enter(state, switching, tables, view), changed
+	traced = trace_enter(state, switching, tables, view)
+	if trace_first is not None:
+		foe = SIDES[::-1]
+		foe_before = state.ability[foe, state.active[foe]]
+		foe_after = traced.ability[foe, traced.active[foe]]
+		late = imposter & (state.volatiles[:, TRANSFORMED] > 0)
+		late &= trace_first[foe] & (foe_after != foe_before)
+		member = (jnp.arange(TEAM_SLOTS)[None, :] == traced.active[:, None]) & late[:, None]
+		ability = jnp.where(member, foe_after[:, None].astype(traced.ability.dtype), traced.ability)
+		traced = start_slow_start(traced._replace(ability=ability), late, tables)
+	return traced, changed
 
 
 def switch_members(state, switch_mask, targets, tables, rows=None):
@@ -137,13 +157,8 @@ def switch_members(state, switch_mask, targets, tables, rows=None):
 		state.seen_order,
 	)
 
-	target_status = state.status[SIDES, targets]
-	counter = state.status_counter[SIDES, targets]
-	counter = jnp.where(target_status == TOXIC, 0, counter)
-	counter = jnp.where(target_status == SLEEP, state.sleep_start[SIDES, targets], counter)
 	target_mask = switch_mask[:, None] & (slots[None, :] == targets[:, None])
 	active_turns = jnp.where(target_mask, 0, state.active_turns)
-	status_counter_team = jnp.where(target_mask, counter[:, None], status_counter_team)
 	last_move = jnp.where(outgoing_mask & switch_mask[:, None], 0, state.last_move)
 	state = state._replace(
 		active=active,
@@ -158,6 +173,25 @@ def switch_members(state, switch_mask, targets, tables, rows=None):
 	)
 	state = healing_wish_switch_in(state, switch_mask, targets)
 	return enter_illusion(state, switch_mask, tables)
+
+
+def reset_status_counters(state, mask):
+	"""The SwitchIn event of a status: Toxic restarts at stage 0 and sleep at its start count.
+
+	It runs with the entrant's other SwitchIn handlers, so a faster entrant's hazard KO that
+	ends the battle leaves the slower side's counters as they were (see switch_block).
+	"""
+	active = state.active
+	status = state.status[SIDES, active]
+	counter = state.status_counter[SIDES, active]
+	counter = jnp.where(status == TOXIC, 0, counter)
+	counter = jnp.where(status == SLEEP, state.sleep_start[SIDES, active], counter)
+	member = mask[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == active[:, None])
+	return state._replace(
+		status_counter=jnp.where(member, counter[:, None], state.status_counter).astype(
+			state.status_counter.dtype
+		)
+	)
 
 
 def switch_actions(state, actions, switch_mask, tables, rows=None):
@@ -194,16 +228,23 @@ def drag_in(
 	switch_mask = (SIDES == side) & active
 	targets = jnp.where(switch_mask, target, state.active)
 	state = switch_members(state, switch_mask, targets, tables, rows)
+	state = reset_status_counters(state, switch_mask)
 	state = write_entry(state, switch_mask, ENTRY_DRAGGED)
 	if copy_mask is None:
 		copy_mask = jnp.zeros((2,), jnp.bool_)
+	# SwitchIn hazards run before an Imposter or Trace copy (a Ditto that copies a Flying foe is
+	# still grounded for Spikes).
+	pre_rows = active_abilities(state, tables)
+	state = switch_in_hazards(
+		state, switch_mask, side, tables, pre_rows, None, source, hazards=switch_mask
+	)
 	view = foe_view(state, state.active[::-1])
 	state, changed = copy_on_entry(state, switch_mask, copy_mask, tables, view)
 	# Hazards belong to the dragged-in member only; a copied Transform user runs Start effects.
 	starts = switch_mask | changed
 	if extra_starts is not None:
 		starts = starts | extra_starts
-	state, rows = run_switch_in(state, starts, side, tables, source, hazards=switch_mask)
+	state, rows = run_switch_in(state, starts, side, tables, source, hazards=False)
 	return (state, switch_mask) if source is None else (state, switch_mask, rows)
 
 
@@ -267,6 +308,7 @@ def run_switch_in(
 	rows=None,
 	hazards=True,
 	before=None,
+	late_copy=None,
 ):
 	"""Resolve hazards and Start effects in the order of their holders.
 
@@ -312,6 +354,7 @@ def run_switch_in(
 		state = state._replace(
 			item=temporary.item,
 			item_consumed=temporary.item_consumed,
+			last_item=temporary.last_item,
 			item_revealed=temporary.item_revealed,
 			item_public=temporary.item_public,
 			ability_public=temporary.ability_public,
@@ -358,6 +401,12 @@ def run_switch_in(
 	raw_delta = up.astype(jnp.int8) - down.astype(jnp.int8)
 	delta = boost_delta(raw_delta, rows, True)
 	boosts = apply_boost_delta(state.boosts, raw_delta, rows, True)
+	if late_copy is not None:
+		# An Imposter that copies after its foe's Start takes the foe's boosts as that Start left
+		# them (its Download), and the foe's Intimidate drop on it is overwritten by the copy.
+		own = apply_boost_delta(state.boosts, up.astype(jnp.int8), rows, True)
+		late = apply_boost_delta(own[::-1], up.astype(jnp.int8), rows, True)
+		boosts = jnp.where(late_copy[:, None], late, boosts)
 	defiant_revealed = rows[:, BOOST_EVENT] == BOOST_EVENT_DEFIANT
 	defiant_revealed &= jnp.any(delta < 0, axis=-1) & (boosts[:, 0] > state.boosts[:, 0])
 	blocked_intimidate = (
@@ -377,6 +426,13 @@ def run_switch_in(
 	weather = rows[:, WEATHER]
 	state, first_changed = set_weather(state, weather[first], starts[first], 0, ability=True)
 	weather_changed = faster & first_changed
+	if previous is not None:
+		# A Pokemon that leaves after the faster entrant started sees that switch-in's weather
+		# (or Cloud Nine, Air Lock) first: Forecast and Flower Gift change its shown forme.
+		mid_rows = jnp.where(old_target[:, None], old_abilities, rows)
+		mid_alive = jnp.where(old_target, old_alive, alive)
+		mid_weather = jnp.where(suppresses_weather(mid_rows, mid_alive), 0, state.weather)
+		state = leaving_forme(state, old, old_abilities, old_target, mid_weather, tables)
 	if not single:
 		last = 1 - first
 		state, last_changed = set_weather(state, weather[last], starts[last], 0, ability=True)

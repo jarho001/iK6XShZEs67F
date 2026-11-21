@@ -347,10 +347,23 @@ def move_damage_bases(
 
 
 def damage_for_hits(
-	state, side, move, hit_indices, bases, key, forced, tables, item_rows, rows, type_, facts=None
+	state,
+	side,
+	move,
+	hit_indices,
+	bases,
+	key,
+	forced,
+	tables,
+	item_rows,
+	rows,
+	type_,
+	facts=None,
+	burn_after=False,
 ):
 	"""Apply each hit's crit and roll to the shared damage bases.
 
+	burn_after marks the hits that follow a burn of the attacker inside the move (Flame Body).
 	Returns (damage, can_damage, critical): critical is the per-hit crit flag (events.py).
 	"""
 	row = read_move(tables, move)
@@ -377,7 +390,7 @@ def damage_for_hits(
 	)
 	denominator = CRIT_DENOMINATORS[ratio]
 	stab = jnp.any(facts.types[side] == type_)
-	burned = (facts.status[side] == BURN) & ~skip_burn(rows[side])
+	burned = ((facts.status[side] == BURN) | burn_after) & ~skip_burn(rows[side])
 
 	crit_roll = chance(key, forced, CRIT, side, hit_indices, 1, denominator)
 	critical = row.move_crit_always | ((ratio > 0) & crit_roll)

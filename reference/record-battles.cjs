@@ -246,7 +246,11 @@ function trackPublicAbilities(battle) {
 		const id = dex.toID(name);
 		if (!dex.abilities.get(id).exists) return;
 		const source = tags.find(tag => tag.startsWith('[of] '))?.slice(5);
-		const holders = (event === '-damage' && source ? [source, target] : [target, source]).flatMap(ref => this.sides.flatMap(side => side.pokemon)
+		// A damage, status or start line with "[of] Y" belongs to Y's ability (Rough Skin, Static,
+		// Cursed Body), which matters when both Pokemon have the same ability. A heal, boost or
+		// immunity names the target's own ability.
+		const ofFirst = ['-damage', '-status', '-start'].includes(event) && source;
+		const holders = (ofFirst ? [source, target] : [target, source]).flatMap(ref => this.sides.flatMap(side => side.pokemon)
 			.filter(p => p === ref || String(p) === ref));
 		const holder = holders.find(p => p.ability === id);
 		if (holder) revealed.set(holder, id);
@@ -402,6 +406,13 @@ function directCaller() {
 	return new Error().stack.split('\n')[3].trim().split(' ')[1];
 }
 
+// Hydration cures only its own holder and draws nothing, and Shed Skin draws once for its holder:
+// a tie of these handlers with at most one Shed Skin gives the same outcome in either order.
+function orderIndependentResidual(tied) {
+	return tied.every(h => ['hydration', 'shedskin'].includes(h.effect?.id)) &&
+		tied.filter(h => h.effect.id === 'shedskin').length <= 1;
+}
+
 function residualOrderOccurrence(order) {
 	if (order === false || order === 4 || order === 5 || order === 8 || order === 15 || order === 16 ||
 		order === 17 || order === 23 || order === 25) return 2;
@@ -541,6 +552,7 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 	let fixed = fixedMembers || battle.sides.map(side => side && [...side.pokemon]);
 	let outcomes = null;
 	let addresses;
+	let replaceable; // address -> exception name, for a record that a later one may take over
 	let scope = null;
 	let authorizedDraw = null;
 	function within(value, fn) {
@@ -553,12 +565,34 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 		authorizedDraw = reason;
 		try { return fn(); } finally { authorizedDraw = null; }
 	}
-	function record(kind, side, occurrence, value, detail = '') {
+	// replaceableAs names the exception under which this record may later give way to another record
+	// at the same address. Showdown shuffles each residual tie of equal order and suborder
+	// separately, but the engine reads one residual address per order: an order-independent tie
+	// (orderIndependentResidual) gives way to an order-5 item pair, which comes after the abilities'
+	// suborder. A Rest sleep draw is overwritten by Rest's fixed duration, so it gives way to
+	// the draw of another sleep in the same step. droppedAs names the exception under which a
+	// record is dropped, rather than recorded, when its address is taken: the default-order
+	// duration-only volatiles (Protect, Stall) sort after every numbered residual order and their
+	// order changes nothing.
+	function record(kind, side, occurrence, value, detail = '', replaceableAs = null, droppedAs = null) {
 		assert(outcomes, 'Random outcome outside a step');
 		const address = `${kind}:${side}:${occurrence}`;
+		if (droppedAs && addresses.has(address)) {
+			stats.exceptions[droppedAs] = (stats.exceptions[droppedAs] || 0) + 1;
+			return;
+		}
+		if (replaceable.has(address)) {
+			const name = replaceable.get(address);
+			outcomes.splice(outcomes.findIndex(row =>
+				row.kind === kind && row.side === side && row.occurrence === occurrence), 1);
+			addresses.delete(address);
+			replaceable.delete(address);
+			stats.exceptions[name] = (stats.exceptions[name] || 0) + 1;
+		}
 		assert(!addresses.has(address),
 			`Duplicate outcome address ${address}: ${addresses.get(address)} vs ${detail}`);
 		addresses.set(address, detail);
+		if (replaceableAs) replaceable.set(address, replaceableAs);
 		outcomes.push({ kind, side, occurrence, value });
 	}
 	function wrap(object, method, makeScope) {
@@ -649,7 +683,16 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 		const rule = OUTCOME_RULES.find(rule => rule.method === 'random' && rule.matches(randomScope, caller, args));
 		assert(rule, `Unclassified battle.random at ${caller}: ${args}`);
 		const value = allow(rule.kind, () => battleRandom.apply(this, args));
-		record(rule.kind, ...rule.address(randomScope), rule.value(value, randomScope));
+		const address = rule.address(randomScope);
+		// Rest overwrites the duration of the sleep it sets, so its own draw only matters when it is
+		// the only sleep of the side in the step.
+		const rest = rule.kind === 'sleep_duration' && this.activeMove?.id === 'rest';
+		if (rest && addresses.has(`${rule.kind}:${address[0]}:${address[1]}`)) {
+			stats.exceptions['rest-sleep-duration'] = (stats.exceptions['rest-sleep-duration'] || 0) + 1;
+		} else {
+			record(rule.kind, ...address, rule.value(value, randomScope), '',
+				rest ? 'rest-sleep-duration' : null);
+		}
 		return value;
 	};
 	const sample = battle.sample;
@@ -741,10 +784,21 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 			tied.every(h => h.effect?.id === 'noguard' && h.callback === h.effect.onAnyAccuracy) &&
 			tied[0].effectHolder.side !== tied[1].effectHolder.side) {
 			exception = 'identical-noguard-accuracy';
-		} else if (!scope && tied.length === 2 &&
+		} else if (scope?.kind === 'hit' && tied.length === 2 &&
+			tied.every(h => h.effect?.id === 'victorystar' && h.callback === h.effect.onAnyModifyAccuracy) &&
+			tied[0].effectHolder.side !== tied[1].effectHolder.side) {
+			// In singles only the holder's own moves are boosted, so the two chained modifiers
+			// never apply to the same move and their order cannot change the accuracy.
+			exception = 'identical-victorystar-accuracy';
+		} else if (tied.length === 2 && tied.every(h => h.effect?.id === 'unaware') &&
+			tied[0].effectHolder.side !== tied[1].effectHolder.side) {
+			// Each Unaware only rewrites the boosts of the foe of its own holder, so two of them
+			// never touch the same value (and a speed lookup has no active move at all).
+			exception = 'independent-unaware-order';
+		} else if (!scope && tied.length >= 2 &&
 			tied.every(h => DISABLE_RESTRICTIONS.has(h.effect?.id)) &&
 			tied.every(h => h.callback === h.effect.onDisableMove) &&
-			tied[0].effectHolder === tied[1].effectHolder) {
+			tied.every(h => h.effectHolder === tied[0].effectHolder)) {
 			exception = 'choice-disable-move-order';
 		} else if (!scope && tied.length === 2 && tied.every(h => h.effect?.id === 'whiteherb') &&
 			tied[0].effectHolder !== tied[1].effectHolder) {
@@ -762,7 +816,9 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 					'slp', 'tox', 'choiceband', 'choicespecs', 'choicescarf', 'healingwish',
 				].includes(h.effect.id) || SWITCH_START_ABILITIES.has(h.effect.id) ||
 					h.effect.id === 'slowstart' || h.effect.id === 'imposter' ||
-					h.effect.id === 'forecast' || h.effect.id === 'flowergift' || h.effect.id === 'trace') &&
+					h.effect.id === 'forecast' || h.effect.id === 'flowergift' || h.effect.id === 'trace' ||
+					// Truant's Start only clears its holder's own volatile (activeTurns is 0 on entry).
+					h.effect.id === 'truant') &&
 				battle.findPokemonEventHandlers(p, 'onAnySwitchIn').every(h => h.effect.id === 'whiteherb') &&
 				battle.findSideEventHandlers(p.side, 'onSideSwitchIn', undefined, p).length === 0 &&
 				battle.findSideEventHandlers(p.side, 'onSwitchIn', undefined, p)
@@ -796,11 +852,16 @@ function instrument(battle, stats, fixedMembers, { groupedSwitchInOnly = false }
 		const value = allow(exception || 'order', () => shuffle.call(this, list, start, end));
 		if (exception) stats.exceptions[exception] = (stats.exceptions[exception] || 0) + 1;
 		else record(rule.kind, ...rule.address(scope, tied), rule.value(value, list, start),
-			`shuffle ${scope?.kind} order=${tied[0]?.order} handlers=${tied.map(h => h.effect?.id).join(',')}`);
+			`shuffle ${scope?.kind} order=${tied[0]?.order} handlers=${tied.map(h => h.effect?.id).join(',')}`,
+			scope?.kind === 'residual' && orderIndependentResidual(tied) ?
+				'independent-residual-order' : null,
+			scope?.kind === 'residual' && tied[0]?.order === false ? 'independent-residual-order' : null);
 		return value;
 	};
 	return {
-		begin() { assert.equal(outcomes, null); outcomes = []; addresses = new Map(); },
+		begin() {
+			assert.equal(outcomes, null); outcomes = []; addresses = new Map(); replaceable = new Map();
+		},
 		setFixed(members) { fixed = members; },
 		end() { const result = outcomes; outcomes = null; return result; },
 	};
@@ -974,6 +1035,8 @@ async function main() {
 			poolSeed: pool.seed, policy: 'uniform over all legal moves and switches',
 			exhaustion: { every: 20, moves: exhaustionMoves, initialOverrides: false },
 			prngExceptions: [...EXCEPTIONS, 'singleton-frisk', 'identical-noguard-accuracy',
+				'identical-victorystar-accuracy', 'independent-residual-order', 'rest-sleep-duration',
+				'independent-unaware-order',
 				'empty-ability-WeatherChange', 'independent-ability-Update', 'singleton-trace'] });
 		for (let index = 0; index < count; index++) {
 			let record;

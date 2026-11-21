@@ -11,6 +11,7 @@ from pokejax.tables import load_tables
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests/fixtures/diff-phase1.jsonl.gz"
+REGRESS = ROOT / "tests/fixtures/diff-regress.jsonl.gz"
 
 
 def test_snapshot_status_mapping():
@@ -21,10 +22,30 @@ def test_snapshot_status_mapping():
 	assert recorded_state(snapshot, load_tables())["status"][0].tolist() == list(range(1, 7))
 
 
+def test_substitute_hp_rounds_up():
+	_, battles = load_recording(FIXTURE)
+	snapshot = copy.deepcopy(battles[0]["initialState"])
+	snapshot["sides"][0]["volatileCounters"] = {"substitute": 15.5}
+	snapshot["sides"][1]["volatileCounters"] = {"substitute": 16}
+	assert recorded_state(snapshot, load_tables())["substituteHp"].tolist() == [16, 16]
+
+
 @pytest.mark.parametrize("fixture", sorted((ROOT / "tests/fixtures").glob("diff-*.jsonl.gz")))
 def test_fixtures(fixture):
 	result = replay_file(fixture)
 	assert not result.mismatches, result.report()
+
+
+# diff-regress is made of battles from several recordings that first failed before the engine fixes
+# (reference/merge-recordings.cjs), each cut a few steps after its first mismatch.
+def test_regress_fixture_is_merged_battles():
+	header, battles = load_recording(REGRESS)
+	assert header["merged"] and header["count"] == len(battles) == 84
+	assert [battle["index"] for battle in battles] == list(range(len(battles)))
+	assert all(battle["source"]["file"].endswith(".jsonl.gz") for battle in battles)
+	assert len({(battle["source"]["file"], battle["source"]["index"]) for battle in battles}) == 84
+	result = replay_file(REGRESS)
+	assert result.battles == len(battles) and not result.mismatches, result.report()
 
 
 # The 300-battle recordings in work/diff/ (git-ignored) run only with --large.
@@ -47,6 +68,15 @@ def test_fixtures(fixture):
 		"longtail1",
 		"longtail2",
 		"pool",
+		"pool-seed2",
+		"seed6-boosts",
+		"seed6-effects2",
+		"seed6-field",
+		"seed6-resumable",
+		"seed6-secondaries",
+		"seed6-turns",
+		"seed6-longtail1",
+		"seed6-longtail2",
 	],
 )
 def test_large_recording(name):

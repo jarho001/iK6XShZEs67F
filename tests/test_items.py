@@ -187,7 +187,11 @@ def test_choice_lock_pp_exhaustion_broken_lock_and_switch_out(item_battle):
 def test_item_stat_modifier_rows(item_battle, item, stat, species, expected):
 	tables, engine, state = item_battle
 	state = held(tables, state, 0, item)
-	state = state._replace(species=state.species.at[0, 0].set(tables.species.index[species]))
+	number = tables.species.index[species]
+	state = state._replace(
+		species=state.species.at[0, 0].set(number),
+		species_base=state.species_base.at[0, 0].set(number),
+	)
 	rows = gather_active_items(state, engine)
 	assert int(apply_stat_modifier(jnp.int16(100), 0, stat, rows)) == expected
 	if item == "souldew":

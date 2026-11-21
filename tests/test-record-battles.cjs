@@ -2,6 +2,7 @@
 
 // Run with node --test tests/test-record-battles.cjs (requires pinned Showdown).
 const { acceptedMoves, instrument, isolationBattle, legalChoices, newStats, playBattle, snapshot, isolationMember } = require('../reference/record-battles.cjs');
+const { merge, parseSource } = require('../reference/merge-recordings.cjs');
 const { PRNG } = require('../reference/vendor/pokemon-showdown/dist/sim/prng');
 const { Battle } = require('../reference/vendor/pokemon-showdown/dist/sim/battle');
 const { Dex } = require('../reference/vendor/pokemon-showdown/dist/sim/dex');
@@ -506,4 +507,113 @@ test('pool profile plays pool teams exactly as generated', { skip: !fs.existsSyn
 	const record = playBattle(3, 1, pool, [], [], [], { profile: 'pool', teamIndices });
 	assert.ok(record.poolIndices.every(index => teamIndices.includes(index)));
 	record.poolIndices.forEach((index, side) => assert.deepEqual(record.teams[side], pool.teams[index]));
+});
+
+
+function pairBattle(pair, abilities, items, moves = ['tackle']) {
+	const battle = isolationBattle([5, 6, 7, 8]);
+	const stats = newStats();
+	const guard = instrument(battle, stats);
+	for (const [side, species] of pair.entries()) {
+		battle.setPlayer(`p${side + 1}`, {
+			name: `Side ${side}`,
+			team: [{ species, gender: 'M', ability: abilities[side], item: items[side], moves,
+				evs: { hp: 85, atk: 85, def: 85, spa: 85, spd: 85, spe: 85 } }],
+		});
+	}
+	return { battle, stats, guard };
+}
+
+test('a Victory Star pair tied on speed is an order-independent accuracy exception', () => {
+	const { battle, stats, guard } = pairBattle(['Vaporeon', 'Vaporeon'], ['victorystar', 'victorystar'], ['', '']);
+	try {
+		guard.begin();
+		battle.makeChoices('move 1', 'move 1');
+		const outcomes = guard.end();
+		assert(stats.exceptions['identical-victorystar-accuracy'] >= 1);
+		assert(outcomes.every(row => row.kind !== 'order' || row.occurrence !== 2));
+	} finally { battle.destroy(); }
+});
+
+test('a Hydration tie gives way to the order-5 item tie at the same residual address', () => {
+	const { battle, stats, guard } = pairBattle(['Vaporeon', 'Vaporeon'], ['hydration', 'hydration'],
+		['leftovers', 'blacksludge']);
+	try {
+		guard.begin();
+		battle.makeChoices('move 1', 'move 1');
+		const outcomes = guard.end();
+		assert.equal(outcomes.filter(row => row.kind === 'order' && row.occurrence === 2).length, 1);
+		assert.equal(stats.exceptions['independent-residual-order'], 1);
+	} finally { battle.destroy(); }
+});
+
+test('a Rest sleep draw gives way to the draw of another sleep of the same side in the step', () => {
+	const battle = isolationBattle([9, 10, 11, 12]);
+	const stats = newStats();
+	const guard = instrument(battle, stats);
+	try {
+		battle.setPlayer('p1', { name: 'Side 0', team: [{ species: 'Shuckle', gender: 'M',
+			ability: 'noability', item: 'chestoberry', moves: ['rest'] }] });
+		battle.setPlayer('p2', { name: 'Side 1', team: [{ species: 'Parasect', gender: 'M',
+			ability: 'noability', item: '', moves: ['spore'] }] });
+		battle.sides[0].active[0].hp = 100; // Rest fails at full HP
+		guard.begin();
+		battle.makeChoices('move 1', 'move 1');
+		const outcomes = guard.end();
+		// Spore's sleep is cured at once by the Chesto Berry; Rest then sleeps the holder again.
+		assert.equal(outcomes.filter(row => row.kind === 'sleep_duration' && row.side === 0).length, 1);
+		assert.equal(stats.exceptions['rest-sleep-duration'], 1);
+	} finally { battle.destroy(); }
+});
+
+test('a three-way DisableMove tie of one holder is an order-independent exception', () => {
+	const battle = createBattle(battles[0]);
+	try {
+		const stats = newStats();
+		const guard = instrument(battle, stats);
+		const holder = battle.sides[0].active[0];
+		const handler = id => {
+			const effect = battle.dex.conditions.get(id);
+			return { effect, callback: effect.onDisableMove, effectHolder: holder, order: false,
+				priority: 0, speed: 100, subOrder: 0, effectOrder: 0 };
+		};
+		guard.begin();
+		battle.speedSort(['taunt', 'choicelock', 'encore'].map(handler));
+		guard.end();
+		assert.equal(stats.exceptions['choice-disable-move-order'], 1);
+	} finally { battle.destroy(); }
+});
+
+test('a Truant lead tied with another entrant is an order-independent switch-in', () => {
+	const { battle, stats, guard } = (() => {
+		const battle = isolationBattle([13, 14, 15, 16]);
+		const stats = newStats();
+		const guard = instrument(battle, stats);
+		return { battle, stats, guard };
+	})();
+	try {
+		guard.begin();
+		for (const side of [0, 1]) {
+			battle.setPlayer(`p${side + 1}`, { name: `Side ${side}`, team: [{ species: 'Slaking',
+				gender: 'M', ability: 'truant', item: '', moves: ['tackle'],
+				evs: { hp: 85, atk: 85, def: 85, spa: 85, spd: 85, spe: 85 } }] });
+		}
+		guard.end();
+		assert.equal(stats.exceptions['empty-switchIn-order'], 1);
+	} finally { battle.destroy(); }
+});
+
+test('merge-recordings renumbers battles, cuts them after the given step and keeps their origin', () => {
+	assert.deepEqual(parseSource('work/diff/a.jsonl.gz:12@7'), { file: 'work/diff/a.jsonl.gz', index: 12, step: 7 });
+	assert.deepEqual(parseSource('a.jsonl:3'), { file: 'a.jsonl', index: 3, step: null });
+	const merged = merge([`${fixturePath}:3@4`, `${fixturePath}:1`], 2);
+	assert.equal(merged[0].count, 2);
+	assert.equal(merged.length, 3);
+	assert.deepEqual(merged[1].source, { file: 'diff-phase1.jsonl.gz', index: 3, step: 4 });
+	assert.equal(merged[1].index, 0);
+	assert.equal(merged[1].steps.length, 7);
+	assert.equal(merged[2].index, 1);
+	assert.equal(merged[2].steps.length, battles.find(battle => battle.index === 1).steps.length);
+	assert.throws(() => merge([`${fixturePath}:9999`]), /no battle/);
+	assert.throws(() => merge([]), /No sources/);
 });

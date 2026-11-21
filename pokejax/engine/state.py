@@ -146,6 +146,7 @@ class BattleState(NamedTuple):
 	item_knocked_off: jax.Array  # bool [2, 6], removed by Knock Off or another takeItem
 	item_revealed: jax.Array  # bool [2, 6], protocol has publicly named the item
 	item_public: jax.Array  # int16 [2, 6], last item ID named in the public protocol
+	last_item: jax.Array  # int16 [2, 6], Showdown lastItem: the item the member last consumed
 	nature: jax.Array
 	gender: jax.Array
 	evs: jax.Array

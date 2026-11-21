@@ -331,10 +331,12 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 		np.asarray(moves.target_names)[moves.target],
 		("normal", "any", "randomNormal", "allAdjacent", "allAdjacentFoes"),
 	)
+	# Counter, Mirror Coat and Metal Burst pick the foe as a scripted target (Pressure applies, and
+	# a substitute in front of the foe takes the hit).
+	scripted = np.asarray(moves.target_names)[moves.target] == "scripted"
 	pressure_target = target_foe | (
 		(np.asarray(moves.target_names)[moves.target] == "all")
-		# Counter, Mirror Coat and Metal Burst pick the foe as a scripted target.
-		| (np.asarray(moves.target_names)[moves.target] == "scripted")
+		| scripted
 		| moves.flags[:, moves.flag_names.index("mustpressure")]
 	)
 	spread = np.isin(
@@ -520,6 +522,7 @@ def build_engine_tables(tables: Tables) -> EngineTables:
 		move_call=call_moves,
 		move_reflectable=moves.flags[:, moves.flag_names.index("reflectable")],
 		move_relic_forme=np.asarray(moves.ids) == "relicsong",
+		move_scripted=scripted,
 	)
 	return EngineTables(
 		species_base_stats=jnp.asarray(tables.species.base_stats),

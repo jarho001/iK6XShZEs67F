@@ -286,10 +286,11 @@ def steal_berry(state, side, enabled, tables, rows):
 	steal = enabled & (berry > 0) & ~guarded & (state.hp[side, user] > 0)
 	taken = (SIDES == foe) & steal
 	# takeItem clears the item without setting lastItem, so it is not "consumed".
-	prior_consumed = state.item_consumed
+	prior_consumed, prior_last = state.item_consumed, state.last_item
 	state = update_item_state(state, taken, taken, tables)
 	state = state._replace(
-		item_consumed=jnp.where(taken[:, None], prior_consumed, state.item_consumed)
+		item_consumed=jnp.where(taken[:, None], prior_consumed, state.item_consumed),
+		last_item=jnp.where(taken[:, None], prior_last, state.last_item),
 	)
 	member = (SIDES == side)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == user)
 	status = state.status[side, user]

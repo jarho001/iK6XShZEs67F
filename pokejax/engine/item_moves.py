@@ -10,7 +10,13 @@ after the hit lands on the target. Gen 5 never sets itemKnockedOff (that flag is
 
 import jax.numpy as jnp
 
-from .abilities import ITEM_GUARD, ITEM_GUARD_STICKY_HOLD, SPEED, SPEED_UNBURDEN
+from .abilities import (
+	ITEM_GUARD,
+	ITEM_GUARD_STICKY_HOLD,
+	SPEED,
+	SPEED_UNBURDEN,
+	reveal_abilities,
+)
 from .actions import SIDES
 from .state import CHOICE_MOVE, TEAM_SLOTS, UNBURDEN
 
@@ -75,11 +81,13 @@ def apply_knock_off(state, side, enabled, tables, rows):
 	foe = 1 - side
 	target = state.active[foe]
 	item = state.item[foe, target].astype(jnp.int32)
-	species = tables.species_num[state.species[foe, target].astype(jnp.int32)]
+	species = tables.species_num[state.species_base[foe, target].astype(jnp.int32)]
 	plate = tables.item_take_species[item] == species
 	sticky = rows[foe, ITEM_GUARD] == ITEM_GUARD_STICKY_HOLD
 	removed = enabled & (item != 0) & ~plate & ~sticky
 	sides = (SIDES == foe) & removed
+	# Sticky Hold names itself when it stops the Knock Off (onTakeItem -activate).
+	state = reveal_abilities(state, (SIDES == foe) & enabled & (item != 0) & ~plate & sticky)
 	slots = jnp.arange(TEAM_SLOTS)[None, :] == target
 	write = sides[:, None] & slots
 	state = state._replace(

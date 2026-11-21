@@ -170,6 +170,7 @@ def reset(
 		item_knocked_off=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.bool_),
 		item_revealed=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.bool_),
 		item_public=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.int16),
+		last_item=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.int16),
 		nature=teams.nature.astype(jnp.int8),
 		gender=teams.gender.astype(jnp.int8),
 		evs=teams.evs.astype(jnp.uint8),
