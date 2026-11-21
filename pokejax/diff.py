@@ -10,6 +10,7 @@ import gzip
 import json
 import math
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from time import perf_counter
 
@@ -359,14 +360,14 @@ def recorded_state(snapshot, tables, initial_species=None):
 	}
 
 
-@jax.jit
-def _initial(teams, tables, forced):
+@partial(jax.jit, static_argnames="project")
+def _initial(teams, tables, forced, project=comparable):
 	states = jax.vmap(reset, in_axes=(None, 0, None, 0))(KEY, teams, tables, forced)
-	return states, comparable(states, tables)
+	return states, project(states, tables)
 
 
-@jax.jit
-def _replay(states, actions, forced, valid, offset, tables):
+@partial(jax.jit, static_argnames="project")
+def _replay(states, actions, forced, valid, offset, tables, project=comparable):
 
 	def advance(states, inputs):
 		actions, forced, valid, index = inputs
@@ -379,7 +380,7 @@ def _replay(states, actions, forced, valid, offset, tables):
 			out,
 			states,
 		)
-		return out, comparable(out, tables)
+		return out, project(out, tables)
 
 	states, history = jax.lax.scan(
 		advance,
@@ -457,11 +458,13 @@ def load_recording(path):
 	return header, battles
 
 
-def replay_file(path, *, recording=None) -> ReplayResult:
-	"""Replay ALL battles in fixed chunks, then compare exactly on the host."""
-	started = perf_counter()
-	header, battles = load_recording(path) if recording is None else recording
-	tables = load_tables()
+def replay_histories(header, battles, tables, project=comparable):
+	"""Replay every battle through one compiled step with forced outcomes and project each state.
+
+	project(states, tables) maps a batch of states to a pytree; the result has the projection of
+	the initial state and of the state after each step, per battle: [battles, steps + 1, ...].
+	Battles shorter than the longest repeat their last state. Returns (history, lengths).
+	"""
 	pool = team_pool_from_data(
 		dict(
 			header,
@@ -498,7 +501,7 @@ def replay_file(path, *, recording=None) -> ReplayResult:
 		end = min(start + BATTLE_CHUNK, len(battles))
 		indices = np.minimum(np.arange(start, start + BATTLE_CHUNK), end - 1)
 		chunk_teams = jax.tree.map(lambda x, indices=indices: x[indices], teams)
-		states, initial = _initial(chunk_teams, engine_tables, initial_forced[indices])
+		states, initial = _initial(chunk_teams, engine_tables, initial_forced[indices], project)
 		histories = [initial]
 		for offset in range(0, shape[1], STEP_CHUNK):
 			stop = min(offset + STEP_CHUNK, shape[1])
@@ -510,7 +513,13 @@ def replay_file(path, *, recording=None) -> ReplayResult:
 			chunk_forced[:, :n] = forced[indices, offset:stop]
 			chunk_valid[: end - start, :n] = valid[indices[: end - start], offset:stop]
 			states, history = _replay(
-				states, chunk_actions, chunk_forced, chunk_valid, np.int32(offset), engine_tables
+				states,
+				chunk_actions,
+				chunk_forced,
+				chunk_valid,
+				np.int32(offset),
+				engine_tables,
+				project,
 			)
 			histories.append(history)
 		host_history = jax.device_get(histories)
@@ -522,7 +531,17 @@ def replay_file(path, *, recording=None) -> ReplayResult:
 				*host_history,
 			)
 		)
-	actual = jax.tree.map(lambda *xs: np.concatenate(xs, axis=0), *parts)
+	return jax.tree.map(lambda *xs: np.concatenate(xs, axis=0), *parts), lengths
+
+
+def replay_file(path, *, recording=None) -> ReplayResult:
+	"""Replay ALL battles in fixed chunks, then compare exactly on the host."""
+	started = perf_counter()
+	header, battles = load_recording(path) if recording is None else recording
+	tables = load_tables()
+	actual, lengths = replay_histories(header, battles, tables)
+	magic_bounce = tables.abilities.index["magicbounce"]
+	shape = (len(battles), int(lengths.max()))
 	mismatches = []
 	for b, battle in enumerate(battles):
 		snapshots = [battle["initialState"]] + [record["state"] for record in battle["steps"]]
@@ -549,6 +568,19 @@ def replay_file(path, *, recording=None) -> ReplayResult:
 			different = actual[name][b] != wanted
 			if name == "types":
 				different &= wanted != NULL_TYPE
+			if name == "shownSpecies":
+				# The oracle's tracker only sees switch lines, so it keeps a Transform or a forme as
+				# shown until the member's next switch-in. A player knows both end when it leaves the
+				# field or faints: the engine shows the member's own species. A disguise (shown
+				# differs from the member's species) is still compared.
+				away = (np.arange(wanted.shape[-1]) != actual["active"][b][..., None]) | (
+					actual["hp"][b] == 0
+				)
+				different &= ~(away & (actual["shownSpecies"][b] == actual["species"][b]))
+			if name == "abilityPublic":
+				# The oracle's tracker patches Battle.add, which |move| lines do not use, so it never
+				# sees a Magic Bounce reflection ("|move|...|[from] ability: Magic Bounce").
+				different &= ~((wanted == 0) & (actual[name][b] == magic_bounce))
 			where = np.argwhere(different)
 			if where.size:
 				address = tuple(where[0])

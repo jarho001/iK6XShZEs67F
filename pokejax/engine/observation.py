@@ -26,6 +26,27 @@ sim/pokemon.ts:2096-2102 uses ceil(100*hp/maxhp), capped at 99 if damaged;
 Types follow the protocol: a species' types, changed by -start typechange (Color Change),
 by -transform (Transform, Imposter), and by forme changes that name the species. Roost's
 Flying removal is not announced (only -singleturn move: Roost is), so it is not shown.
+
+reference/player-view.cjs builds this same observation from one player's requests and protocol
+lines in Node, and pokejax/obs_diff.py compares the two at every decision point of recorded
+battles. What that check settled, beyond the fields above:
+
+- A member off the field shows the HP it had when it left (hp_seen): Regenerator's heal prints
+  nothing. A fainted member shows no status ("0 fnt").
+- How an item left is announced: -enditem with [eat], a used Gem or a Sash is use (item_consumed),
+  Knock Off, Trick, Switcheroo and a stolen berry are taken (item_knocked_off); getting an item
+  again clears both (item_gone).
+- The legal-action mask leaves out Shadow Tag, Arena Trap and Magnet Pull: the request says
+  maybeTrapped whenever the foe's species could have one, so the player cannot know.
+- A Transformed member keeps its own stats and base ability in its request (the copied ones are
+  the foe's, and show only where the protocol names an ability); a foe's lock (Outrage) is never
+  announced and is not observed; the own lock is the move request's single move without PP.
+- An Illusion holder is shown at the level of the member it copies. Which roster entry a later
+  switch-in belongs to is ambiguous while a holder is in play (the protocol names it only when
+  the disguise breaks), so obs_diff leaves the opponent's roster arrays out from the first time
+  a holder is on the field.
+- At the last decision point (no request follows) HP of members that left the field in the last
+  step and the stats after a forme change are what the last request said; obs_diff skips them.
 """
 
 from typing import NamedTuple
@@ -61,8 +82,11 @@ from .state import (
 	ENCORE_REMAINING,
 	FLASH_FIRE,
 	ILLUSION_SLOT,
+	ITEM_TAKEN,
+	ITEM_USED,
 	LEECH_SEED,
 	LOCKED_MOVE,
+	MOVE,
 	MUST_RECHARGE,
 	NONE,
 	ONGOING,
@@ -96,13 +120,13 @@ class OwnObservation(NamedTuple):
 	boosts: jax.Array  # float32 [7], atk/def/spa/spd/spe/accuracy/evasion
 	ability: jax.Array  # int16 [6]
 	item: jax.Array  # int16 [6], current held item IDs
-	item_consumed: jax.Array  # bool [6]
-	item_knocked_off: jax.Array  # bool [6]
+	item_consumed: jax.Array  # bool [6], gone by use (eaten, a Gem, a Sash)
+	item_knocked_off: jax.Array  # bool [6], gone by Knock Off, Trick, Thief or a stolen berry
 	# Active member's volatiles, from its own -start/-end/-activate lines. Durations are private.
 	confused: jax.Array  # float32 scalar: -start confusion
 	charging: jax.Array  # float32 scalar: -prepare (two-turn move), no duration
 	recharging: jax.Array  # float32 scalar: cant recharge is owed
-	locked: jax.Array  # float32 scalar: a locked move (Outrage) is in progress
+	locked: jax.Array  # float32 scalar: the move request offers only the locked move (Outrage)
 	trapped: jax.Array  # float32 scalar: -activate partial trap, source still active
 	substitute: jax.Array  # float32 scalar: -start Substitute (its HP is private)
 	encore: jax.Array  # float32 scalar: -start Encore
@@ -146,7 +170,6 @@ class OpponentObservation(NamedTuple):
 	confused: jax.Array  # float32 scalar
 	charging: jax.Array  # float32 scalar
 	recharging: jax.Array  # float32 scalar
-	locked: jax.Array  # float32 scalar
 	trapped: jax.Array  # float32 scalar
 	substitute: jax.Array  # float32 scalar
 	encore: jax.Array  # float32 scalar
@@ -248,8 +271,12 @@ def observe(state, side, engine_tables) -> Observation:
 			f(v[ROOST] > 0),
 		)
 
-	own_turn_state = public_turn_state(side)
-	foe_turn_state = public_turn_state(foe)
+	request = jnp.where(state.winner == ONGOING, state.request[side], NONE)
+	own_charging, own_recharging, own_locked, own_trapped = public_turn_state(side)
+	# A hard lock shows in a move request (a single move without PP), and in no other.
+	own_locked = own_locked * f(request == MOVE)
+	# A foe's lock (Outrage) is never announced, only the moves that start it: not observed.
+	foe_charging, foe_recharging, _foe_locked, foe_trapped = public_turn_state(foe)
 	own_active = active_volatiles(side)
 	foe_active = active_volatiles(foe)
 
@@ -259,6 +286,23 @@ def observe(state, side, engine_tables) -> Observation:
 	)
 	own_types = jnp.where(own_roosting[:, None], state.roost_types[side], state.types[side])
 	choice_active = move_availability(state, engine_tables)[2][side]
+	# A Transformed member keeps its own stats in the request (baseStoredStats) and its own
+	# ability is the copied one, which the protocol does not name: the request shows its base.
+	active_member = jnp.arange(TEAM_SLOTS) == state.active[side]
+	reverted = (state.volatiles[side, TRANSFORMED] > 0) & active_member
+	own_saved = jnp.concatenate(
+		(state.stats[side, :, :1], jnp.broadcast_to(state.saved_stats[side], (TEAM_SLOTS, 5))),
+		axis=1,
+	)
+	own_stats = jnp.where(reverted[:, None], own_saved, state.stats[side])
+	public_ability = state.ability_public[side]
+	own_ability = jnp.where(
+		reverted,
+		jnp.where(public_ability != 0, public_ability, state.ability_base[side]),
+		state.ability[side],
+	)
+	# Fainted members show no status: the request says '0 fnt'.
+	own_status = jnp.where(state.hp[side] == 0, 0, state.status[side])
 
 	own = OwnObservation(
 		state.species[side],
@@ -267,17 +311,20 @@ def observe(state, side, engine_tables) -> Observation:
 		f(state.level[side]) / 100,
 		f(state.pp[side]) / jnp.maximum(f(state.max_pp[side]), 1),
 		f(state.hp[side]) / jnp.maximum(f(state.stats[side, :, 0]), 1),
-		state.status[side].astype(jnp.int16),
+		own_status.astype(jnp.int16),
 		f(state.hp[side] == 0),
-		f(jnp.arange(TEAM_SLOTS) == state.active[side]),
-		f(state.stats[side]) / 1000,
+		f(active_member),
+		f(own_stats) / 1000,
 		f(state.boosts[side]) / 6,
-		state.ability[side],
+		own_ability,
 		state.item[side],
-		state.item_consumed[side],
-		state.item_knocked_off[side],
+		state.item_gone[side] == ITEM_USED,
+		state.item_gone[side] == ITEM_TAKEN,
 		f(state.volatiles[side, CONFUSION] > 0),
-		*own_turn_state,
+		own_charging,
+		own_recharging,
+		own_locked,
+		own_trapped,
 		*own_active,
 		f(choice_active),
 		jnp.where(choice_active, state.volatiles[side, CHOICE_MOVE], 0).astype(jnp.int16),
@@ -289,8 +336,12 @@ def observe(state, side, engine_tables) -> Observation:
 	seen = jnp.any(match, axis=0)
 	# The opponent sees the species it was last shown: a disguise until Illusion breaks.
 	species = jnp.where(seen, state.shown_species[foe, slots], 0)
-	percent = protocol_percent(state.hp[foe, slots], state.stats[foe, slots, 0])
+	# A member off the field shows the HP it had when it left (Regenerator's heal is silent).
+	on_field = slots == state.active[foe]
+	public_hp = jnp.where(on_field, state.hp[foe, slots], state.hp_seen[foe, slots])
+	percent = protocol_percent(public_hp, state.stats[foe, slots, 0])
 	item_revealed = seen & state.item_revealed[foe, slots]
+	item_gone = state.item_gone[foe, slots]
 	moves = jnp.where(state.revealed_moves[foe, slots] != 0, state.moves[foe, slots], 0)
 	# Sorting by -id puts padding last; reverse sign restores descending IDs.
 	moves = -jnp.sort(-moves, axis=-1)
@@ -298,28 +349,33 @@ def observe(state, side, engine_tables) -> Observation:
 	# its disguise species' types. Roost's removal is not announced, so it is undone.
 	foe_roosting = (state.volatiles[foe, ROOST] > 0) & (jnp.arange(TEAM_SLOTS) == state.active[foe])
 	foe_live = jnp.where(foe_roosting[:, None], state.roost_types[foe], state.types[foe])
-	disguised = state.volatiles[foe, ILLUSION_SLOT] > 0
-	live = (slots == state.active[foe]) & ~disguised
+	disguise = state.volatiles[foe, ILLUSION_SLOT].astype(jnp.int32) - 1
+	disguised = disguise >= 0
+	live = on_field & ~disguised
+	# Illusion Level Mod: the disguised holder is shown at the level of the member it copies.
+	shown_level = state.level[foe, jnp.where(on_field & disguised, disguise, slots)]
 	shown_types = engine_tables.species_types[species]
 	types = jnp.where(live[:, None], foe_live[slots], shown_types)
 	opponent = OpponentObservation(
 		species,
 		jnp.where(seen[:, None], types.astype(jnp.int16) + 1, 0),
 		jnp.where(seen[:, None], moves, 0),
-		jnp.where(seen, f(state.level[foe, slots]) / 100, 0),
+		jnp.where(seen, f(shown_level) / 100, 0),
 		jnp.where(seen, f(percent) / 100, 0),
-		jnp.where(seen, state.status[foe, slots], 0).astype(jnp.int16),
-		f(seen & (state.hp[foe, slots] == 0)),
-		f(seen & (slots == state.active[foe])),
+		jnp.where(seen & (public_hp > 0), state.status[foe, slots], 0).astype(jnp.int16),
+		f(seen & (public_hp == 0)),
+		f(seen & on_field),
 		f(~seen),
 		f(state.boosts[foe]) / 6,
 		jnp.where(seen, state.ability_public[foe, slots], 0),
 		jnp.where(item_revealed, state.item_public[foe, slots], 0).astype(jnp.int16),
 		f(item_revealed),
-		f(item_revealed & state.item_consumed[foe, slots]),
-		f(item_revealed & state.item_knocked_off[foe, slots]),
+		f(item_revealed & (item_gone == ITEM_USED)),
+		f(item_revealed & (item_gone == ITEM_TAKEN)),
 		f(state.volatiles[foe, CONFUSION] > 0),
-		*foe_turn_state,
+		foe_charging,
+		foe_recharging,
+		foe_trapped,
 		*foe_active,
 	)
 	events = state.event[order]
@@ -338,14 +394,13 @@ def observe(state, side, engine_tables) -> Observation:
 		status=events[:, EV_STATUS].astype(jnp.int16),
 		fainted=f(events[:, EV_FAINTED]),
 	)
-	request = jnp.where(state.winner == ONGOING, state.request[side], NONE)
 	return Observation(
 		own,
 		opponent,
 		f(state.turn) / 1000,
 		f(jnp.arange(3) == request),
 		f(state.turn_stage > TURN_IDLE),
-		legal_actions(state, engine_tables)[side],
+		legal_actions(state, engine_tables, hidden_traps=False)[side],
 		state.weather.astype(jnp.int16),
 		f(state.weather_age),
 		f(state.hazards[order]),

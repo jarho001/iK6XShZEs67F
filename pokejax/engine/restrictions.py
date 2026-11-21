@@ -51,7 +51,8 @@ def foe_move_usable(state, foe, move):
 def apply_restrictions(state, side, row, hit, foe_pending, tables, rows, weather):
 	"""Encore, Taunt, Disable, Yawn and Leech Seed on the foe, from this move's hit.
 
-	Returns (state, failed): failed is a hit whose volatile was refused (Showdown's -fail).
+	Returns (state, failed, immune): failed is a hit whose volatile was refused (Showdown's -fail),
+	immune the Yawn that Insomnia, Vital Spirit or Leaf Guard refuses with -immune.
 	"""
 	foe = 1 - side
 	target = state.active[foe]
@@ -117,7 +118,7 @@ def apply_restrictions(state, side, row, hit, foe_pending, tables, rows, weather
 		| (hit & (status == VOLATILE_LEECH_SEED) & ~seed)
 	)
 	state = reveal_abilities(state._replace(volatiles=volatiles), foe_sides & ability_refused)
-	return state, failed
+	return state, failed, ability_refused
 
 
 def encore_override(state, side, move_id, tables):

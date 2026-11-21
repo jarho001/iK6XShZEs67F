@@ -20,6 +20,7 @@ from .state import (
 	CONFUSION,
 	HEALTHY,
 	HP,
+	ITEM_TAKEN,
 	MUST_RECHARGE,
 	SLEEP,
 	TEAM_SLOTS,
@@ -291,6 +292,11 @@ def steal_berry(state, side, enabled, tables, rows):
 	state = state._replace(
 		item_consumed=jnp.where(taken[:, None], prior_consumed, state.item_consumed),
 		last_item=jnp.where(taken[:, None], prior_last, state.last_item),
+		item_gone=jnp.where(
+			taken[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == target),
+			ITEM_TAKEN,
+			state.item_gone,
+		).astype(state.item_gone.dtype),
 	)
 	member = (SIDES == side)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == user)
 	status = state.status[side, user]

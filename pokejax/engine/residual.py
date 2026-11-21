@@ -55,6 +55,7 @@ from .state import (
 	DISABLE_MOVE,
 	DISABLE_REMAINING,
 	HP,
+	ITEM_HELD,
 	LEECH_SEED,
 	LOCKED_MOVE,
 	LOCKED_REMAINING,
@@ -275,6 +276,10 @@ def _harvest(state, enabled, key, forced, tables, rows):
 		item_consumed=jnp.where(write, False, state.item_consumed),
 		last_item=jnp.where(write, 0, state.last_item).astype(state.last_item.dtype),
 		item_revealed=state.item_revealed | write,
+		item_public=jnp.where(write, last_item[:, None], state.item_public).astype(
+			state.item_public.dtype
+		),
+		item_gone=jnp.where(write, ITEM_HELD, state.item_gone).astype(state.item_gone.dtype),
 	)
 	return reveal_abilities(state, restore)
 

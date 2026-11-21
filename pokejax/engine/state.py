@@ -99,6 +99,8 @@ NO_WEATHER, RAIN, SUN, SAND, HAIL = range(5)
 WEATHER_NAMES = ("", "raindance", "sunnyday", "sandstorm", "hail")
 NUM_WEATHERS = len(WEATHER_NAMES)
 SPIKES, TOXIC_SPIKES = range(2)
+# How a member's item left it, as the protocol announced it (item_gone).
+ITEM_HELD, ITEM_USED, ITEM_TAKEN = range(3)
 
 # Resumable turn stages. The stored values describe hidden queue work; only the
 # public request and the boolean ``turn_stage > 0`` are exposed to a policy.
@@ -207,3 +209,6 @@ class BattleState(NamedTuple):
 	weather_age: jax.Array  # int8 scalar: turns since the current weather started (0 if none)
 	trick_room_age: jax.Array  # int8 scalar: turns since Trick Room started (0 if inactive)
 	wish_age: jax.Array  # int8 [2]: turns since each side's pending Wish was used
+	# What a player can see of the members off the field and of their items (observation.py).
+	hp_seen: jax.Array  # int16 [2, 6]: HP when the member last left the field (before Regenerator)
+	item_gone: jax.Array  # int8 [2, 6]: how the item left, as announced: 0 none, 1 used, 2 taken

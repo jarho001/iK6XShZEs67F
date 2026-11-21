@@ -29,6 +29,7 @@ from .state import (
 	HAIL,
 	HEALTHY,
 	HP,
+	ITEM_USED,
 	RAIN,
 	SAND,
 	SLEEP,
@@ -379,6 +380,7 @@ def update_item_state(state, consumed_sides, revealed_sides, tables=None, abilit
 		),
 		item_revealed=state.item_revealed | reveal_mask,
 		item_public=jnp.where(reveal_mask, held[:, None], state.item_public),
+		item_gone=jnp.where(consume_mask, ITEM_USED, state.item_gone),
 		volatiles=volatiles,
 	)
 
@@ -424,6 +426,8 @@ def apply_after_move_items(
 	user = state.active[side]
 	maximum = state.stats[side, user, HP].astype(jnp.int32)
 	hp = state.hp[side, user].astype(jnp.int32)
+	# A user that already fainted (to its move's recoil) takes no damage and prints nothing.
+	recoil &= hp > 0
 	damage = jnp.maximum(maximum // 10, 1)
 	new_hp = jnp.maximum(hp - jnp.where(recoil[side], damage, 0), 0)
 	active_mask = user_side[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == user)
@@ -523,6 +527,7 @@ def eat_lum_after_status(state, sides, abilities, tables, berry_kind=None):
 		last_item=jnp.where(member, held[:, None].astype(state.last_item.dtype), state.last_item),
 		item_revealed=state.item_revealed | member,
 		item_public=jnp.where(member, held[:, None], state.item_public),
+		item_gone=jnp.where(member, ITEM_USED, state.item_gone),
 	)
 
 

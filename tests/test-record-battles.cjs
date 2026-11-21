@@ -509,6 +509,33 @@ test('pool profile plays pool teams exactly as generated', { skip: !fs.existsSyn
 	record.poolIndices.forEach((index, side) => assert.deepEqual(record.teams[side], pool.teams[index]));
 });
 
+test('views record the same battle and store both players\' observations at every decision point', { skip: !fs.existsSync(path.join(root, 'work/teams/gen5-teams.json')) }, () => {
+	const pool = JSON.parse(fs.readFileSync(path.join(root, 'work/teams/gen5-teams.json'), 'utf8'));
+	const teamIndices = [5, 17, 404, 9999];
+	const options = { profile: 'pool', teamIndices };
+	const plain = playBattle(3, 1, pool, [], [], [], options);
+	const viewed = playBattle(3, 1, pool, [], [], [], { ...options, views: true, streams: true });
+	// Watching the streams changes nothing in the battle.
+	assert.deepEqual(viewed.steps.map(step => [step.actions, step.outcomes]),
+		plain.steps.map(step => [step.actions, step.outcomes]));
+	assert.deepEqual(viewed.initialOutcomes, plain.initialOutcomes);
+	assert.equal(viewed.initialState, undefined);
+	assert.equal(viewed.steps.length, plain.steps.length);
+	assert.deepEqual(viewed.initialActive, plain.initialState.sides.map(side => side.active));
+	viewed.steps.forEach((step, i) => {
+		assert.equal(step.state, undefined);
+		assert.deepEqual(step.active, plain.steps[i].state.sides.map(side => side.active));
+		assert.equal(step.views.length, 2);
+		assert.deepEqual(step.views[0].own.is_active.map(Number), plain.steps[i].state.sides[0].members
+			.map((_, slot) => Number(slot === plain.steps[i].state.sides[0].active)));
+	});
+	// One request and one update per player and decision point, in the order getPlayerStreams gives.
+	// The last update has no request after it: the battle is over.
+	assert.ok(plain.steps.at(-1).state.ended);
+	assert.equal(viewed.streams[0].length, 2 * (plain.steps.length + 1) - 1);
+	assert.ok(viewed.streams.every(chunks => chunks[0].includes('|start') && chunks[1].startsWith('|request|')));
+});
+
 
 function pairBattle(pair, abilities, items, moves = ['tackle']) {
 	const battle = isolationBattle([5, 6, 7, 8]);

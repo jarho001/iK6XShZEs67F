@@ -137,7 +137,9 @@ def test_no_hidden_information(battles, side):
 		# Change every stored stat, including max HP, while preserving public HP.
 		stats = s.stats.at[foe].set(s.stats[foe] * 2)
 		hp = s.hp.at[foe].set(s.hp[foe] * 2)
-		updates.update(stats=stats, hp=hp)
+		# A benched member shows the HP it left with: the true HP behind it (Regenerator) is private.
+		seen = s.hp_seen.at[foe].set(s.hp_seen[foe] * 2)
+		updates.update(stats=stats, hp=hp, hp_seen=seen)
 		for name in ("species", "level", "types", "status"):
 			x = getattr(s, name)
 			mask = unseen.reshape((6,) + (1,) * (x.ndim - 2))
@@ -608,16 +610,23 @@ def test_illusion_disguise_hides_the_real_species(battles, side):
 
 @pytest.mark.parametrize("side", [0, 1])
 def test_illusion_identity_is_private(battles, side):
-	"""Which bench member hides behind a disguise is private; the disguise species is shown."""
+	"""Which bench member hides behind a disguise is private; the disguise species is shown.
+
+	Two bench members that look alike (same species and level) are interchangeable as the source.
+	"""
 	_tables, t, _, states = battles
 	foe = 1 - side
 
 	def disguise(s, offset):
 		active = s.active[foe]
-		bench = (active + offset) % 6
+		twin, bench = (active + 1) % 6, (active + offset) % 6
+		# A seen member is part of the roster: only an unseen look-alike stands in for the twin.
+		bench = jnp.where(s.seen_order[foe, bench] > 0, twin, bench)
+		species = s.species.at[foe, bench].set(s.species[foe, twin])
+		level = s.level.at[foe, bench].set(s.level[foe, twin])
 		volatiles = s.volatiles.at[foe, S.ILLUSION_SLOT].set(bench + 1)
-		shown = s.shown_species.at[foe, active].set(s.species[foe, (active + 1) % 6])
-		return s._replace(volatiles=volatiles, shown_species=shown)
+		shown = s.shown_species.at[foe, active].set(species[foe, twin])
+		return s._replace(volatiles=volatiles, shown_species=shown, species=species, level=level)
 
 	first = jax.jit(jax.vmap(lambda s: disguise(s, 1)))(states)
 	second = jax.jit(jax.vmap(lambda s: disguise(s, 2)))(states)
@@ -829,3 +838,216 @@ def test_event_record_status_hp_and_faint(battles):
 	o = OBSERVE(out, 0, t)
 	np.testing.assert_allclose(o.events.hp_change[1], -1 / 100)
 	assert float(o.events.fainted[1]) == 1
+
+
+# The player view (tests/test-player-view.cjs, pokejax/obs_diff.py) found each of these: what the
+# protocol names or leaves out differs from what the first observation showed.
+
+
+def test_benched_foe_shows_the_hp_it_left_with(battles):
+	"""Regenerator heals on the bench without a protocol line: the other player keeps the HP it saw."""
+	tables, t, s, _ = battles
+	member = int(s.active[1])
+	maximum = int(s.stats[1, member, 0])
+	low = max(maximum * 3 // 10, 1)
+	s = no_items(s)
+	s = s._replace(
+		hp=s.hp.at[1, member].set(low),
+		ability=s.ability.at[1, member].set(tables.abilities.index["regenerator"]),
+	)
+	out = play(s, [0, 4], t, FORCED)
+	assert int(out.hp[1, member]) > low  # healed on leaving, silently
+	o = OBSERVE(out, 0, t)
+	np.testing.assert_allclose(o.opponent.hp[0], ((100 * low + maximum - 1) // maximum) / 100)
+	assert float(o.opponent.is_active[0]) == 0 and float(o.opponent.is_active[1]) == 1
+
+
+def test_item_flags_follow_how_the_item_left(battles):
+	_, t, s, _ = battles
+	foe, mine = int(s.active[1]), int(s.active[0])
+	for gone, consumed, taken in ((S.ITEM_HELD, 0, 0), (S.ITEM_USED, 1, 0), (S.ITEM_TAKEN, 0, 1)):
+		named = s._replace(
+			item_gone=s.item_gone.at[1, foe].set(gone).at[0, mine].set(gone),
+			item_revealed=s.item_revealed.at[1, foe].set(True),
+			item_public=s.item_public.at[1, foe].set(5),
+		)
+		o = OBSERVE(named, 0, t)
+		assert float(o.opponent.item_consumed[0]) == consumed
+		assert float(o.opponent.item_knocked_off[0]) == taken
+		assert bool(o.own.item_consumed[mine]) == bool(consumed)
+		assert bool(o.own.item_knocked_off[mine]) == bool(taken)
+	# Until the protocol has named the opponent's item, nothing about it is shown.
+	hidden = s._replace(item_gone=s.item_gone.at[1, foe].set(S.ITEM_TAKEN))
+	o = OBSERVE(hidden, 0, t)
+	assert float(o.opponent.item_knocked_off[0]) == 0 and float(o.opponent.item_revealed[0]) == 0
+
+
+def test_knock_off_and_an_eaten_berry_are_named(battles):
+	tables, t, s, _ = battles
+	foe = int(s.active[1])
+	s = no_items(s)
+	s = set_active_move(s, tables, 0, 0, "knockoff")
+	leftovers = tables.items.index["leftovers"]
+	knocked = s._replace(item=s.item.at[1, foe].set(leftovers))
+	out = play(knocked, [0, 0], t, FORCED)
+	o = OBSERVE(out, 0, t)
+	assert int(o.opponent.item[0]) == leftovers and float(o.opponent.item_knocked_off[0]) == 1
+	assert float(o.opponent.item_consumed[0]) == 0
+	assert bool(OBSERVE(out, 1, t).own.item_knocked_off[foe])
+	# A Sitrus Berry that is eaten shows as consumed, never as knocked off.
+	sitrus = tables.items.index["sitrusberry"]
+	maximum = int(s.stats[1, foe, 0])
+	eaten = set_active_move(s, tables, 0, 0, "tackle")
+	eaten = eaten._replace(
+		item=eaten.item.at[1, foe].set(sitrus), hp=eaten.hp.at[1, foe].set(maximum // 2 + 1)
+	)
+	eaten = set_active_move(eaten, tables, 1, 0, "splash")
+	out = play(eaten, [0, 0], t, FORCED)
+	o = OBSERVE(out, 0, t)
+	assert float(o.opponent.item_consumed[0]) == 1 and float(o.opponent.item_knocked_off[0]) == 0
+	assert int(o.opponent.item[0]) == sitrus
+
+
+def test_transformed_member_shows_its_own_stats_and_ability(battles):
+	"""Transform copies the foe's stats and ability, which only the foe's request would show."""
+	tables, t, s, _ = battles
+	member = int(s.active[0])
+	own = s.stats[0, member]
+	copied = jnp.array([9, 9, 9, 9, 9], dtype=own.dtype)
+	base = int(s.ability_base[0, member])
+	foreign = tables.abilities.index["sturdy"]
+	changed = s._replace(
+		volatiles=s.volatiles.at[0, S.TRANSFORMED].set(1),
+		stats=s.stats.at[0, member, 1:].set(copied),
+		saved_stats=s.saved_stats.at[0].set(own[1:]),
+		ability=s.ability.at[0, member].set(foreign),
+		ability_public=s.ability_public.at[0, member].set(0),
+	)
+	o = OBSERVE(changed, 0, t)
+	np.testing.assert_allclose(o.own.stats[member], np.asarray(own) / 1000)
+	assert int(o.own.ability[member]) == base
+	# An ability that the protocol named for it (Imposter's, a copied Intimidate's) is shown.
+	named = changed._replace(ability_public=changed.ability_public.at[0, member].set(foreign))
+	assert int(OBSERVE(named, 0, t).own.ability[member]) == foreign
+
+
+def test_trapping_abilities_are_not_in_the_observed_legal_actions(battles):
+	"""The request only says maybeTrapped: whether the foe really has Shadow Tag is private."""
+	tables, t, s, _ = battles
+	for name in ("shadowtag", "arenatrap", "magnetpull"):
+		trapper = s._replace(
+			ability=s.ability.at[1, s.active[1]].set(tables.abilities.index[name]),
+			types=s.types.at[0, s.active[0]].set(
+				jnp.array([tables.types.index["steel"], -1], jnp.int8)
+			),
+		)
+		engine_mask = np.asarray(legal_actions(trapper, t)[0])
+		seen = np.asarray(OBSERVE(trapper, 0, t).legal_actions)
+		assert not engine_mask[4:].any() and seen[4:].all(), name
+	partial = s._replace(
+		volatiles=s.volatiles.at[0, S.PARTIALLY_TRAPPED].set(3).at[0, S.PARTIAL_TRAP_SOURCE].set(1)
+	)
+	assert not np.asarray(OBSERVE(partial, 0, t).legal_actions)[4:].any()  # that one is announced
+
+
+def test_fainted_members_show_no_status(battles):
+	_, t, s, _ = battles
+	fainted = s._replace(
+		hp=s.hp.at[0, 3].set(0).at[1, 3].set(0),
+		hp_seen=s.hp_seen.at[1, 3].set(0),
+		status=s.status.at[0, 3].set(S.FREEZE).at[1, 3].set(S.FREEZE),
+		seen_order=s.seen_order.at[1, 3].set(2),
+	)
+	o = OBSERVE(fainted, 0, t)
+	assert int(o.own.status[3]) == 0 and float(o.own.fainted[3]) == 1
+	assert int(o.opponent.status[1]) == 0 and float(o.opponent.fainted[1]) == 1
+
+
+def test_a_disguised_holder_shows_the_level_of_its_disguise(battles):
+	_, t, s, _ = battles
+	foe = 1
+	active, bench = int(s.active[foe]), 3
+	disguised = s._replace(
+		level=s.level.at[foe, active].set(81).at[foe, bench].set(60),
+		volatiles=s.volatiles.at[foe, S.ILLUSION_SLOT].set(bench + 1),
+		shown_species=s.shown_species.at[foe, active].set(s.species[foe, bench]),
+	)
+	o = OBSERVE(disguised, 0, t)
+	np.testing.assert_allclose(o.opponent.level[0], 0.60)
+	revealed = disguised._replace(volatiles=disguised.volatiles.at[foe, S.ILLUSION_SLOT].set(0))
+	np.testing.assert_allclose(OBSERVE(revealed, 0, t).opponent.level[0], 0.81)
+
+
+def test_a_lock_shows_in_a_move_request_only_and_not_for_the_foe(battles):
+	_, t, s, _ = battles
+	locked = s._replace(
+		volatiles=s.volatiles.at[0, S.LOCKED_MOVE].set(3).at[1, S.LOCKED_MOVE].set(3)
+	)
+	o = OBSERVE(locked, 0, t)
+	assert float(o.own.locked) == 1
+	assert not hasattr(o.opponent, "locked")
+	waiting = locked._replace(request=locked.request.at[0].set(NONE))
+	assert float(OBSERVE(waiting, 0, t).own.locked) == 0
+	switching = locked._replace(request=locked.request.at[0].set(SWITCH))
+	assert float(OBSERVE(switching, 0, t).own.locked) == 0
+
+
+def test_a_locked_move_continuing_reveals_nothing_new(battles):
+	tables, t, s, _ = battles
+	foe, member = 1, int(s.active[1])
+	outrage = tables.moves.index["outrage"]
+	locked = s._replace(
+		moves=s.moves.at[foe, member, 2].set(outrage),
+		pp=s.pp.at[foe, member, 2].set(5),
+		volatiles=s.volatiles.at[foe, S.LOCKED_MOVE]
+		.set(outrage)
+		.at[foe, S.LOCKED_REMAINING]
+		.set(2)
+		.at[foe, S.LOCKED_TRUE_DURATION]
+		.set(3),
+	)
+	out = play(locked, [0, 0], t, FORCED)
+	assert not np.any(np.asarray(out.revealed_moves[foe]))
+
+
+def test_contact_items_are_named_only_when_their_damage_is(battles):
+	"""Rough Skin faints the attacker first, so the Helmet prints nothing; Life Orb after the
+	user fainted to its move's recoil does not print either."""
+	tables, t, s, _ = battles
+	s = set_active_move(s, tables, 0, 0, "tackle")
+	active0, active1 = int(s.active[0]), int(s.active[1])
+	holder = s._replace(
+		item=s.item.at[1, active1].set(tables.items.index["rockyhelmet"]),
+		ability=s.ability.at[1, active1].set(tables.abilities.index["roughskin"]),
+		hp=s.hp.at[0, active0].set(1),
+	)
+	forced = FORCED.at[ORDER, 0, ACTION_ORDER].set(1)
+	out = play(set_active_move(holder, tables, 1, 0, "splash"), [0, 0], t, forced)
+	assert int(out.hp[0, active0]) == 0
+	assert not bool(out.item_revealed[1, active1])
+	# With the attacker alive after Rough Skin, the Helmet's damage line names it.
+	healthy = holder._replace(hp=holder.hp.at[0, active0].set(holder.stats[0, active0, 0]))
+	out = play(set_active_move(healthy, tables, 1, 0, "splash"), [0, 0], t, forced)
+	assert int(out.hp[0, active0]) > 0 and bool(out.item_revealed[1, active1])
+	# A Life Orb holder that faints to its move's recoil takes no Life Orb damage: not named.
+	orb = set_active_move(s, tables, 0, 0, "doubleedge")
+	orb = orb._replace(
+		item=orb.item.at[0, active0].set(tables.items.index["lifeorb"]),
+		hp=orb.hp.at[0, active0].set(1),
+	)
+	out = play(set_active_move(orb, tables, 1, 0, "splash"), [0, 0], t, forced)
+	assert int(out.hp[0, active0]) == 0 and not bool(out.item_revealed[0, active0])
+
+
+def test_a_reflected_leech_seed_is_refused_by_a_grass_type_user(battles):
+	tables, t, s, _ = battles
+	s = no_items(s)
+	s = set_active_move(s, tables, 0, 0, "leechseed")
+	s = set_active_types(s, tables, 0, ["grass"])
+	s = s._replace(ability=s.ability.at[1, s.active[1]].set(tables.abilities.index["magicbounce"]))
+	out = play(s, [0, 0], t, FORCED)
+	holder = 1
+	assert int(out.event[holder, EV.EV_EFFECT]) == EV.EFFECT_IMMUNE
+	assert (
+		int(out.ability_public[holder, out.active[holder]]) == tables.abilities.index["magicbounce"]
+	)

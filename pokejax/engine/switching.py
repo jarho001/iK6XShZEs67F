@@ -119,7 +119,12 @@ def switch_members(state, switch_mask, targets, tables, rows=None):
 	old_slots = jnp.arange(TEAM_SLOTS)[None, :] == outgoing[:, None]
 	heal_write = old_slots & switch_mask[:, None] & regenerator[:, None]
 	cure_write = old_slots & switch_mask[:, None] & natural_cure[:, None]
+	# Regenerator's heal prints nothing: the other player keeps the HP it last saw.
+	hp_seen = jnp.where(
+		old_slots & switch_mask[:, None], old_hp[:, None].astype(state.hp.dtype), state.hp_seen
+	)
 	state = state._replace(
+		hp_seen=hp_seen,
 		hp=jnp.where(heal_write, healed[:, None].astype(state.hp.dtype), state.hp),
 		status=jnp.where(cure_write, HEALTHY, state.status),
 		status_counter=jnp.where(cure_write, 0, state.status_counter),
@@ -357,6 +362,7 @@ def run_switch_in(
 			last_item=temporary.last_item,
 			item_revealed=temporary.item_revealed,
 			item_public=temporary.item_public,
+			item_gone=temporary.item_gone,
 			ability_public=temporary.ability_public,
 		)
 	else:

@@ -35,6 +35,17 @@
  * node reference/record-battles.cjs --count 300 --seed 1 --allowed tests/fixtures/diff-longtail2.allowed.json --out work/diff/longtail2.jsonl.gz
  * node reference/record-battles.cjs --count 40 --seed 4 --allowed tests/fixtures/diff-longtail2.allowed.json --out tests/fixtures/diff-longtail2.jsonl.gz
  *
+ * node reference/record-battles.cjs --profile pool --views --count 300 --seed 1 --out work/diff/obs-pool.jsonl.gz
+ * node reference/record-battles.cjs --profile pool --views --count 40 --seed 4 --out tests/fixtures/obs-pool.jsonl.gz
+ *
+ * --views runs one reference/player-view.cjs per player on that player's own stream (what
+ * getPlayerStreams delivers: its requests and its split protocol lines) and stores both players'
+ * observations at every decision point instead of the state snapshots: {initialActive, initialViews,
+ * steps: [{actions, outcomes, active, views: [side 0, side 1]}]}, floats to seven decimals. The
+ * battles are the same as without it. --streams also keeps each player's chunks (for debugging
+ * a difference; alone it keeps the state snapshots). pokejax.obs_diff compares the views with the
+ * engine observation.
+ *
  * JSONL schema v2: header {type, schemaVersion, showdownCommit, seed, count,
  * acceptedMoves, ...}; battle {type, index, seed (four uint16 words), policySeed,
  * poolIndices, profile, teams (exact constructor inputs), initialOverrides: [],
@@ -115,7 +126,8 @@ const moveOverrides = [5, 6, 7, 8].map(gen => Object.fromEntries(
 	Object.entries(require(`./vendor/pokemon-showdown/dist/data/mods/gen${gen}/moves`).Moves)
 		.map(([id, entry]) => [id, { ...entry, ...(entry.flags ? { flags: { ...entry.flags } } : {}) }])
 ));
-const { Battle } = require('./vendor/pokemon-showdown/dist/sim/battle');
+const { Battle, extractChannelMessages } = require('./vendor/pokemon-showdown/dist/sim/battle');
+const { PlayerView } = require('./player-view.cjs');
 const { Dex } = require('./vendor/pokemon-showdown/dist/sim/dex');
 const { PRNG } = require('./vendor/pokemon-showdown/dist/sim/prng');
 const dex = Dex.forFormat('gen5randombattle');
@@ -144,8 +156,42 @@ const DISABLE_RESTRICTIONS = new Set(['choicelock', 'disable', 'encore', 'taunt'
 // no Choice item it has no effect and is not compared (task 15).
 const CHOICE_ITEMS = new Set(['choiceband', 'choicescarf', 'choicespecs']);
 
-function isolationBattle(seed) {
-	return new Battle({ formatid: 'gen5randombattle', seed });
+// Floats to seven decimals, which keeps a views recording small: the comparison tolerates 1e-6.
+function rounded(value) {
+	if (typeof value === 'number') return Number.isInteger(value) ? value : Math.round(value * 1e7) / 1e7;
+	if (Array.isArray(value)) return value.map(rounded);
+	if (value && typeof value === 'object') {
+		return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, rounded(entry)]));
+	}
+	return value;
+}
+
+function isolationBattle(seed, send) {
+	return new Battle({ formatid: 'gen5randombattle', seed, ...(send ? { send } : {}) });
+}
+
+// One PlayerView per player, fed exactly what getPlayerStreams (sim/battle-stream.ts) delivers:
+// the 'update' text with the player's own split lines and the public ones, and the player's
+// sideupdate (its request). With keep, each player's chunks are also kept in order.
+function playerViews({ build, keep }) {
+	const views = build ? [new PlayerView(), new PlayerView()] : null;
+	const chunks = [[], []];
+	const feed = (player, chunk) => {
+		if (keep) chunks[player].push(chunk);
+		if (build) views[player].receive(chunk);
+	};
+	const send = (type, data) => {
+		if (Array.isArray(data)) data = data.join('\n');
+		if (type === 'update') {
+			const messages = extractChannelMessages(data, [1, 2]);
+			feed(0, messages[1].join('\n'));
+			feed(1, messages[2].join('\n'));
+		} else if (type === 'sideupdate') {
+			const cut = data.indexOf('\n');
+			feed(data.slice(0, cut) === 'p1' ? 0 : 1, data.slice(cut + 1));
+		}
+	};
+	return { send, build, views, observations: () => views.map(view => view.observation()), chunks };
 }
 
 const EXCEPTIONS = [
@@ -909,8 +955,11 @@ function playBattle(index, masterSeed, pool, moves, ghostTeams, exhaustionMoves,
 	const players = teams.map((team, side) => ({ name: `Side ${side}`, team: structuredClone(team) }));
 	const recordStart = (options.profile === 'isolation' && options.abilities?.length > 0) ||
 		options.profile === 'pool';
-	const battle = recordStart ? isolationBattle(seed) : new Battle({
+	const viewer = options.views || options.streams ?
+		playerViews({ build: options.views, keep: options.streams }) : null;
+	const battle = recordStart ? isolationBattle(seed, viewer?.send) : new Battle({
 		formatid: 'gen5randombattle', seed, p1: players[0], p2: players[1],
+		...(viewer ? { send: viewer.send } : {}),
 	});
 	try {
 		const stats = newStats();
@@ -929,6 +978,7 @@ function playBattle(index, masterSeed, pool, moves, ghostTeams, exhaustionMoves,
 			}
 		}
 		assert.equal(battle.turn, 1);
+		if (viewer) battle.sendUpdates();
 		const fixed = battle.sides.map(side => [...side.pokemon]);
 		for (const [s, members] of fixed.entries()) {
 			for (const [slot, pokemon] of members.entries()) {
@@ -943,6 +993,7 @@ function playBattle(index, masterSeed, pool, moves, ghostTeams, exhaustionMoves,
 		}
 		recorder.setFixed(fixed);
 		const initialState = snapshot(battle, fixed, publicAbilities, publicSpecies);
+		const initialViews = options.views ? viewer.observations() : undefined;
 		const steps = [];
 		let turnLimitHit = false;
 		while (!battle.ended) {
@@ -964,8 +1015,12 @@ function playBattle(index, masterSeed, pool, moves, ghostTeams, exhaustionMoves,
 				}
 			}
 			const outcomes = recorder.end();
+			if (viewer) battle.sendUpdates();
 			const state = snapshot(battle, fixed, publicAbilities, publicSpecies);
-			steps.push({ actions: selected.map(choice => choice.action), outcomes, state });
+			steps.push({ actions: selected.map(choice => choice.action), outcomes,
+				// A views recording carries the observations instead of the state snapshots.
+				...(options.views ? { active: state.sides.map(side => side.active),
+					views: rounded(viewer.observations()) } : { state }) });
 			for (const outcome of outcomes) {
 				stats.outcomes[outcome.kind] = (stats.outcomes[outcome.kind] || 0) + 1;
 				if (outcome.kind === 'hit' && outcome.value === 0) stats.misses++;
@@ -979,7 +1034,10 @@ function playBattle(index, masterSeed, pool, moves, ghostTeams, exhaustionMoves,
 		stats.steps = steps.length;
 		return { type: 'battle', index, seed, policySeed, poolIndices,
 			profile: exhaustion ? 'natural-pp-exhaustion' : 'random', teams,
-			initialOverrides: [], ...(recordStart ? { initialOutcomes } : {}), initialState, steps, stats, turnLimitHit };
+			initialOverrides: [], ...(recordStart ? { initialOutcomes } : {}),
+			...(options.views ? { initialActive: initialState.sides.map(side => side.active),
+				initialViews: rounded(initialViews) } : { initialState }), steps, stats, turnLimitHit,
+			...(options.streams ? { streams: viewer.chunks } : {}) };
 	} finally { battle.destroy(); }
 }
 
@@ -988,6 +1046,7 @@ async function main() {
 		count: { type: 'string', default: '300' }, seed: { type: 'string', default: '1' },
 		out: { type: 'string', default: 'work/diff/phase1.jsonl.gz' },
 		profile: { type: 'string', default: 'isolation' }, allowed: { type: 'string' },
+		views: { type: 'boolean', default: false }, streams: { type: 'boolean', default: false },
 	} });
 	const count = Number(values.count);
 	const seed = Number(values.seed);
@@ -1003,7 +1062,8 @@ async function main() {
 		new Set(acceptedMoves(JSON.parse(fs.readFileSync(path.join(root, 'data/gen5-data-v1.json'))))) : null;
 	const baseMoves = plainMoves ? supported.moves.filter(id => plainMoves.has(id)) : supported.moves;
 	const moves = [...new Set([...baseMoves, ...(extra.moves || []).map(id => dex.toID(id))])].sort();
-	const options = { profile: values.profile, taskMoves: (extra.moves || []).map(id => dex.toID(id)),
+	const options = { profile: values.profile, views: values.views, streams: values.streams,
+		taskMoves: (extra.moves || []).map(id => dex.toID(id)),
 		abilities: [...new Set([...supported.abilities, ...(extra.abilities || []).map(id => dex.toID(id))])].sort(),
 		items: [...supported.items, ...(extra.items || []).map(id => dex.toID(id))] };
 	assert(['phase1', 'isolation', 'pool'].includes(values.profile));
@@ -1029,8 +1089,9 @@ async function main() {
 	}
 	const summary = { battles: count, ...newStats(), meanLength: 0, turnLimitHits: 0 };
 	try {
-		const { teamIndices, ...allowed } = options;
+		const { teamIndices, views, streams, ...allowed } = options;
 		await write({ type: 'header', schemaVersion: 2, showdownCommit: lock.commit, seed, count,
+			...(views ? { playerViews: { builder: 'reference/player-view.cjs', streams } } : {}),
 			format: 'gen5randombattle', acceptedMoves: moves, allowed, turnLimit: TURN_LIMIT,
 			poolSeed: pool.seed, policy: 'uniform over all legal moves and switches',
 			exhaustion: { every: 20, moves: exhaustionMoves, initialOverrides: false },
@@ -1063,5 +1124,5 @@ async function main() {
 	console.log(`Wrote ${values.out} (${fs.statSync(output).size} bytes)`);
 }
 
-module.exports = { acceptedMoves, seedFor, snapshot, legalChoices, instrument, newStats, playBattle, isolationMember, isolationBattle };
+module.exports = { acceptedMoves, seedFor, snapshot, legalChoices, instrument, newStats, playBattle, isolationMember, isolationBattle, playerViews };
 if (require.main === module) main().catch(error => { console.error(error.stack); process.exitCode = 1; });

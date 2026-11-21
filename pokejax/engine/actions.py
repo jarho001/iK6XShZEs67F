@@ -63,8 +63,13 @@ def move_availability(state, engine_tables):
 	return moves, usable, choice_active, choice_usable
 
 
-def legal_actions(state, engine_tables):
-	"""Match Pokemon.getMoveRequestData and Side.chooseSwitch without effects."""
+def legal_actions(state, engine_tables, hidden_traps=True):
+	"""Match Pokemon.getMoveRequestData and Side.chooseSwitch without effects.
+
+	Shadow Tag, Arena Trap and Magnet Pull trap without any protocol line: the request only says
+	maybeTrapped, and it says so whenever the foe's species can have such an ability. A player
+	cannot see them, so hidden_traps=False leaves them out (the observation uses that).
+	"""
 	request = jnp.where(state.winner == ONGOING, state.request, NONE)
 	_, usable, choice_active, choice_usable = move_availability(state, engine_tables)
 	only_first = jnp.arange(4)[None, :] == 0
@@ -91,21 +96,22 @@ def legal_actions(state, engine_tables):
 	source_alive = state.hp[foe, state.active[foe]] > 0
 	trapped = (state.volatiles[:, PARTIALLY_TRAPPED] > 0) & source_active & source_alive
 	can_switch &= ~trapped
-	abilities = active_abilities(state, engine_tables)
-	foe_ability = abilities[foe, TRAP]
-	types = state.types[SIDES, state.active]
-	smackdown = state.volatiles[:, SMACKDOWN] > 0
-	grounded = ~jnp.any(types == engine_tables.flying_type, axis=-1) | smackdown
-	grounded &= ~has_hook(abilities, LEVITATE) | smackdown
-	steel = jnp.any(types == engine_tables.steel_type, axis=-1)
-	foe_alive = state.hp[foe, state.active[foe]] > 0
-	shadow_user = abilities[:, TRAP] == TRAP_SHADOW
-	trapped_by_ability = foe_alive & (
-		((foe_ability == TRAP_ARENA) & grounded)
-		| ((foe_ability == TRAP_SHADOW) & ~shadow_user)
-		| ((foe_ability == TRAP_MAGNET) & steel)
-	)
-	can_switch &= ~trapped_by_ability
+	if hidden_traps:
+		abilities = active_abilities(state, engine_tables)
+		foe_ability = abilities[foe, TRAP]
+		types = state.types[SIDES, state.active]
+		smackdown = state.volatiles[:, SMACKDOWN] > 0
+		grounded = ~jnp.any(types == engine_tables.flying_type, axis=-1) | smackdown
+		grounded &= ~has_hook(abilities, LEVITATE) | smackdown
+		steel = jnp.any(types == engine_tables.steel_type, axis=-1)
+		foe_alive = state.hp[foe, state.active[foe]] > 0
+		shadow_user = abilities[:, TRAP] == TRAP_SHADOW
+		trapped_by_ability = foe_alive & (
+			((foe_ability == TRAP_ARENA) & grounded)
+			| ((foe_ability == TRAP_SHADOW) & ~shadow_user)
+			| ((foe_ability == TRAP_MAGNET) & steel)
+		)
+		can_switch &= ~trapped_by_ability
 	can_switch |= request == SWITCH
 	switch_mask = can_switch[:, None] & bench_alive
 	return jnp.concatenate((move_mask, switch_mask), axis=1)

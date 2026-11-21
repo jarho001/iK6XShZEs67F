@@ -82,6 +82,7 @@ from .order import action_order
 from .randomness import BOUNCE_HIT, random_bits
 from .residual import residual
 from .restrictions import (
+	VOLATILE_LEECH_SEED,
 	apply_restrictions,
 	encore_override,
 )
@@ -261,7 +262,10 @@ def _move(
 	call_extra = pp_cost_for(call_row, pressure, pressure_target_alive, user_types, tables) - 1
 	pp_cost += calling.astype(jnp.int32) * call_extra
 	new_pp = jnp.maximum(pp - consume_pp.astype(jnp.int32) * pp_cost, 0).astype(state.pp.dtype)
-	revealed = state.revealed_moves[side, user, slot] | (enabled & ~recharge & ~struggle)
+	# A locked or charging move was revealed when it began; the action's slot is not its slot.
+	revealed = state.revealed_moves[side, user, slot] | (
+		enabled & ~recharge & ~struggle & ~continuation
+	)
 	selected_move = slot_mask(state, side, user, slot)
 	state = state._replace(
 		pp=jnp.where(selected_move, new_pp, state.pp),
@@ -387,6 +391,8 @@ def _move(
 	user_slot = (SIDES == side)[:, None] & (jnp.arange(TEAM_SLOTS)[None, :] == user)
 	state = state._replace(hp=jnp.where(user_slot, healed_hp.astype(state.hp.dtype), state.hp))
 	state = reveal_abilities(state, (SIDES == side) & reflect_absorbed)
+	# The reflected |move| line names Magic Bounce, whatever the move does next.
+	state = reveal_abilities(state, (SIDES == foe) & reflect)
 	bounced = reflect & bounce_hit & ~reflect_absorbed & (state.hp[side, user] > 0)
 	acting = jnp.where(reflect, foe, side)
 	effect_on = attack_allowed | reflect
@@ -527,7 +533,7 @@ def _move(
 		connected=attack_allowed & connected,
 	)
 	state = apply_autotomize(state, side, attack_allowed & row.move_autotomize, tables)
-	state, restrict_failed = apply_restrictions(
+	state, restrict_failed, restrict_immune = apply_restrictions(
 		state, acting, row, effect_hit, opponent_pending & ~reflect, tables, rows, weather
 	)
 	# Relic Song (onAfterMoveSecondarySelf): a Meloetta changes forme after a connecting hit.
@@ -648,7 +654,7 @@ def _move(
 	boosts = jnp.where((hp[SIDES, state.active] > 0)[:, None], state.boosts, 0)
 	# Event record (events.py): this side's move attempt. A reflected move is the holder's attempt.
 	user = (SIDES == side) & started
-	user_immune = status_immune & ~reflect
+	user_immune = (status_immune | restrict_immune) & ~reflect
 	acting_fail = status_failed | restrict_failed | field_fail | status_immune
 	failed = (
 		sync_failed
@@ -687,7 +693,10 @@ def _move(
 	)
 	holder = (SIDES == foe) & reflect
 	holder_failed = acting_fail & reflect
-	holder_immune = status_immune & reflect
+	# A reflected Leech Seed is refused by a Grass-type original user with -immune.
+	reflected_seed = reflect & (row.move_volatile_status == VOLATILE_LEECH_SEED)
+	reflected_seed &= jnp.any(state.types[side, state.active[side]] == tables.grass_type)
+	holder_immune = ((status_immune | restrict_immune) & reflect) | reflected_seed
 	holder_outcome = jnp.where(reflect & ~bounce_hit, OUTCOME_MISS, 0) | jnp.where(
 		holder_failed, OUTCOME_FAILED, 0
 	)
@@ -961,6 +970,7 @@ def step(state, actions, key, forced, engine_tables):
 			last_item=mid.last_item,
 			item_revealed=mid.item_revealed,
 			item_public=mid.item_public,
+			item_gone=mid.item_gone,
 			ability_public=mid.ability_public,
 		)
 		state = update_active_items(state, jnp.any(switching), item_rows, abilities, tables=t)

@@ -452,6 +452,8 @@ def apply_damage_effects(
 	helm_damage = jnp.maximum(user_max // 6, 1) * contact_hits
 	helm_trigger = (item_rows.contact_kind[foe] == CONTACT_ROCKY_HELMET) & (helm_damage > 0)
 	helm_trigger &= ~magic_guard
+	# Rough Skin hurts first: a user it faints takes no Helmet damage, so the Helmet is not named.
+	helm_named = helm_trigger & (user_hp - skin_each > 0)
 	liquid_ooze = (target_hook == CONTACT_LIQUID_OOZE) & (drain > 0)
 	liquid_damage = jnp.where(liquid_ooze, drain, 0)
 	contact_ability_damage = (target_hook == CONTACT_ROUGH_SKIN) | (
@@ -639,6 +641,7 @@ def apply_damage_effects(
 		enabled
 		& (row.move_volatile_status == VOLATILE_LEECH_SEED)
 		& jnp.any(state.types[foe, target] == t.grass_type)
+		& ~absorbed  # Sap Sipper takes the seed first and prints its own lines
 	)
 	sticky_swap = enabled & row.move_item_swap & (rows[foe, ITEM_GUARD] == ITEM_GUARD_STICKY_HOLD)
 	absorb_stop = absorbed | oblivious | grass_seed | sticky_swap
@@ -684,7 +687,7 @@ def apply_damage_effects(
 		hit_landed,
 		field_hit,
 		item_consumptions,
-		(SIDES == foe) & helm_trigger,
+		(SIDES == foe) & helm_named,
 		contact_reveals | ((SIDES == foe) & reveal_ability),
 		jnp.any(sub_hits),
 		instafaint_kill,

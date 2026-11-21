@@ -163,7 +163,11 @@ def restore_form(state, leaving, tables):
 		(state.species != state.species_base) & base_is_meloetta & ~transformed[:, None]
 	)
 	moved = was[..., None]
+	# What the opponent was shown goes back to the base species too, unless an Illusion disguise
+	# is up: that stays until the disguise breaks (a switch-out shows nothing new).
+	disguised = (state.volatiles[:, ILLUSION_SLOT] > 0)[:, None]
 	state = state._replace(
+		shown_species=jnp.where(mask & ~disguised, state.species_base, state.shown_species),
 		species=jnp.where(mask, state.species_base, state.species),
 		types=jnp.where(mask[..., None], state.base_types, state.types),
 		moves=jnp.where(moved, state.saved_moves[:, None, :], state.moves),

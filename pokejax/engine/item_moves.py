@@ -18,7 +18,7 @@ from .abilities import (
 	reveal_abilities,
 )
 from .actions import SIDES
-from .state import CHOICE_MOVE, TEAM_SLOTS, UNBURDEN
+from .state import CHOICE_MOVE, ITEM_HELD, ITEM_TAKEN, TEAM_SLOTS, UNBURDEN
 
 
 def _set_unburden(state, mask):
@@ -62,13 +62,17 @@ def apply_item_swap(state, side, enabled, tables, rows):
 	incoming = jnp.where(SIDES == side, held[foe], held[side])
 	slots = jnp.arange(TEAM_SLOTS)[None, :] == state.active[:, None]
 	write = slots & swapped
-	receives = write & (incoming[:, None] != 0)
+	# The protocol names what each side lost (-enditem) and what it got (-item): the last item
+	# named is the new one, or the old one when the swap left the side empty-handed.
+	named = jnp.where(incoming != 0, incoming, held)
+	gone = jnp.where(incoming[:, None] != 0, ITEM_HELD, ITEM_TAKEN)
 	state = state._replace(
 		item=jnp.where(write, incoming[:, None].astype(state.item.dtype), state.item),
-		item_revealed=state.item_revealed | receives,
+		item_revealed=state.item_revealed | write,
 		item_public=jnp.where(
-			receives, incoming[:, None].astype(state.item_public.dtype), state.item_public
+			write, named[:, None].astype(state.item_public.dtype), state.item_public
 		),
+		item_gone=jnp.where(write, gone, state.item_gone).astype(state.item_gone.dtype),
 	)
 	removed = jnp.broadcast_to(swapped, (2,)) & (held != 0)
 	state = _set_unburden(state, removed & (rows[:, SPEED] == SPEED_UNBURDEN))
@@ -94,5 +98,6 @@ def apply_knock_off(state, side, enabled, tables, rows):
 		item=jnp.where(write, 0, state.item).astype(state.item.dtype),
 		item_revealed=state.item_revealed | write,
 		item_public=jnp.where(write, item.astype(state.item_public.dtype), state.item_public),
+		item_gone=jnp.where(write, ITEM_TAKEN, state.item_gone).astype(state.item_gone.dtype),
 	)
 	return _set_unburden(state, sides & (rows[:, SPEED] == SPEED_UNBURDEN))
