@@ -58,3 +58,33 @@ def test_environment_benchmark(tmp_path, synthetic_pool, with_observation):
 	assert result["completed_battles"] >= 0
 	assert result["mean_battle_length"] is None or result["mean_battle_length"] > 0
 	assert (result["observation_checksum"] is not None) == with_observation
+
+
+@pytest.mark.parametrize(
+	"policy, policy1",
+	[("random", None), ("max-damage", None), ("heuristics", "random-move")],
+)
+def test_environment_benchmark_with_baseline_policies(tmp_path, synthetic_pool, policy, policy1):
+	path = tmp_path / "teams.npz"
+	save_npz(synthetic_pool, path)
+	result = benchmark(
+		path,
+		batch_size=8,
+		steps=4,
+		repetitions=1,
+		seed=1,
+		environment=True,
+		policy=policy,
+		policy1=policy1,
+	)
+	assert result["policy"] == [policy, policy1 or policy]
+	assert result["steps_per_second"] > 0 and result["observation_checksum"] is None
+
+
+def test_a_baseline_policy_needs_the_environment_benchmark(tmp_path, synthetic_pool):
+	path = tmp_path / "teams.npz"
+	save_npz(synthetic_pool, path)
+	with pytest.raises(ValueError, match="--env"):
+		benchmark(path, batch_size=8, steps=4, repetitions=1, policy="heuristics")
+	with pytest.raises(ValueError, match="policy1 needs policy"):
+		benchmark(path, batch_size=8, steps=4, repetitions=1, environment=True, policy1="random")

@@ -6,6 +6,10 @@ replacements. A status or confusion is inflicted when first visible at a
 decision boundary, and a faint is counted when a member first becomes fainted.
 Both simulators emit those same decision-boundary facts; this module applies
 the counts once to both sets of battle traces.
+
+Each side plays one of the baseline policies of pokejax.baselines (--policy0, --policy1; default
+random, uniform over the legal mask) in the engine and the same one of reference/baselines.cjs in
+Showdown.
 """
 
 import argparse
@@ -21,6 +25,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from pokejax.baselines import POLICY_NAMES, make_policy
 from pokejax.engine.actions import legal_actions, move_availability
 from pokejax.engine.data import build_engine_tables
 from pokejax.engine.items import showdown_item_consumed
@@ -53,6 +58,7 @@ BATTLE_BATCH = 128
 MAX_DECISIONS = 3000
 STATUS_CODES = (BURN, POISON, TOXIC, PARALYSIS, SLEEP, FREEZE)
 STATUS_NAMES = ("brn", "psn", "tox", "par", "slp", "frz")
+DEFAULT_POLICY_TEXT = "uniform over the legal-action mask for both sides at every request"
 
 
 def _team_pairs_hash(team_pairs):
@@ -119,7 +125,14 @@ def _item_id(value):
 	return "".join(character.lower() for character in value if character.isalnum())
 
 
-def _rollout_batch(teams, policy_keys, engine_tables):
+def _side_actions(policy, side, states, masks, keys):
+	"""One policy's action for one side in every battle of the batch."""
+	return jax.vmap(lambda state, key, mask: policy(state, side, key, mask[side]))(
+		states, keys, masks
+	)
+
+
+def _rollout_batch(teams, policy_keys, engine_tables, policies):
 	"""Run a batch and return raw decision traces for shared host-side counting."""
 	batch_size = teams.species.shape[0]
 	states = jax.vmap(reset, in_axes=(0, 0, None))(policy_keys, teams, engine_tables)
@@ -156,14 +169,13 @@ def _rollout_batch(teams, policy_keys, engine_tables):
 		next_keys = key_parts[:, 0]
 		move_policy_keys = jax.vmap(lambda key: jax.random.split(key, 2))(key_parts[:, 1])
 		step_keys = key_parts[:, 2]
-		logits = jnp.where(mask, 0.0, -jnp.inf)
-		actions = jax.vmap(
-			lambda legal, action_keys: jax.vmap(
-				lambda player_legal, action_key: jax.random.categorical(
-					action_key, jnp.where(player_legal, 0.0, -jnp.inf)
-				)
-			)(legal, action_keys)
-		)(logits == 0.0, move_policy_keys).astype(jnp.int32)
+		actions = jnp.stack(
+			[
+				_side_actions(policy, side, state, mask, move_policy_keys[:, side])
+				for side, policy in enumerate(policies)
+			],
+			axis=1,
+		).astype(jnp.int32)
 		# The trace names the move the step executes: Struggle when no move is usable (PP,
 		# Disable, Taunt, Encore) or the Choice lock's move has no PP, as in step().
 		active_moves, usable, choice_active, choice_usable = jax.vmap(
@@ -263,14 +275,15 @@ def _teams_for_pairs(team_pairs, tables):
 	return teams
 
 
-def engine_summaries(showdown, *, seed, tables=None):
-	"""Run the engine on the exact team pairs saved by the Showdown runner."""
+def engine_summaries(showdown, *, seed, tables=None, policies=("random", "random")):
+	"""Run the engine on the exact team pairs saved by the Showdown runner, one policy per side."""
 	team_pairs = showdown["teamPairs"]
 	count = len(team_pairs)
 	if count != showdown["count"]:
 		raise ValueError("Showdown summary team-pair count does not match metadata")
 	tables = load_tables() if tables is None else tables
 	engine_tables = build_engine_tables(tables)
+	side_policies = tuple(make_policy(name, engine_tables, tables) for name in policies)
 	teams = _teams_for_pairs(team_pairs, tables)
 	move_ids = tuple(str(move) for move in tables.moves.ids)
 	base_key = jax.random.key(seed & 0xFFFFFFFF)
@@ -291,7 +304,7 @@ def engine_summaries(showdown, *, seed, tables=None):
 		keys = jax.vmap(lambda index: jax.random.fold_in(base_key, index))(
 			jnp.arange(start, start + batch_size, dtype=jnp.uint32)
 		)
-		result = jax.block_until_ready(_rollout_batch(chunk, keys, engine_tables))
+		result = jax.block_until_ready(_rollout_batch(chunk, keys, engine_tables, side_policies))
 		winner, turns, lengths, moves, switches, statuses, fainted, confusion, item_consumed = map(
 			jax.device_get, result
 		)
@@ -333,7 +346,8 @@ def engine_summaries(showdown, *, seed, tables=None):
 		"seed": seed,
 		"count": count,
 		"teamPairsHash": _team_pairs_hash(team_pairs),
-		"policy": "uniform over the legal-action mask for both sides at every request",
+		"policies": list(policies),
+		"policy": showdown.get("policy", DEFAULT_POLICY_TEXT),
 		"seconds": perf_counter() - started,
 		"battles": all_battles,
 	}
@@ -593,7 +607,7 @@ def _read_json(path):
 	return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def _validate_showdown(summary, battles, seed, teams):
+def _validate_showdown(summary, battles, seed, teams, policies=("random", "random")):
 	lock = _read_json(ROOT / "reference-lock.json")
 	if summary.get("schemaVersion") != 1 or summary.get("simulator") != "showdown":
 		raise ValueError("Expected a whole-battle Showdown summary schema v1")
@@ -607,11 +621,12 @@ def _validate_showdown(summary, battles, seed, teams):
 		raise ValueError("Showdown summary seed differs from --seed")
 	if summary.get("teams", "isolation") != teams:
 		raise ValueError("Showdown summary team mode differs from --unchanged")
+	if tuple(summary.get("policies", ("random", "random"))) != tuple(policies):
+		raise ValueError("Showdown summary policies differ from --policy0 and --policy1")
 
 
-def _engine_summaries_from_raw(showdown, seed):
-	raw = engine_summaries(showdown, seed=seed)
-	return raw
+def _engine_summaries_from_raw(showdown, seed, policies=("random", "random")):
+	return engine_summaries(showdown, seed=seed, policies=policies)
 
 
 def _write_json(path, value):
@@ -663,6 +678,10 @@ def run(args):
 			str(Path(args.team_pool).resolve()),
 			"--out",
 			str(showdown_path.resolve()),
+			"--policy0",
+			args.policy0,
+			"--policy1",
+			args.policy1,
 		]
 		if args.allowed:
 			command.extend(("--allowed", str(Path(args.allowed).resolve())))
@@ -671,7 +690,8 @@ def run(args):
 		subprocess.run(command, cwd=ROOT, check=True)
 		showdown = _read_json(showdown_path)
 	teams = "unchanged" if args.unchanged else "isolation"
-	_validate_showdown(showdown, args.battles, args.seed, teams)
+	policies = (args.policy0, args.policy1)
+	_validate_showdown(showdown, args.battles, args.seed, teams, policies)
 	showdown_counts = [
 		count_battle_summary({**battle, "teamPair": showdown["teamPairs"][index]})
 		for index, battle in enumerate(showdown["battles"])
@@ -684,11 +704,12 @@ def run(args):
 			or engine_summary.get("count") != args.battles
 			or engine_summary.get("seed") != args.seed
 			or engine_summary.get("teamPairsHash") != team_hash
+			or tuple(engine_summary.get("policies", ("random", "random"))) != policies
 		):
 			raise ValueError("Reused engine summary does not match the Showdown team pairs")
 		engine_counts = engine_summary["battles"]
 	else:
-		engine_summary = _engine_summaries_from_raw(showdown, args.seed)
+		engine_summary = _engine_summaries_from_raw(showdown, args.seed, policies)
 		_write_json(engine_path, engine_summary)
 		engine_counts = engine_summary["battles"]
 	rows = compare_summaries(showdown_counts, engine_counts, showdown.get("acceptedMoves", []))
@@ -704,6 +725,7 @@ def run(args):
 		"allowed": showdown["allowed"],
 		"acceptedMoves": showdown.get("acceptedMoves", []),
 		"policy": showdown["policy"],
+		"policies": list(policies),
 		"runtimeSeconds": seconds,
 		"multipleComparisonCorrection": "Holm-Bonferroni",
 		"countingRules": {
@@ -731,6 +753,18 @@ def main(argv=None):
 		"--unchanged",
 		action="store_true",
 		help="use pool teams exactly as generated (no isolation or replacements)",
+	)
+	parser.add_argument(
+		"--policy0",
+		choices=POLICY_NAMES,
+		default="random",
+		help="policy of side 0 (default random)",
+	)
+	parser.add_argument(
+		"--policy1",
+		choices=POLICY_NAMES,
+		default="random",
+		help="policy of side 1 (default random)",
 	)
 	parser.add_argument("--team-pool", type=Path, default=DEFAULT_POOL)
 	parser.add_argument("--stats-dir", type=Path, default=DEFAULT_STATS_DIR)

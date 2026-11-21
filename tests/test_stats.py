@@ -1,6 +1,7 @@
 import json
 
 import jax.numpy as jnp
+import pytest
 
 from pokejax import stats
 from pokejax.stats import (
@@ -80,7 +81,7 @@ def test_engine_item_counts_keep_team_pair_offsets_across_batches(monkeypatch):
 		lambda pairs, _tables: {"species": jnp.zeros((len(pairs), 2, 6), jnp.int16)},
 	)
 
-	def rollout(chunk, _keys, _engine_tables):
+	def rollout(chunk, _keys, _engine_tables, _policies):
 		batch = chunk["species"].shape[0]
 		consumed = jnp.zeros((1, batch, 2, 6), jnp.bool_).at[0, :, 0, 0].set(True)
 		return (
@@ -188,3 +189,61 @@ def test_whole_battle_smoke_with_unchanged_pool_teams(tmp_path):
 	for pair in showdown["teamPairs"]:
 		for team in pair:
 			assert team in generated
+
+
+@pytest.mark.parametrize("policies", [("heuristics", "random"), ("max-damage", "random-move")])
+def test_whole_battle_smoke_with_baseline_policies(tmp_path, policies):
+	"""Each side plays its baseline in both simulators; the report names them."""
+	stats_dir = tmp_path / "stats"
+	report_path = tmp_path / "report.json"
+	assert (
+		main(
+			[
+				"--battles",
+				"8",
+				"--seed",
+				"5",
+				"--unchanged",
+				"--policy0",
+				policies[0],
+				"--policy1",
+				policies[1],
+				"--team-pool",
+				str(DEFAULT_POOL),
+				"--stats-dir",
+				str(stats_dir),
+				"--out",
+				str(report_path),
+			]
+		)
+		== 0
+	)
+	report = json.loads(report_path.read_text())
+	showdown = json.loads((stats_dir / "showdown.json").read_text())
+	engine = json.loads((stats_dir / "engine.json").read_text())
+	assert report["policies"] == showdown["policies"] == engine["policies"] == list(policies)
+	assert f"side 0: {policies[0]}" in report["policy"]
+	# A deterministic side that moves uses no random draws, so it is never refused or illegal:
+	# every battle ended in a win, a loss or a tie.
+	assert all(battle["winner"] in (0, 1, "tie") for battle in showdown["battles"])
+	assert all(battle["winner"] in (0, 1, "tie") for battle in engine["battles"])
+
+
+def test_statistics_refuse_summaries_of_other_policies(tmp_path):
+	"""A reused Showdown summary must have been played with the policies the engine will play."""
+	stats_dir = tmp_path / "stats"
+	args = [
+		"--battles",
+		"4",
+		"--seed",
+		"2",
+		"--unchanged",
+		"--team-pool",
+		str(DEFAULT_POOL),
+		"--stats-dir",
+		str(stats_dir),
+		"--out",
+		str(tmp_path / "report.json"),
+	]
+	assert main([*args, "--policy1", "random-move"]) == 0
+	assert main([*args, "--reuse-showdown", str(stats_dir / "showdown.json")]) == 1

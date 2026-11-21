@@ -5,6 +5,9 @@
  * The JSON output includes the exact constructor teams so the engine can reuse them.
  * --unchanged plays pool teams exactly as generated (no isolation, no replacements), drawn
  * from the supported indices of pokejax.sampler; the default is isolation teams.
+ * --policy0 and --policy1 choose each side's policy (default random, uniform over the legal choices):
+ * random, random-move, max-damage or heuristics (reference/baselines.cjs; pokejax.baselines has the
+ * same four). The last two read only their player's own view (reference/player-view.cjs).
  */
 
 const fs = require('node:fs');
@@ -14,16 +17,22 @@ const { execFileSync } = require('node:child_process');
 const assert = require('node:assert/strict');
 const { Dex } = require('./vendor/pokemon-showdown/dist/sim/dex');
 const { PRNG } = require('./vendor/pokemon-showdown/dist/sim/prng');
-const { isolationMember, legalChoices, seedFor, isolationBattle } = require('./record-battles.cjs');
+const { isolationMember, legalChoices, seedFor, isolationBattle, playerViews } = require('./record-battles.cjs');
+const { Baselines, POLICY_NAMES } = require('./baselines.cjs');
 
 const root = path.resolve(__dirname, '..');
 const vendor = path.join(__dirname, 'vendor/pokemon-showdown');
 const dex = Dex.forFormat('gen5randombattle');
 
-function playBattle(index, masterSeed, teamPair, policySeedWords) {
-	const battle = isolationBattle(seedFor(masterSeed, index, 'battle'));
+const READS_VIEW = new Set(['max-damage', 'heuristics']);
+
+function playBattle(index, masterSeed, teamPair, policySeedWords, policies, baselines) {
+	// The deterministic policies read the player's own view, fed what its stream receives.
+	const viewer = policies.some(name => READS_VIEW.has(name)) ? playerViews({ build: true }) : null;
+	const battle = isolationBattle(seedFor(masterSeed, index, 'battle'), viewer?.send);
 	battle.setPlayer('p1', { name: 'Side 0', team: structuredClone(teamPair[0]) });
 	battle.setPlayer('p2', { name: 'Side 1', team: structuredClone(teamPair[1]) });
+	if (viewer) battle.sendUpdates();
 	const policy = new PRNG(policySeedWords);
 	const fixed = battle.sides.map(side => [...side.pokemon]);
 	const decisions = [];
@@ -33,7 +42,9 @@ function playBattle(index, masterSeed, teamPair, policySeedWords) {
 			if (battle.turn > 1000 || decisionCount >= 3000) {
 				throw new Error(`Battle ${index} exceeded Showdown's turn limit`);
 			}
-			const selected = battle.sides.map((side, s) => policy.sample(legalChoices(side, fixed[s])));
+			const selected = battle.sides.map((side, s) => baselines.choose(policies[s], {
+				choices: legalChoices(side, fixed[s]), view: viewer?.views[s], prng: policy,
+			}).choice);
 			const moves = [null, null];
 			const switches = [false, false];
 			for (let side = 0; side < 2; side++) {
@@ -53,6 +64,7 @@ function playBattle(index, masterSeed, teamPair, policySeedWords) {
 					assert(battle.choose(`p${side + 1}`, choice.choice));
 				}
 			}
+			if (viewer) battle.sendUpdates();
 			decisions.push({
 				moves,
 				switches,
@@ -96,12 +108,16 @@ async function main() {
 		seed: { type: 'string', default: '1' },
 		pool: { type: 'string', default: 'work/teams/gen5-teams.json' },
 		allowed: { type: 'string' },		unchanged: { type: 'boolean', default: false },
+		policy0: { type: 'string', default: 'random' }, policy1: { type: 'string', default: 'random' },
 		out: { type: 'string', default: 'work/stats/showdown.json' },
 	} });
 	const count = Number(values.battles);
 	const seed = Number(values.seed);
 	assert(Number.isSafeInteger(count) && count > 0, '--battles must be a positive safe integer');
 	assert(Number.isSafeInteger(seed), '--seed must be a safe integer');
+	const policies = [values.policy0, values.policy1];
+	for (const name of policies) assert(POLICY_NAMES.includes(name), `Unknown policy ${name}`);
+	const baselines = new Baselines();
 	const lock = JSON.parse(fs.readFileSync(path.join(root, 'reference-lock.json'), 'utf8'));
 	assert.equal(execFileSync('git', ['-C', vendor, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
 		lock.commit);
@@ -127,7 +143,7 @@ async function main() {
 	const { teamPairs, policySeeds } = makeBattleInputs(count, seed, pool, moves, options);
 	const battles = [];
 	for (let index = 0; index < count; index++) {
-		battles.push(playBattle(index, seed, teamPairs[index], policySeeds[index]));
+		battles.push(playBattle(index, seed, teamPairs[index], policySeeds[index], policies, baselines));
 		if ((index + 1) % 100 === 0 || index + 1 === count) {
 			console.log(`Showdown ${index + 1}/${count}`);
 		}
@@ -144,7 +160,10 @@ async function main() {
 		teams: teamMode,
 		allowed: { taskMoves: options.taskMoves, abilities: options.abilities, items: options.items },
 		acceptedMoves: moves,
-		policy: 'uniform over the legal-action mask for both sides at every request',
+		policies,
+		policy: policies.every(name => name === 'random') ?
+			'uniform over the legal-action mask for both sides at every request' :
+			policies.map((name, side) => `side ${side}: ${name}`).join('; ') + ' (reference/baselines.cjs)',
 		teamPairs,
 		battles,
 	}));

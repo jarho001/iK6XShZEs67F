@@ -75,13 +75,23 @@ next step. `OpponentEnv(env, opponent)` plays one random side per battle against
 function `(state, side, key) -> action` (random over the engine's legal mask by default) and
 returns time steps of batch shape [B]. The module docstring has the details.
 
+`pokejax/baselines.py` has four policies with that signature, chosen by name with
+`make_policy(name, env.tables)`: `random` (uniform over the legal mask), `random-move` (uniform over the
+legal moves, a switch only when none is legal), `max-damage` (power x STAB x effectiveness x accuracy x
+hits x attack / defence, a switch only when it must) and `heuristics` (poke-env's
+`SimpleHeuristicsPlayer`, commit bab3673). They are branch-free, read only what the player knows and
+pick from the engine's true legal actions (hidden traps included), so none is ever refused. The
+module docstring lists every interpretation of poke-env. `reference/baselines.cjs` is the same four
+in Node, for `python -m pokejax.stats --policy0 NAME --policy1 NAME` and for the agreement check.
+
 ## Benchmarks
 
 Run `python -m pokejax.bench --json` for the random legal policy, adding
 `--batch-size 16384` to change the batch or `--with-observation` to observe
 both sides. `--env` measures the environment of `pokejax.env` (sampler draws, auto-reset,
-rewards, flags) with the random policy on both sides instead of the bare engine loop. The
-cold first call includes compilation and one rollout.
+rewards, flags) with the random policy on both sides instead of the bare engine loop;
+`--env --policy NAME` has both sides play that baseline from the state (`--policy1` gives side 1
+another). The cold first call includes compilation and one rollout.
 
 Measured 2026-11-17 on an NVIDIA GeForce RTX 3060 Ti, JAX 0.12.0.1,
 HEAD `93a1b26fbbbd8bc0dbc527647b7a2bbc3e7ce7dd`:
@@ -146,3 +156,87 @@ PPO smoke test (`python -m pokejax.ppo_smoke`, default configuration, 600 update
 9,830,400 environment steps): the trained policy won 3,754 of 4,096 battles against random
 (91.65%, 95% Wilson CI 90.76–92.46%); random against random won 49.88% (48.35–51.41%). Training
 took 188.9 s on the RTX 3060 Ti, with no illegal actions.
+
+### Phase 3 results
+
+Gates, measured 2026-11-21 on an idle NVIDIA GeForce RTX 3060 Ti, JAX 0.12.0.1, with the
+Phase 3 exit code, batch 4,096, median of three fresh processes each. Phase 3 exit measurement,
+environment steps per second without observations (`python -m pokejax.bench --json --env --policy P`,
+sampler draws, auto-reset, rewards and policy P on both sides):
+
+| Policy on both sides | Steps/s | Runs | Mean battle length (steps) |
+|---|---:|---|---:|
+| random | 3,067,270 | 3,066,048 to 3,079,595 | 71.31 |
+| random-move | 3,041,462 | 3,034,812 to 3,051,893 | 43.90 |
+| max-damage | 3,025,314 | 3,020,785 to 3,026,324 | 27.46 |
+| heuristics | 3,016,411 | 3,012,282 to 3,019,419 | 27.65 |
+
+Each baseline runs at the 3,000,000 steps/s target: pass, with the thinnest margin 0.5%
+(heuristics). The engine alone (`python -m pokejax.bench --json`) runs 3,077,254 steps/s
+(3,072,321 to 3,096,411; 3,419,031 at the end of Phase 2). It lost 5% to the event record and
+observation state of task 1 and 6% to the 41 engine defects fixed between tasks 1 and 2 (found by
+fresh recordings with new seeds; see `tests/test_regress.py`). With both sides observed the
+environment (random policies) runs 2,243,745 steps/s. Cold first call: 32.7 to 33.8 s, 35.3 s with
+observations; cold compile under 60 s: pass.
+
+Observation (tasks 1 and 2). `observe` shows what one player can know at a decision point: the
+own team in full, the opponent as revealed, both actives' public volatiles, weather, hazards, Trick
+Room, pending Wish and Healing Wish, and a fixed record of the last step's visible events (action
+order, move, miss, failure, critical hit, effectiveness, damage and healing in protocol percent, status,
+faint). Durations that the protocol never states are not in it, only the turns since a public effect
+started. The no-leak tests check that two states differing only in unrevealed opponent data or private
+counters give the same observation. `reference/player-view.cjs` builds the same observation from one
+player's requests and protocol lines alone, and `pokejax/obs_diff.py` compares every leaf with the
+engine's at every decision point of recorded pool battles, for both sides: the 40-battle fixture
+(2,649 decision points), the 300-battle set (21,826) and four more 300-battle seeds match completely.
+The comparison found and fixed leaks (a benched foe's HP after Regenerator, Shadow Tag, Arena Trap and
+Magnet Pull in the legal mask, a Transformed member's copied stats) and missing public facts (Knock Off,
+Trick and stolen items). Illusion is the one carve-out: once the foe's Illusion holder has been active
+(about 2.5% of battles) the protocol does not say which roster entry a disguised switch-in is, so the
+opponent roster arrays of the two sides can legitimately differ and are not compared there.
+
+Environment (task 3). `Env` runs a batch of battles with teams from the sampler and replaces a battle that
+ended or hit the step cap inside the same step. It returns both sides' observations (or none),
+zero-sum rewards (win 1, loss -1, tie 0; optional potential-based shaping, off by default),
+`terminated` and `truncated` kept apart, the observed legal mask and episode statistics. A switch that
+only a hidden trap forbids is refused as Showdown refuses it. `OpponentEnv` plays one random side per
+battle against a policy function. The PPO smoke test (`python -m pokejax.ppo_smoke`, 600 updates,
+9,830,400 environment steps) runs on it: the trained policy won 3,658 of 4,096 battles against random
+(89.31%, 95% Wilson CI 88.32-90.22%); random against random won 49.56% (48.03-51.09%). Training took
+222.2 s on the RTX 3060 Ti, with no illegal actions.
+
+Baselines (task 4). The four policies of `pokejax/baselines.py` and the Node ones of
+`reference/baselines.cjs` agree exactly. At every decision point of recorded unchanged pool battles
+(`node reference/record-battles.cjs --profile pool --policies`) the Node max-damage and heuristics
+policies choose an action for both sides from that player's own view, and `pokejax.baselines_diff`
+replays the battle through the engine and compares it with the JAX choice: 0 of 10,596 choices differ
+over the 40-battle fixture (`tests/fixtures/policy-pool.jsonl.gz`) and 0 of 87,304 over the 300-battle
+set; no choice fell back to a random pick. Ties between candidates go to the first in request order
+(Showdown's `side.pokemon` order, which `BattleState.party` tracks), so the check is sensitive to it:
+ascending team slots instead make 29 choices of the fixture differ. Interpretations of poke-env that the
+policies make, beyond the brief: Hidden Power counts as the typed power 70 move (the Gen 5 table row has
+power 0), the entry-hazard branch sees only Spikes and Toxic Spikes, ties are scores within 1e-5, and the
+setup-move branch is ported but off because poke-env's `move.target == "self"` compares an enum with a
+string and is never true at the pinned commit. Enabling it in both implementations still agrees
+(0 of 87,304); it changes 227 of the 5,298 heuristics choices of the fixture (4%).
+
+Whole-battle statistics on the unchanged pool teams (`python -m pokejax.stats --battles 4000 --unchanged
+--seed N --policy0 A --policy1 B`, the same team pairs in both simulators). Side 0's win rate in
+Showdown and in the engine, and the two-proportion test of the difference:
+
+| Side 0 against side 1 | Seed | Showdown | Engine | Difference (SE) | p | Turns Showdown / engine | Flagged (metrics) |
+|---|---:|---:|---:|---:|---:|---:|---|
+| random-move against random | 1 | 0.9235 | 0.9193 | +0.0042 (0.0060) | 0.48 | 38.60 / 38.38 | none (337) |
+| random-move against random | 2 | 0.9187 | 0.9163 | +0.0025 (0.0062) | 0.68 | 38.60 / 38.71 | none (340) |
+| max-damage against random | 1 | 0.9812 | 0.9832 | -0.0020 (0.0030) | 0.50 | 24.64 / 24.45 | none (338) |
+| max-damage against random | 2 | 0.9842 | 0.9832 | +0.0010 (0.0028) | 0.72 | 24.82 / 24.69 | none (339) |
+| heuristics against random | 1 | 0.9850 | 0.9858 | -0.0008 (0.0027) | 0.78 | 24.27 / 23.93 | none (337) |
+| heuristics against random | 2 | 0.9872 | 0.9875 | -0.0003 (0.0025) | 0.92 | 24.30 / 24.34 | none (339) |
+| heuristics against max-damage | 1 | 0.5268 | 0.5225 | +0.0043 (0.0112) | 0.70 | 18.43 / 18.40 | none (336) |
+| heuristics against max-damage | 2 | 0.5140 | 0.5235 | -0.0095 (0.0112) | 0.40 | 18.63 / 18.75 | none (337) |
+
+No metric of any run is flagged after Holm correction (battle length, its distribution, faints,
+switches, Struggle, confusion, statuses, and the use counts of every move and consumed item). The
+smallest raw p-values are 0.018 to 0.087 (one per run, a different metric each time: for example
+`status.par` 0.044 with seed 1 for max-damage against random, which is 0.81 with seed 2). Random
+against random, for the Phase 2 comparison, is under Phase 2 results.

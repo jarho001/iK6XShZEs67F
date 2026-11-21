@@ -38,6 +38,19 @@
  * node reference/record-battles.cjs --profile pool --views --count 300 --seed 1 --out work/diff/obs-pool.jsonl.gz
  * node reference/record-battles.cjs --profile pool --views --count 40 --seed 4 --out tests/fixtures/obs-pool.jsonl.gz
  *
+ * node reference/record-battles.cjs --profile pool --policies --count 300 --seed 1 --out work/diff/policy-pool.jsonl.gz
+ * node reference/record-battles.cjs --profile pool --policies --count 40 --seed 4 --out tests/fixtures/policy-pool.jsonl.gz
+ *
+ * --policies runs a reference/player-view.cjs per player as --views does, and at every decision point
+ * (initial and after each step) has the Node max-damage and heuristics policies of reference/baselines.cjs
+ * choose an action for both sides from that player's view and the engine's legal choices: {initialPolicies,
+ * steps: [{..., policies: {'max-damage': [side 0, side 1], heuristics: [...]}}]}. The battles are the same as
+ * without it; with --policies alone the state snapshots are left out (a replay needs only actions and outcomes).
+ * --setup-branch turns on the heuristics' setup-move branch, which poke-env's own condition never reaches (see
+ * pokejax/baselines.py), to check that its port agrees too.
+ * pokejax.baselines_diff compares those actions with the JAX policies on the replayed engine state; stats
+ * policyFallbacks counts the choices that fell back to a random pick (none for these two policies).
+ *
  * --views runs one reference/player-view.cjs per player on that player's own stream (what
  * getPlayerStreams delivers: its requests and its split protocol lines) and stores both players'
  * observations at every decision point instead of the state snapshots: {initialActive, initialViews,
@@ -128,6 +141,7 @@ const moveOverrides = [5, 6, 7, 8].map(gen => Object.fromEntries(
 ));
 const { Battle, extractChannelMessages } = require('./vendor/pokemon-showdown/dist/sim/battle');
 const { PlayerView } = require('./player-view.cjs');
+const { Baselines } = require('./baselines.cjs');
 const { Dex } = require('./vendor/pokemon-showdown/dist/sim/dex');
 const { PRNG } = require('./vendor/pokemon-showdown/dist/sim/prng');
 const dex = Dex.forFormat('gen5randombattle');
@@ -936,6 +950,18 @@ function isolationMember(member, moves, options, policy) {
 		item: (options.items || []).includes(dex.toID(member.item)) ? member.item : '' };
 }
 
+// The deterministic baselines' choice for both sides at the current decision point, from each player's
+// own view and the engine's true legal choices (a random pick, which none of them makes, is counted).
+const RECORDED_POLICIES = ['max-damage', 'heuristics'];
+function policyActions(baselines, battle, fixed, viewer, stats) {
+	return Object.fromEntries(RECORDED_POLICIES.map(name => [name, battle.sides.map((side, s) => {
+		const choices = legalChoices(side, fixed[s], battle.ended);
+		const { choice, random } = baselines.choose(name, { choices, view: viewer.views[s] });
+		if (random) stats.policyFallbacks[name]++;
+		return choice.action;
+	})]));
+}
+
 function playBattle(index, masterSeed, pool, moves, ghostTeams, exhaustionMoves, options = {}) {
 	const seed = seedFor(masterSeed, index, 'battle');
 	const policySeed = seedFor(masterSeed, index, 'policy');
@@ -955,14 +981,16 @@ function playBattle(index, masterSeed, pool, moves, ghostTeams, exhaustionMoves,
 	const players = teams.map((team, side) => ({ name: `Side ${side}`, team: structuredClone(team) }));
 	const recordStart = (options.profile === 'isolation' && options.abilities?.length > 0) ||
 		options.profile === 'pool';
-	const viewer = options.views || options.streams ?
-		playerViews({ build: options.views, keep: options.streams }) : null;
+	const viewer = options.views || options.streams || options.policies ?
+		playerViews({ build: options.views || options.policies, keep: options.streams }) : null;
+	const baselines = options.policies ? new Baselines({ setupBranch: options.setupBranch }) : null;
 	const battle = recordStart ? isolationBattle(seed, viewer?.send) : new Battle({
 		formatid: 'gen5randombattle', seed, p1: players[0], p2: players[1],
 		...(viewer ? { send: viewer.send } : {}),
 	});
 	try {
 		const stats = newStats();
+		if (options.policies) stats.policyFallbacks = Object.fromEntries(RECORDED_POLICIES.map(name => [name, 0]));
 		const recorder = instrument(battle, stats, undefined, { groupedSwitchInOnly: recordStart });
 		let initialOutcomes;
 		const publicAbilities = recordStart ? trackPublicAbilities(battle) : undefined;
@@ -994,6 +1022,7 @@ function playBattle(index, masterSeed, pool, moves, ghostTeams, exhaustionMoves,
 		recorder.setFixed(fixed);
 		const initialState = snapshot(battle, fixed, publicAbilities, publicSpecies);
 		const initialViews = options.views ? viewer.observations() : undefined;
+		const initialPolicies = baselines ? policyActions(baselines, battle, fixed, viewer, stats) : undefined;
 		const steps = [];
 		let turnLimitHit = false;
 		while (!battle.ended) {
@@ -1018,9 +1047,12 @@ function playBattle(index, masterSeed, pool, moves, ghostTeams, exhaustionMoves,
 			if (viewer) battle.sendUpdates();
 			const state = snapshot(battle, fixed, publicAbilities, publicSpecies);
 			steps.push({ actions: selected.map(choice => choice.action), outcomes,
-				// A views recording carries the observations instead of the state snapshots.
+				// A views recording carries the observations instead of the state snapshots, and a
+				// policies recording only the actives (the replay needs no snapshot).
 				...(options.views ? { active: state.sides.map(side => side.active),
-					views: rounded(viewer.observations()) } : { state }) });
+					views: rounded(viewer.observations()) } : options.policies ?
+					{ active: state.sides.map(side => side.active) } : { state }),
+				...(baselines ? { policies: policyActions(baselines, battle, fixed, viewer, stats) } : {}) });
 			for (const outcome of outcomes) {
 				stats.outcomes[outcome.kind] = (stats.outcomes[outcome.kind] || 0) + 1;
 				if (outcome.kind === 'hit' && outcome.value === 0) stats.misses++;
@@ -1036,7 +1068,9 @@ function playBattle(index, masterSeed, pool, moves, ghostTeams, exhaustionMoves,
 			profile: exhaustion ? 'natural-pp-exhaustion' : 'random', teams,
 			initialOverrides: [], ...(recordStart ? { initialOutcomes } : {}),
 			...(options.views ? { initialActive: initialState.sides.map(side => side.active),
-				initialViews: rounded(initialViews) } : { initialState }), steps, stats, turnLimitHit,
+				initialViews: rounded(initialViews) } : options.policies ?
+				{ initialActive: initialState.sides.map(side => side.active) } : { initialState }),
+			...(baselines ? { initialPolicies } : {}), steps, stats, turnLimitHit,
 			...(options.streams ? { streams: viewer.chunks } : {}) };
 	} finally { battle.destroy(); }
 }
@@ -1047,6 +1081,7 @@ async function main() {
 		out: { type: 'string', default: 'work/diff/phase1.jsonl.gz' },
 		profile: { type: 'string', default: 'isolation' }, allowed: { type: 'string' },
 		views: { type: 'boolean', default: false }, streams: { type: 'boolean', default: false },
+		policies: { type: 'boolean', default: false }, 'setup-branch': { type: 'boolean', default: false },
 	} });
 	const count = Number(values.count);
 	const seed = Number(values.seed);
@@ -1063,6 +1098,7 @@ async function main() {
 	const baseMoves = plainMoves ? supported.moves.filter(id => plainMoves.has(id)) : supported.moves;
 	const moves = [...new Set([...baseMoves, ...(extra.moves || []).map(id => dex.toID(id))])].sort();
 	const options = { profile: values.profile, views: values.views, streams: values.streams,
+		policies: values.policies, setupBranch: values['setup-branch'],
 		taskMoves: (extra.moves || []).map(id => dex.toID(id)),
 		abilities: [...new Set([...supported.abilities, ...(extra.abilities || []).map(id => dex.toID(id))])].sort(),
 		items: [...supported.items, ...(extra.items || []).map(id => dex.toID(id))] };
@@ -1087,11 +1123,14 @@ async function main() {
 	async function write(record) {
 		if (!stream.write(JSON.stringify(record) + '\n')) await once(stream, 'drain');
 	}
-	const summary = { battles: count, ...newStats(), meanLength: 0, turnLimitHits: 0 };
+	const summary = { battles: count, ...newStats(), ...(values.policies ? { policyFallbacks: {} } : {}),
+		meanLength: 0, turnLimitHits: 0 };
 	try {
-		const { teamIndices, views, streams, ...allowed } = options;
+		const { teamIndices, views, streams, policies, setupBranch, ...allowed } = options;
 		await write({ type: 'header', schemaVersion: 2, showdownCommit: lock.commit, seed, count,
 			...(views ? { playerViews: { builder: 'reference/player-view.cjs', streams } } : {}),
+			...(policies ? { policies: { builder: 'reference/baselines.cjs', names: RECORDED_POLICIES,
+				setupBranch: options.setupBranch } } : {}),
 			format: 'gen5randombattle', acceptedMoves: moves, allowed, turnLimit: TURN_LIMIT,
 			poolSeed: pool.seed, policy: 'uniform over all legal moves and switches',
 			exhaustion: { every: 20, moves: exhaustionMoves, initialOverrides: false },

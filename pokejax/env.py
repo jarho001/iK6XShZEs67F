@@ -36,7 +36,8 @@ key and actions therefore always give the same trajectory.
 `OpponentEnv` plays one learner side per battle against a policy function (state, side, key)
 -> action that runs inside step; its time steps have batch shape [B]. Its step splits the key
 into (key, opponent_key, side_key): the opponent's key for battle b is split(opponent_key, B)[b],
-and side_key draws the learner sides after a reset.
+and side_key draws the learner sides after a reset. pokejax.baselines has four standard opponents
+(random, random-move, max-damage, heuristics) with that signature.
 """
 
 import dataclasses
@@ -48,13 +49,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from pokejax.baselines import RandomPolicy
 from pokejax.engine.actions import (
 	NUM_ACTIONS,
 	action_masks,
 	block_switches,
-	legal_actions,
 )
-from pokejax.engine.data import EngineTables, build_engine_tables
+from pokejax.engine.data import build_engine_tables
 from pokejax.engine.observation import observe
 from pokejax.engine.reset import (
 	Teams,
@@ -380,16 +381,6 @@ class Env:
 			rejected=rejected,
 		)
 		return es_next, Advance(reward, terminated, truncated, info, kept)
-
-
-class RandomPolicy(NamedTuple):
-	"""A policy (state, side, key) -> action: uniform over the engine's legal actions."""
-
-	tables: EngineTables
-
-	def __call__(self, state, side, key):
-		mask = legal_actions(state, self.tables)[side]
-		return jax.random.categorical(key, jnp.where(mask, 0.0, -jnp.inf))
 
 
 class OpponentState(NamedTuple):

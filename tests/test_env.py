@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from pokejax.baselines import POLICY_NAMES, make_policy
 from pokejax.engine.actions import legal_actions, observed_actions
 from pokejax.engine.observation import observe
 from pokejax.engine.state import MOVE, ONGOING, SIDE0, SIDE1, TIE
@@ -576,6 +577,33 @@ def test_the_default_opponent_is_random_over_the_engine_mask(env, tables):
 	assert set(picks.tolist()) <= {0, 1, 2, 3} and len(set(picks.tolist())) > 1
 	free = np.asarray(pick(state, 1, jax.random.split(KEY, 64)))
 	assert (free >= 4).any() and (free < 4).any()
+
+
+@pytest.mark.parametrize("name", POLICY_NAMES)
+def test_a_baseline_opponent_only_picks_what_the_engine_mask_allows(env, tables, name):
+	"""Side 0 is trapped by a hidden Shadow Tag: no baseline picks a switch the engine refuses."""
+	state = jax.tree.map(lambda x: x[0], trapped_state(env, tables))
+	mask = np.asarray(legal_actions(state, env.tables))
+	assert not mask[0][4:].any() and mask[1][4:].any()
+	pick = jax.jit(jax.vmap(make_policy(name, env.tables, tables), in_axes=(None, None, 0)))
+	for side in (0, 1):
+		picks = np.asarray(pick(state, side, jax.random.split(KEY, 64)))
+		assert mask[side][picks].all(), (name, side)
+
+
+def test_the_wrapper_plays_a_baseline_opponent_without_illegal_actions(env, tables):
+	wrapper = OpponentEnv(env, make_policy("heuristics", env.tables, tables))
+	ws, timestep = WRAPPER_RESET(wrapper, KEY)
+	key = jax.random.key(3)
+	ended_total = 0
+	for _ in range(100):
+		key, action_key = jax.random.split(key)
+		action = jax.random.categorical(action_key, jnp.where(timestep.legal, 0.0, -jnp.inf))
+		ws, timestep = WRAPPER_STEP(wrapper, ws, action)
+		assert not np.asarray(timestep.info.illegal).any()
+		assert not np.asarray(timestep.info.opponent_illegal).any()
+		ended_total += int(np.asarray(timestep.info.ended).sum())
+	assert ended_total > 0
 
 
 def test_a_trapped_learner_is_refused_and_its_opponent_action_is_kept(wrapper, env, tables):

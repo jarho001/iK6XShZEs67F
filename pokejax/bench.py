@@ -3,7 +3,10 @@
 The default mode runs the engine with its own auto-reset loop. `--env` runs the environment of
 pokejax.env instead (team draws from the sampler, auto-reset, rewards, done flags, step and
 turn counts), with the random policy on both sides; add `--with-observation` to observe both
-sides in either mode.
+sides in either mode. `--env --policy NAME` has both sides play that baseline of
+pokejax.baselines (random, random-move, max-damage, heuristics) from the state, without
+observations unless `--with-observation` is given; `--policy1` gives side 1 another one. Without
+`--policy` the random policy is one batched draw over the engine mask, the fastest form.
 """
 
 import argparse
@@ -16,6 +19,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from pokejax.baselines import POLICY_NAMES, make_policy
 from pokejax.engine.actions import legal_actions
 from pokejax.engine.data import build_engine_tables
 from pokejax.engine.observation import observe
@@ -88,19 +92,40 @@ def rollout(carry, pool, tables, steps, with_observation=False):
 	return carry, tuple(jnp.sum(x) for x in stats)
 
 
-def env_rollout(env, carry, steps):
-	"""Advance an environment with the random policy on both sides (the engine's legal mask).
+def _policy_actions(env, env_state, key, policies):
+	"""Both sides' baseline actions [B, 2] from the state and the engine's legal mask."""
+	batch = env.config.batch_size
+	mask = env.engine_mask(env_state)
+	keys = jax.random.split(key, (len(policies), batch))
+	return jnp.stack(
+		[
+			jax.vmap(lambda state, k, m, p=policy, s=side: p(state, s, k, m[s]))(
+				env_state.state, keys[side], mask
+			)
+			for side, policy in enumerate(policies)
+		],
+		axis=1,
+	)
+
+
+def env_rollout(env, carry, steps, policies=None):
+	"""Advance an environment, each side playing a baseline policy from the engine's legal mask.
 
 	carry is (env_state, key); returns the carry and the sums of completed battles, of their
 	lengths in steps and, with observations, of every observation leaf (so XLA keeps them).
+	policies is a pair of pokejax.baselines policies, or None for the random policy as one
+	batched draw over the mask.
 	"""
 	observing = env.config.observe == "both"
 
 	def advance(carry, _):
 		env_state, key = carry
 		key, action_key = jax.random.split(key)
-		logits = jnp.where(env.engine_mask(env_state), 0.0, -jnp.inf)
-		actions = jax.random.categorical(action_key, logits, axis=-1)
+		if policies is None:
+			logits = jnp.where(env.engine_mask(env_state), 0.0, -jnp.inf)
+			actions = jax.random.categorical(action_key, logits, axis=-1)
+		else:
+			actions = _policy_actions(env, env_state, action_key, policies)
 		env_state, timestep = env.step(env_state, actions)
 		# Per-battle flags and lengths stack up like a training rollout's; they are summed after.
 		stats = (timestep.info.ended, timestep.info.steps)
@@ -120,19 +145,35 @@ def _benchmark(
 	seed=0,
 	with_observation=False,
 	environment=False,
+	policy=None,
+	policy1=None,
 ):
-	"""Benchmark on the default device; use a fresh process for a cold compile."""
+	"""Benchmark on the default device; use a fresh process for a cold compile.
+
+	policy (a name of pokejax.baselines.POLICY_NAMES) is the baseline both sides play in the
+	environment benchmark, policy1 side 1's if different; None is the batched random draw.
+	"""
 	if min(batch_size, steps, repetitions) < 1:
 		raise ValueError("batch size, steps and repetitions must be positive")
+	if (policy or policy1) and not environment:
+		raise ValueError("A baseline policy needs the environment benchmark (--env)")
+	if policy1 and not policy:
+		raise ValueError("policy1 needs policy")
 	if environment:
 		env = Env(EnvConfig(batch_size, observe="both" if with_observation else "none"), pool_path)
 		key, init_key = jax.random.split(jax.random.key(seed))
 		carry = (env.reset(init_key)[0], key)
-		jax.block_until_ready((carry, env))
+		side_policies = None
+		if policy:
+			host_tables = load_tables()
+			side_policies = tuple(
+				make_policy(name, env.tables, host_tables) for name in (policy, policy1 or policy)
+			)
+		jax.block_until_ready((carry, env, side_policies))
 		jitted = jax.jit(env_rollout, static_argnums=(2,))
 
 		def run(carry):
-			return jitted(env, carry, steps)
+			return jitted(env, carry, steps, side_policies)
 	else:
 		host_pool = load_npz(pool_path)
 		if not len(host_pool.team_size) or np.any(host_pool.team_size != TEAM_SLOTS):
@@ -173,6 +214,7 @@ def _benchmark(
 		"jax_version": jax.__version__,
 		"batch_size": batch_size,
 		"mode": "environment" if environment else "engine",
+		"policy": [policy, policy1 or policy] if policy else None,
 		"with_observation": with_observation,
 		"observation_checksum": float(stats[2]) if with_observation else None,
 		"steps_per_call": steps,
@@ -215,6 +257,16 @@ def main():
 		action="store_true",
 		help="run the environment (sampler draws, auto-reset, rewards, flags), not the bare engine",
 	)
+	parser.add_argument(
+		"--policy",
+		choices=POLICY_NAMES,
+		help="with --env: the baseline both sides play (default: one batched random draw)",
+	)
+	parser.add_argument(
+		"--policy1",
+		choices=POLICY_NAMES,
+		help="with --env --policy: side 1's baseline if different",
+	)
 	args = parser.parse_args()
 	result = benchmark(
 		args.team_pool,
@@ -224,6 +276,8 @@ def main():
 		args.seed,
 		args.with_observation,
 		args.env,
+		args.policy,
+		args.policy1,
 	)
 	if args.json:
 		print(json.dumps(result))
