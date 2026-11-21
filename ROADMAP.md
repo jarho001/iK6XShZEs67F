@@ -332,8 +332,10 @@ their outputs stay outside git.
    truncated battles and not terminated ones; minibatches of whole
    sequences with the hidden state stored at each sequence start and reset
    at episode boundaries. Configuration in files (batch, rollout length,
-   widths, learning rates), checkpoints that resume bit for bit, metrics
-   to disk. Check: it beats random clearly with the default config, and
+   widths, learning rates), checkpoints that resume bit for bit on the
+   CPU (on the GPU, scatter-add order in the embedding gradients makes
+   resumed runs differ by about 1e-12 unless XLA's deterministic ops are
+   on, at 4x the update time), metrics to disk. Check: it beats random clearly with the default config, and
    the unit tests cover masking, GAE, sequence boundaries and resume.
 2. Self-play and evaluation: the learner plays both sides, against itself
    and a pool of past checkpoints kept on the device, with a configured
