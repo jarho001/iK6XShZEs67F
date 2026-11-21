@@ -37,7 +37,10 @@ battles. What that check settled, beyond the fields above:
   Knock Off, Trick, Switcheroo and a stolen berry are taken (item_knocked_off); getting an item
   again clears both (item_gone).
 - The legal-action mask leaves out Shadow Tag, Arena Trap and Magnet Pull: the request says
-  maybeTrapped whenever the foe's species could have one, so the player cannot know.
+  maybeTrapped whenever the foe's species could have one, so the player cannot know. A switch
+  choice that such a trap forbids is refused and the side is asked again with trapped: true;
+  from then on its mask has no switches (BattleState.trap_known, set by the environment and
+  cleared when either active changes). The foe's flag is never read.
 - A Transformed member keeps its own stats and base ability in its request (the copied ones are
   the foe's, and show only where the protocol names an ability); a foe's lock (Outrage) is never
   announced and is not observed; the own lock is the move request's single move without PP.
@@ -54,7 +57,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from .actions import legal_actions, move_availability
+from .actions import move_availability, observed_actions
 from .events import (
 	EV_CANT,
 	EV_EFFECT,
@@ -212,7 +215,7 @@ class Observation(NamedTuple):
 	turn: jax.Array  # float32 scalar
 	request: jax.Array  # float32 [3], NONE/MOVE/SWITCH
 	mid_turn: jax.Array  # float32 scalar; saved turn work remains after this choice
-	legal_actions: jax.Array  # bool [9], actions.py encoding
+	legal_actions: jax.Array  # bool [9], actions.observed_actions (hidden traps once discovered)
 	weather: jax.Array  # int16 scalar; public WEATHER_NAMES ID (-weather lines)
 	weather_age: jax.Array  # float32 scalar; turns since the weather started, from upkeep lines
 	hazards: jax.Array  # float32 [own/opponent, Spikes/Toxic Spikes] layer counts (-sidestart)
@@ -400,7 +403,7 @@ def observe(state, side, engine_tables) -> Observation:
 		f(state.turn) / 1000,
 		f(jnp.arange(3) == request),
 		f(state.turn_stage > TURN_IDLE),
-		legal_actions(state, engine_tables, hidden_traps=False)[side],
+		observed_actions(state, engine_tables)[side],
 		state.weather.astype(jnp.int16),
 		f(state.weather_age),
 		f(state.hazards[order]),

@@ -225,6 +225,7 @@ def reset(
 		wish_age=jnp.zeros(NUM_SIDES, jnp.int8),
 		hp_seen=stats[..., 0],
 		item_gone=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.int8),
+		trap_known=jnp.zeros(NUM_SIDES, jnp.bool_),
 	)
 	both = jnp.ones(NUM_SIDES, jnp.bool_)
 	state = enter_illusion(state, both, t)

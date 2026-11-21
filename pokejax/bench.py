@@ -1,4 +1,10 @@
-"""Measure cold compilation and random-policy battle throughput."""
+"""Measure cold compilation and random-policy battle throughput.
+
+The default mode runs the engine with its own auto-reset loop. `--env` runs the environment of
+pokejax.env instead (team draws from the sampler, auto-reset, rewards, done flags, step and
+turn counts), with the random policy on both sides; add `--with-observation` to observe both
+sides in either mode.
+"""
 
 import argparse
 import json
@@ -16,11 +22,11 @@ from pokejax.engine.observation import observe
 from pokejax.engine.reset import Teams, check_teams, prepare_teams, reset
 from pokejax.engine.state import ONGOING, TEAM_SLOTS
 from pokejax.engine.step import step
+from pokejax.env import DEFAULT_POOL, Env, EnvConfig
 from pokejax.sampler import sample_team_indices
 from pokejax.tables import load_tables
 from pokejax.teams import load_npz
 
-DEFAULT_POOL = Path("work/teams/gen5-teams.npz")
 DEFAULT_BATCH = 4096
 DEFAULT_STEPS = 256
 DEFAULT_REPETITIONS = 3
@@ -82,6 +88,30 @@ def rollout(carry, pool, tables, steps, with_observation=False):
 	return carry, tuple(jnp.sum(x) for x in stats)
 
 
+def env_rollout(env, carry, steps):
+	"""Advance an environment with the random policy on both sides (the engine's legal mask).
+
+	carry is (env_state, key); returns the carry and the sums of completed battles, of their
+	lengths in steps and, with observations, of every observation leaf (so XLA keeps them).
+	"""
+	observing = env.config.observe == "both"
+
+	def advance(carry, _):
+		env_state, key = carry
+		key, action_key = jax.random.split(key)
+		logits = jnp.where(env.engine_mask(env_state), 0.0, -jnp.inf)
+		actions = jax.random.categorical(action_key, logits, axis=-1)
+		env_state, timestep = env.step(env_state, actions)
+		# Per-battle flags and lengths stack up like a training rollout's; they are summed after.
+		stats = (timestep.info.ended, timestep.info.steps)
+		if observing:
+			stats += (sum(jnp.sum(x.astype(jnp.float32)) for x in jax.tree.leaves(timestep.obs)),)
+		return (env_state, key), stats
+
+	carry, stats = jax.lax.scan(advance, carry, None, length=steps)
+	return carry, tuple(jnp.sum(x) for x in stats)
+
+
 def _benchmark(
 	pool_path=DEFAULT_POOL,
 	batch_size=DEFAULT_BATCH,
@@ -89,27 +119,42 @@ def _benchmark(
 	repetitions=DEFAULT_REPETITIONS,
 	seed=0,
 	with_observation=False,
+	environment=False,
 ):
 	"""Benchmark on the default device; use a fresh process for a cold compile."""
 	if min(batch_size, steps, repetitions) < 1:
 		raise ValueError("batch size, steps and repetitions must be positive")
-	host_pool = load_npz(pool_path)
-	if not len(host_pool.team_size) or np.any(host_pool.team_size != TEAM_SLOTS):
-		raise ValueError("The pool must contain only complete six-member teams")
-	tables = load_tables()
-	check_teams(
-		Teams(*(getattr(host_pool, name)[:, None].repeat(2, axis=1) for name in Teams._fields)),
-		tables,
-	)
-	pool = Teams(*(jnp.asarray(getattr(host_pool, name)) for name in Teams._fields))
-	engine_tables = build_engine_tables(tables)
-	key, init_key = jax.random.split(jax.random.key(seed))
-	state = _new_states(init_key, pool, engine_tables, batch_size)
-	carry = (state, key, jnp.zeros(batch_size, dtype=jnp.int32))
-	jax.block_until_ready((carry, pool, engine_tables))
-	run = jax.jit(rollout, static_argnums=(3, 4))
+	if environment:
+		env = Env(EnvConfig(batch_size, observe="both" if with_observation else "none"), pool_path)
+		key, init_key = jax.random.split(jax.random.key(seed))
+		carry = (env.reset(init_key)[0], key)
+		jax.block_until_ready((carry, env))
+		jitted = jax.jit(env_rollout, static_argnums=(2,))
+
+		def run(carry):
+			return jitted(env, carry, steps)
+	else:
+		host_pool = load_npz(pool_path)
+		if not len(host_pool.team_size) or np.any(host_pool.team_size != TEAM_SLOTS):
+			raise ValueError("The pool must contain only complete six-member teams")
+		tables = load_tables()
+		check_teams(
+			Teams(*(getattr(host_pool, name)[:, None].repeat(2, axis=1) for name in Teams._fields)),
+			tables,
+		)
+		pool = Teams(*(jnp.asarray(getattr(host_pool, name)) for name in Teams._fields))
+		engine_tables = build_engine_tables(tables)
+		key, init_key = jax.random.split(jax.random.key(seed))
+		state = _new_states(init_key, pool, engine_tables, batch_size)
+		carry = (state, key, jnp.zeros(batch_size, dtype=jnp.int32))
+		jax.block_until_ready((carry, pool, engine_tables))
+		jitted = jax.jit(rollout, static_argnums=(3, 4))
+
+		def run(carry):
+			return jitted(carry, pool, engine_tables, steps, with_observation)
+
 	start = time.perf_counter()
-	carry, _ = jax.block_until_ready(run(carry, pool, engine_tables, steps, with_observation))
+	carry, _ = jax.block_until_ready(run(carry))
 	compile_seconds = time.perf_counter() - start
 	# The cold first call also warms up the executable.
 	durations = []
@@ -117,9 +162,7 @@ def _benchmark(
 	completed_lengths = []
 	for _ in range(repetitions):
 		start = time.perf_counter()
-		carry, stats = jax.block_until_ready(
-			run(carry, pool, engine_tables, steps, with_observation)
-		)
+		carry, stats = jax.block_until_ready(run(carry))
 		durations.append(time.perf_counter() - start)
 		counts.append(int(stats[0]))
 		completed_lengths.append(int(stats[1]))
@@ -129,6 +172,7 @@ def _benchmark(
 		"device": str(jax.devices()[0].device_kind),
 		"jax_version": jax.__version__,
 		"batch_size": batch_size,
+		"mode": "environment" if environment else "engine",
 		"with_observation": with_observation,
 		"observation_checksum": float(stats[2]) if with_observation else None,
 		"steps_per_call": steps,
@@ -166,6 +210,11 @@ def main():
 	parser.add_argument(
 		"--with-observation", action="store_true", help="observe both sides each step"
 	)
+	parser.add_argument(
+		"--env",
+		action="store_true",
+		help="run the environment (sampler draws, auto-reset, rewards, flags), not the bare engine",
+	)
 	args = parser.parse_args()
 	result = benchmark(
 		args.team_pool,
@@ -174,6 +223,7 @@ def main():
 		args.repetitions,
 		args.seed,
 		args.with_observation,
+		args.env,
 	)
 	if args.json:
 		print(json.dumps(result))

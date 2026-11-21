@@ -437,3 +437,71 @@ test('a request that is sent again after a rejected choice changes nothing but t
 	game.views[0].receive(request);
 	assert.deepEqual(game.views[0].observation(), before);
 });
+
+test('a switch refused by a hidden trap is asked again with trapped: true, and the trap is remembered', () => {
+	const game = play(
+		[member('Gengar', ['shadowball', 'splash']), member('Mew', ['splash'])],
+		[member('Wobbuffet', ['splash'], { ability: 'shadowtag' }), member('Pikachu', ['splash'])],
+	);
+	const request = () => game.battle.sides[0].activeRequest.active[0];
+	const switches = mask => mask.slice(4);
+	const none = [false, false, false, false, false];
+	// Hidden: the request only says maybeTrapped, so the switch is on offer.
+	let [mine] = game.observations();
+	assert.equal(request().maybeTrapped, true);
+	assert.equal(request().trapped, undefined);
+	assert.deepEqual(switches(mine.legal_actions), [true, false, false, false, false]);
+	// p2's choice is made first and stays locked in while p1's switch is refused.
+	assert.equal(game.battle.choose('p2', 'move 1'), true);
+	assert.equal(game.battle.choose('p1', 'switch 2'), false);
+	assert.match(game.battle.sides[0].choice.error, /trapped/);
+	assert.equal(game.battle.turn, 1);
+	assert.equal(game.battle.sides[1].isChoiceDone(), true);
+	// Nothing but an error line and the updated request reached p1: trapped, no maybeTrapped.
+	const [error, update] = game.chunks[0].slice(-2);
+	assert.match(error, /^\|error\|\[Unavailable choice\] Can't switch: The active Pok.mon is trapped$/);
+	assert.match(update, /^\|request\|/);
+	assert.equal(JSON.parse(update.slice(9)).update, true);
+	assert.equal(request().trapped, true);
+	assert.equal(request().maybeTrapped, undefined);
+	[mine] = game.observations();
+	assert.deepEqual(mine.legal_actions.slice(0, 2), [true, true]);
+	assert.deepEqual(switches(mine.legal_actions), none);
+	assert.equal(mine.own.trapped, 0); // that flag is the announced partial trap, not this one
+	assert.deepEqual(mine.request, [0, 1, 0]);
+	// p1 picks a move; the turn runs. The next request says maybeTrapped again, the view does not.
+	assert.equal(game.battle.choose('p1', 'move 1'), true);
+	game.battle.sendUpdates();
+	assert.equal(game.battle.turn, 2);
+	assert.equal(request().maybeTrapped, true);
+	assert.equal(request().trapped, undefined);
+	[mine] = game.observations();
+	assert.deepEqual(switches(mine.legal_actions), none);
+	// The trapper's player is not told anything: p2 sees its own mask with the switch on offer.
+	assert.deepEqual(switches(game.observations()[1].legal_actions), [true, false, false, false, false]);
+	// The trapper leaves: the foe is a Pikachu now, the request has no trap flag and the view
+	// forgets what it knew.
+	assert.equal(game.battle.choose('p2', 'switch 2'), true);
+	assert.equal(game.battle.choose('p1', 'move 1'), true);
+	game.battle.sendUpdates();
+	assert.equal(request().maybeTrapped, undefined);
+	assert.equal(request().trapped, undefined);
+	[mine] = game.observations();
+	assert.deepEqual(switches(mine.legal_actions), [true, false, false, false, false]);
+});
+
+test('a refused switch is remembered the same way by a view that gets the lines one at a time', () => {
+	const game = play(
+		[member('Gengar', ['shadowball', 'splash']), member('Mew', ['splash'])],
+		[member('Wobbuffet', ['splash'], { ability: 'shadowtag' }), member('Pikachu', ['splash'])],
+	);
+	game.battle.choose('p2', 'move 1');
+	game.battle.choose('p1', 'switch 2');
+	game.battle.choose('p1', 'move 1');
+	game.battle.sendUpdates();
+	assert.equal(game.views[0].trapHolds(), true);
+	const live = new PlayerView();
+	for (const chunk of game.chunks[0]) for (const line of chunk.split('\n')) live.receive(line);
+	assert.deepEqual(live.observation(), game.views[0].observation());
+	assert.equal(live.trapHolds(), true);
+});

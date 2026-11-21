@@ -188,6 +188,7 @@ class PlayerView {
 		this.healingWish = [false, false];
 		this.requestKind = 'none';
 		this.request = null;
+		this.trapKnown = null;
 		this.midTurn = false;
 		this.stepLines = 0;
 		this.decisions = 0;
@@ -216,6 +217,12 @@ class PlayerView {
 	receiveRequest(text) {
 		const request = JSON.parse(text);
 		if (request === null) return;
+		// A move request that gains trapped: true with no protocol line since the last one answers
+		// a refused switch choice (sim/side.ts chooseSwitch): the hidden trap (Shadow Tag, Arena
+		// Trap, Magnet Pull) is now known, and the next turn's request will only say maybeTrapped.
+		const refused = this.request !== null && this.stepLines === 0 && this.requestKind === 'move'
+			&& !(this.request.active && this.request.active[0] && this.request.active[0].trapped)
+			&& Boolean(request.active && request.active[0] && request.active[0].trapped === true);
 		const me = sideIndex(request.side.id);
 		if (this.fixedSide !== null && this.fixedSide !== me) {
 			throw new Error('Request for ' + request.side.id + ' on the view of p' + (this.fixedSide + 1));
@@ -233,6 +240,15 @@ class PlayerView {
 		const kind = request.wait ? 'none' : request.forceSwitch ? 'switch' : request.active ? 'move' : 'none';
 		this.endStep(kind);
 		this.applyRequest(request, kind);
+		// The entry counts name the two actives: a switch line for either side ends the knowledge.
+		if (refused) this.trapKnown = { own: this.sides[this.me].entries, foe: this.sides[1 - this.me].entries };
+	}
+
+	// The own side was refused a switch and neither active has changed since.
+	trapHolds() {
+		const known = this.trapKnown;
+		return known !== null && known.own === this.sides[this.me].entries
+			&& known.foe === this.sides[1 - this.me].entries;
 	}
 
 	// Steps. A step is the protocol between two requests; endStep closes it at the next request.
@@ -1184,7 +1200,7 @@ PlayerView.prototype.legalActions = function () {
 		const moves = data.moves;
 		if (moves.length === 1 && moves[0].pp === undefined) mask[0] = true;
 		else moves.forEach((move, i) => { mask[i] = !move.disabled; });
-		canSwitch = !data.trapped;
+		canSwitch = !data.trapped && !this.trapHolds();
 	}
 	if (canSwitch) bench.forEach((member, k) => { mask[4 + k] = member.hp > 0; });
 	return mask;

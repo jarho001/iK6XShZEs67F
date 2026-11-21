@@ -773,6 +773,7 @@ def step(state, actions, key, forced, engine_tables):
 	t = engine_tables
 	key = random_bits(key)
 	ongoing = state.winner == ONGOING
+	active_before = state.active
 	requests = state.request
 	state = clear_events(state, ongoing)
 	bounds = record_step_bounds(state)
@@ -1093,4 +1094,6 @@ def step(state, actions, key, forced, engine_tables):
 		turn=state.turn + finish_turn.astype(jnp.int32),
 	)
 	clear_plan = finish_turn | ended
+	# A discovered hidden trap ends with either side's active (the player left, or the trapper did).
+	state = state._replace(trap_known=state.trap_known & jnp.all(state.active == active_before))
 	return _clear_turn_plan(finish_events(state, bounds, ongoing), clear_plan)

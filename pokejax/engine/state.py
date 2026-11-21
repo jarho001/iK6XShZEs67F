@@ -212,3 +212,8 @@ class BattleState(NamedTuple):
 	# What a player can see of the members off the field and of their items (observation.py).
 	hp_seen: jax.Array  # int16 [2, 6]: HP when the member last left the field (before Regenerator)
 	item_gone: jax.Array  # int8 [2, 6]: how the item left, as announced: 0 none, 1 used, 2 taken
+	# A hidden trap (Shadow Tag, Arena Trap, Magnet Pull) that the side's player has discovered:
+	# Showdown rejected its switch choice and asked again with trapped: true. It is set by the
+	# environment, applied by the observed legal mask, and cleared by step when either active
+	# changes (the player leaves, or the trapper leaves or faints).
+	trap_known: jax.Array  # bool [2]

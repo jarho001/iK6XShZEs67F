@@ -950,6 +950,38 @@ def test_trapping_abilities_are_not_in_the_observed_legal_actions(battles):
 	assert not np.asarray(OBSERVE(partial, 0, t).legal_actions)[4:].any()  # that one is announced
 
 
+def test_a_discovered_trap_shows_in_the_observed_legal_actions_until_an_active_changes(battles):
+	"""A refused switch tells the player it is trapped (trap_known): its mask loses the switches,
+	the foe's flag is never read, a forced switch is never refused, and step clears the flag when
+	either active changes."""
+	tables, t, s, _ = battles
+	trapper = s._replace(
+		ability=s.ability.at[1, s.active[1]].set(tables.abilities.index["shadowtag"])
+	)
+	trapper = set_active_move(
+		set_active_move(trapper, tables, 0, 0, "splash"), tables, 1, 0, "splash"
+	)
+	known = trapper._replace(trap_known=jnp.array([True, False]))
+	seen = np.asarray(OBSERVE(known, 0, t).legal_actions)
+	assert seen[0] and not seen[4:].any()
+	np.testing.assert_array_equal(seen[:4], np.asarray(OBSERVE(trapper, 0, t).legal_actions)[:4])
+	assert np.asarray(OBSERVE(trapper, 0, t).legal_actions)[4:].any()
+	# The mask of the foe is untouched by the flag of the other side; so is the whole observation
+	# of a side whose own flag is clear.
+	only_foe = trapper._replace(trap_known=jnp.array([False, True]))
+	assert_equal(OBSERVE(only_foe, 0, t), OBSERVE(trapper, 0, t))
+	assert not np.asarray(OBSERVE(only_foe, 1, t).legal_actions)[4:].any()
+	# A forced switch is a different request: the trap does not apply to it.
+	switching = known._replace(request=known.request.at[0].set(SWITCH))
+	assert np.asarray(OBSERVE(switching, 0, t).legal_actions)[4:].any()
+	# Nobody leaves: the flag stays. The trapper leaves: step clears it.
+	assert bool(play(known, [0, 0], t, FORCED).trap_known[0])
+	out = play(known, [0, 4], t, FORCED)
+	assert int(out.active[1]) != int(known.active[1])
+	assert not np.asarray(out.trap_known).any()
+	assert np.asarray(OBSERVE(out, 0, t).legal_actions)[4:].any()
+
+
 def test_fainted_members_show_no_status(battles):
 	_, t, s, _ = battles
 	fainted = s._replace(

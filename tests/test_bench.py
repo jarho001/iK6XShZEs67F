@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from pokejax.bench import _new_states, benchmark, rollout
 from pokejax.engine.data import build_engine_tables
@@ -37,3 +38,23 @@ def test_benchmark_and_finished_battles(tmp_path, synthetic_pool, tables):
 	assert int(total_length) == 64
 	assert np.all(np.asarray(carry[0].winner) == ONGOING)
 	assert np.all(np.asarray(carry[2]) == 3)
+
+
+@pytest.mark.parametrize("with_observation", [False, True])
+def test_environment_benchmark(tmp_path, synthetic_pool, with_observation):
+	path = tmp_path / "teams.npz"
+	save_npz(synthetic_pool, path)
+	result = benchmark(
+		path,
+		batch_size=8,
+		steps=4,
+		repetitions=1,
+		seed=1,
+		with_observation=with_observation,
+		environment=True,
+	)
+	assert result["mode"] == "environment"
+	assert result["steps_per_second"] > 0 and result["compile_seconds"] > 0
+	assert result["completed_battles"] >= 0
+	assert result["mean_battle_length"] is None or result["mean_battle_length"] > 0
+	assert (result["observation_checksum"] is not None) == with_observation

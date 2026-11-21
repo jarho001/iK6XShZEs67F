@@ -36,6 +36,7 @@ from .state import (
 )
 
 NUM_ACTIONS = 9
+MOVE_ACTIONS = 4
 SIDES = jnp.arange(2)
 
 
@@ -63,12 +64,15 @@ def move_availability(state, engine_tables):
 	return moves, usable, choice_active, choice_usable
 
 
-def legal_actions(state, engine_tables, hidden_traps=True):
+def action_masks(state, engine_tables):
 	"""Match Pokemon.getMoveRequestData and Side.chooseSwitch without effects.
 
-	Shadow Tag, Arena Trap and Magnet Pull trap without any protocol line: the request only says
-	maybeTrapped, and it says so whenever the foe's species can have such an ability. A player
-	cannot see them, so hidden_traps=False leaves them out (the observation uses that).
+	Returns the [2, 9] mask that the request describes (everything except hidden traps), and
+	[2] flags for the sides whose voluntary switches a hidden trap forbids: Shadow Tag, Arena
+	Trap and Magnet Pull trap without any protocol line, because the request only says
+	maybeTrapped (whenever the foe's species can have such an ability). A player cannot see
+	them, so legal_actions applies them and observed_actions does not, until the side has
+	been refused a switch (BattleState.trap_known).
 	"""
 	request = jnp.where(state.winner == ONGOING, state.request, NONE)
 	_, usable, choice_active, choice_usable = move_availability(state, engine_tables)
@@ -96,22 +100,40 @@ def legal_actions(state, engine_tables, hidden_traps=True):
 	source_alive = state.hp[foe, state.active[foe]] > 0
 	trapped = (state.volatiles[:, PARTIALLY_TRAPPED] > 0) & source_active & source_alive
 	can_switch &= ~trapped
-	if hidden_traps:
-		abilities = active_abilities(state, engine_tables)
-		foe_ability = abilities[foe, TRAP]
-		types = state.types[SIDES, state.active]
-		smackdown = state.volatiles[:, SMACKDOWN] > 0
-		grounded = ~jnp.any(types == engine_tables.flying_type, axis=-1) | smackdown
-		grounded &= ~has_hook(abilities, LEVITATE) | smackdown
-		steel = jnp.any(types == engine_tables.steel_type, axis=-1)
-		foe_alive = state.hp[foe, state.active[foe]] > 0
-		shadow_user = abilities[:, TRAP] == TRAP_SHADOW
-		trapped_by_ability = foe_alive & (
-			((foe_ability == TRAP_ARENA) & grounded)
-			| ((foe_ability == TRAP_SHADOW) & ~shadow_user)
-			| ((foe_ability == TRAP_MAGNET) & steel)
-		)
-		can_switch &= ~trapped_by_ability
+	abilities = active_abilities(state, engine_tables)
+	foe_ability = abilities[foe, TRAP]
+	types = state.types[SIDES, state.active]
+	smackdown = state.volatiles[:, SMACKDOWN] > 0
+	grounded = ~jnp.any(types == engine_tables.flying_type, axis=-1) | smackdown
+	grounded &= ~has_hook(abilities, LEVITATE) | smackdown
+	steel = jnp.any(types == engine_tables.steel_type, axis=-1)
+	foe_alive = state.hp[foe, state.active[foe]] > 0
+	shadow_user = abilities[:, TRAP] == TRAP_SHADOW
+	trapped_by_ability = foe_alive & (
+		((foe_ability == TRAP_ARENA) & grounded)
+		| ((foe_ability == TRAP_SHADOW) & ~shadow_user)
+		| ((foe_ability == TRAP_MAGNET) & steel)
+	)
+	# A forced switch is never refused: only a move request can be trapped.
+	hidden_trap = trapped_by_ability & (request == MOVE)
 	can_switch |= request == SWITCH
 	switch_mask = can_switch[:, None] & bench_alive
-	return jnp.concatenate((move_mask, switch_mask), axis=1)
+	return jnp.concatenate((move_mask, switch_mask), axis=1), hidden_trap
+
+
+def block_switches(mask, blocked):
+	"""Remove the five switch actions where blocked; mask [..., 9], blocked [...]."""
+	return mask & ~(blocked[..., None] & (jnp.arange(NUM_ACTIONS) >= MOVE_ACTIONS))
+
+
+def legal_actions(state, engine_tables, hidden_traps=True):
+	"""The engine's legal mask [2, 9]; hidden_traps=False leaves Shadow Tag and the like out."""
+	mask, hidden_trap = action_masks(state, engine_tables)
+	return block_switches(mask, hidden_trap) if hidden_traps else mask
+
+
+def observed_actions(state, engine_tables):
+	"""The mask a player's request shows: a hidden trap only once its side has found out."""
+	mask, _ = action_masks(state, engine_tables)
+	request = jnp.where(state.winner == ONGOING, state.request, NONE)
+	return block_switches(mask, state.trap_known & (request == MOVE))

@@ -1,4 +1,8 @@
-"""Small Flax Linen recurrent PPO; NONE requests are forced action-0 env steps."""
+"""Small Flax Linen recurrent PPO against the random policy, on the environment of pokejax.env.
+
+The learner plays one random side per battle (OpponentEnv); NONE requests are forced action-0
+environment steps. A battle that the step cap truncates counts as finished, without a bootstrap.
+"""
 
 import argparse
 import json
@@ -14,16 +18,8 @@ import numpy as np
 import optax
 from flax.training.train_state import TrainState
 
-from pokejax.bench import DEFAULT_POOL, _new_states
-from pokejax.engine.actions import legal_actions
-from pokejax.engine.data import build_engine_tables
-from pokejax.engine.observation import observe
-from pokejax.engine.reset import Teams, check_teams
-from pokejax.engine.state import ONGOING
-from pokejax.engine.step import step
-from pokejax.sampler import supported_team_indices
+from pokejax.env import DEFAULT_POOL, Env, EnvConfig, OpponentEnv
 from pokejax.tables import load_tables
-from pokejax.teams import load_npz
 
 
 @dataclass(frozen=True)
@@ -42,6 +38,7 @@ class Config:
 	entropy_coef: float = 0.01
 	max_grad_norm: float = 0.5
 	seed: int = 0
+	max_steps: int = 1000  # environment steps before a battle is truncated
 	updates: int = 600
 	eval_battles: int = 4096
 	eval_max_steps: int = 4096
@@ -110,9 +107,9 @@ class Policy(nn.Module):
 		return hidden, jnp.where(obs.legal_actions, logits, -1e9), value
 
 
-class Env(NamedTuple):
-	state: object
-	side: jax.Array
+class Carry(NamedTuple):
+	env: object  # OpponentState
+	obs: object  # the learner's observation of the current battles
 	hidden: jax.Array
 	key: jax.Array
 
@@ -131,41 +128,25 @@ def distribution(logits):
 	return logp, -jnp.sum(jnp.exp(logp) * logp, axis=-1)
 
 
-def select(mask, new, old):
-	return jax.tree.map(
-		lambda n, o: jnp.where(mask.reshape(mask.shape + (1,) * (o.ndim - mask.ndim)), n, o),
-		new,
-		old,
-	)
-
-
 class Trainer:
 	"""Host setup only; update includes device rollout, GAE, and sequence SGD."""
 
 	def __init__(self, config=Config(), pool_path=DEFAULT_POOL):
 		c = self.config = config
-		if min(c.batch_size, c.rollout_length, c.epochs, c.minibatches) < 1:
-			raise ValueError("Batch, rollout length, epochs and minibatches must be positive")
+		if min(c.batch_size, c.rollout_length, c.epochs, c.minibatches, c.max_steps) < 1:
+			raise ValueError(
+				"Batch, rollout length, epochs, minibatches and steps must be positive"
+			)
 		if c.batch_size % c.minibatches:
 			raise ValueError("Batch size must be divisible by minibatches")
 		tables = load_tables()
-		host_pool = load_npz(pool_path)
-		if not len(host_pool.team_size) or np.any(host_pool.team_size != 6):
-			raise ValueError("Expected complete six-member teams")
-		check_teams(
-			Teams(*(getattr(host_pool, n)[:, None].repeat(2, axis=1) for n in Teams._fields)),
-			tables,
-		)
-		self.pool = Teams(*(jnp.asarray(getattr(host_pool, n)) for n in Teams._fields))
-		# Only fully supported teams are drawn; the index array is computed once here.
-		self.team_indices = jnp.asarray(supported_team_indices(host_pool, tables))
-		self.tables = build_engine_tables(tables)
+		self.env = OpponentEnv(Env(EnvConfig(c.batch_size, c.max_steps), pool_path, tables=tables))
 		self.model = Policy(
 			c, len(tables.species.ids), len(tables.moves.ids), len(tables.types.ids) + 1
 		)
 		key, init_key = jax.random.split(jax.random.key(c.seed))
-		self.env = self.new_env(key, c.batch_size)
-		params = self.model.init(init_key, self.observation(self.env), self.env.hidden)["params"]
+		self.carry = self.new_carry(key, self.env)
+		params = self.model.init(init_key, self.carry.obs, self.carry.hidden)["params"]
 		self.train = TrainState.create(
 			apply_fn=self.model.apply,
 			params=params,
@@ -176,69 +157,46 @@ class Trainer:
 			self._evaluate_batch, static_argnames=("random_policy", "batch")
 		)
 
-	def new_env(self, key, batch):
-		key, reset_key, side_key = jax.random.split(key, 3)
-		return Env(
-			_new_states(reset_key, self.pool, self.tables, batch, self.team_indices),
-			jax.random.bernoulli(side_key, shape=(batch,)).astype(jnp.int32),
-			jnp.zeros((batch, self.config.hidden_size)),
-			key,
-		)
+	def new_carry(self, key, env):
+		key, reset_key = jax.random.split(key)
+		state, timestep = env.reset(reset_key)
+		batch = env.config.batch_size
+		return Carry(state, timestep.obs, jnp.zeros((batch, self.config.hidden_size)), key)
 
-	def observation(self, env):
-		return jax.vmap(observe, in_axes=(0, 0, None))(env.state, env.side, self.tables)
-
-	def advance(self, env, action):
-		key, opponent_key, step_key = jax.random.split(env.key, 3)
-		mask = jax.vmap(legal_actions, in_axes=(0, None))(env.state, self.tables)
-		actions = jax.random.categorical(opponent_key, jnp.where(mask, 0.0, -1e9))
-		actions = actions.at[jnp.arange(action.shape[0]), env.side].set(action)
-		illegal = ~jnp.take_along_axis(mask, actions[..., None], axis=-1)[..., 0]
-		state = jax.vmap(step, in_axes=(0, 0, 0, None, None))(
-			env.state,
-			actions,
-			jax.random.split(step_key, action.shape[0]),
-			None,
-			self.tables,
-		)
-		done = state.winner != ONGOING
-		reward = jnp.where(done, jnp.where(state.winner == env.side, 1.0, -1.0), 0.0)
-		# Only winner IDs 0/1 denote a win; any terminal tie receives zero.
-		reward = jnp.where(done & (state.winner != 0) & (state.winner != 1), 0.0, reward)
-		return env._replace(state=state, key=key), reward, done, jnp.sum(illegal)
-
-	def _update(self, train, env):
+	def _update(self, train, carry):
 		c = self.config
-		start_hidden = env.hidden
+		start_hidden = carry.hidden
 
-		def collect(env, _):
-			key, action_key, reset_key = jax.random.split(env.key, 3)
-			obs = self.observation(env)
-			hidden, logits, value = self.model.apply({"params": train.params}, obs, env.hidden)
+		def collect(carry, _):
+			key, action_key = jax.random.split(carry.key)
+			hidden, logits, value = self.model.apply(
+				{"params": train.params}, carry.obs, carry.hidden
+			)
 			action = jax.random.categorical(action_key, logits)
 			logp, _ = distribution(logits)
-			env, reward, done, illegal = self.advance(env._replace(key=key, hidden=hidden), action)
+			state, timestep = self.env.step(carry.env, action)
+			done = timestep.terminated | timestep.truncated
 			transition = Transition(
-				obs,
+				carry.obs,
 				action,
 				jnp.take_along_axis(logp, action[:, None], -1)[:, 0],
 				value,
-				reward,
+				timestep.reward,
 				done,
 			)
-			fresh = self.new_env(reset_key, c.batch_size)
-			env = Env(
-				select(done, fresh.state, env.state),
-				jnp.where(done, fresh.side, env.side),
-				jnp.where(done[:, None], 0, hidden),
-				env.key,
+			# The step already reset a finished battle: its observation is the new battle's.
+			hidden = jnp.where(done[:, None], 0, hidden)
+			info = timestep.info
+			counts = (
+				(info.illegal | info.opponent_illegal).sum(),
+				info.rejected.sum(),
 			)
-			return env, (transition, illegal)
+			return Carry(state, timestep.obs, hidden, key), (transition, counts)
 
-		env, (trajectory, illegal) = jax.lax.scan(collect, env, None, length=c.rollout_length)
-		_, _, bootstrap = self.model.apply(
-			{"params": train.params}, self.observation(env), env.hidden
+		carry, (trajectory, (illegal, refused)) = jax.lax.scan(
+			collect, carry, None, length=c.rollout_length
 		)
+		_, _, bootstrap = self.model.apply({"params": train.params}, carry.obs, carry.hidden)
 
 		def gae(carry, row):
 			advantage, next_value = carry
@@ -291,7 +249,7 @@ class Trainer:
 			train, metrics = jax.lax.scan(minibatch, train, indices)
 			return (train, key), metrics
 
-		(train, key), metrics = jax.lax.scan(epoch, (train, env.key), None, length=c.epochs)
+		(train, key), metrics = jax.lax.scan(epoch, (train, carry.key), None, length=c.epochs)
 		completed = trajectory.done.sum()
 		metrics = dict(
 			zip(("policy_loss", "value_loss", "entropy", "approx_kl"), metrics.mean((0, 1)))
@@ -301,49 +259,60 @@ class Trainer:
 			mean_return=trajectory.reward.sum() / jnp.maximum(completed, 1),
 			win_rate=(trajectory.reward > 0).sum() / jnp.maximum(completed, 1),
 			illegal_actions=illegal.sum(),
+			refused_switches=refused.sum(),
 		)
-		return train, env._replace(key=key), metrics
+		return train, carry._replace(key=key), metrics
 
 	def _evaluate_batch(self, params, key, random_policy=False, batch=256):
-		env = self.new_env(key, batch)
+		env = self.env.replace(batch_size=batch)
+		reset_key, policy_key = jax.random.split(key)
+		state, timestep = env.reset(reset_key)
 
 		# Each slot plays exactly one fresh battle; finished slots cannot count twice.
 		def cond(carry):
-			_, finished, _, _, count, _ = carry
+			_, _, _, finished, _, _, _, count, _ = carry
 			return ~finished.all() & (count < self.config.eval_max_steps)
 
 		def body(carry):
-			env, finished, wins, ties, count, illegal_total = carry
-			key, action_key = jax.random.split(env.key)
-			obs = self.observation(env)
-			hidden, logits, _ = self.model.apply({"params": params}, obs, env.hidden)
+			state, obs, hidden, finished, wins, ties, truncated, count, illegal_total = carry
+			action_key = jax.random.fold_in(policy_key, count)
+			hidden, logits, _ = self.model.apply({"params": params}, obs, hidden)
 			if random_policy:
 				logits = jnp.where(obs.legal_actions, 0.0, -1e9)
 			action = jax.random.categorical(action_key, logits)
-			env, reward, done, illegal = self.advance(env._replace(key=key, hidden=hidden), action)
-			new = done & ~finished
+			state, timestep = env.step(state, action)
+			info = timestep.info
+			new = info.ended & ~finished
+			illegal = (info.illegal | info.opponent_illegal).sum()
 			return (
-				env,
-				finished | done,
-				wins + (new & (reward > 0)),
-				ties + (new & (reward == 0)),
+				state,
+				timestep.obs,
+				jnp.where(info.ended[:, None], 0, hidden),
+				finished | info.ended,
+				wins + (new & (timestep.reward > 0)),
+				ties + (new & timestep.terminated & (timestep.reward == 0)),
+				truncated + (new & timestep.truncated),
 				count + 1,
 				illegal_total + illegal,
 			)
 
-		_, done, wins, ties, steps, illegal = jax.lax.while_loop(
+		zeros = jnp.zeros(batch, jnp.int32)
+		_, _, _, done, wins, ties, truncated, steps, illegal = jax.lax.while_loop(
 			cond,
 			body,
 			(
-				env,
+				state,
+				timestep.obs,
+				jnp.zeros((batch, self.config.hidden_size)),
 				jnp.zeros(batch, bool),
-				jnp.zeros(batch, jnp.int32),
-				jnp.zeros(batch, jnp.int32),
+				zeros,
+				zeros,
+				zeros,
 				jnp.int32(0),
 				jnp.int32(0),
 			),
 		)
-		return wins.sum(), ties.sum(), (~done).sum(), steps, illegal
+		return wins.sum(), ties.sum(), (~done).sum() + truncated.sum(), steps, illegal
 
 	def evaluate(self, params, seed, battles, random_policy=False):
 		wins = ties = timeouts = illegal = 0
@@ -391,15 +360,17 @@ def main():
 	config = Config(**{name: getattr(args, name) for name in asdict(Config())})
 	if min(config.updates, config.eval_battles, config.eval_max_steps, config.log_every) < 1:
 		parser.error("Updates, evaluation sizes and log interval must be positive")
+	if config.max_steps < 1:
+		parser.error("The step cap must be positive")
 	args.output_dir.mkdir(parents=True, exist_ok=True)
 	(args.output_dir / "config.json").write_text(json.dumps(asdict(config), indent=2))
 	trainer = Trainer(config, args.team_pool)
-	train, env = trainer.train, trainer.env
+	train, carry = trainer.train, trainer.carry
 	start = time.perf_counter()
 	with (args.output_dir / "metrics.jsonl").open("w") as log:
 		for update in range(1, config.updates + 1):
 			tick = time.perf_counter()
-			train, env, metrics = jax.block_until_ready(trainer.update(train, env))
+			train, carry, metrics = jax.block_until_ready(trainer.update(train, carry))
 			metrics = {k: float(v) for k, v in metrics.items()}
 			metrics.update(
 				update=update,

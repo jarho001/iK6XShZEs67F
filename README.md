@@ -52,11 +52,36 @@ JAX_PLATFORMS=cuda python -c "import jax, jax.numpy as jnp; print(jax.devices())
 The second command fails instead of falling back to the CPU if JAX cannot see
 the GPU. Expect one CUDA device on the dev machine.
 
+## Environment
+
+`pokejax/env.py` is the batched, functional environment (Phase 3). Host setup happens once in
+the constructor; `reset` and `step` are pure, so they jit, vmap and scan:
+
+```python
+env = Env(EnvConfig(batch_size=4096, max_steps=1000, observe="both"), "work/teams/gen5-teams.npz")
+env_state, timestep = jax.jit(env.reset)(key)
+env_state, timestep = jax.jit(env.step)(env_state, actions)  # actions int [B, 2]
+```
+
+A battle that ends (win, loss, tie) or reaches the step cap is replaced inside the same step by
+a fresh one with teams from the sampler. The time step has both sides' observations [B, 2, ...]
+(`observe="none"` skips them), zero-sum rewards [B, 2] (win 1, loss -1, tie 0; optional
+potential-based shaping with `shaping=True`), `terminated` and `truncated` [B], the observed
+legal mask [B, 2, 9] and episode info (winner, length in steps and turns, illegal and refused
+actions). `keep_final=True` also returns the observation before the reset. A hidden trap
+(Shadow Tag, Arena Trap, Magnet Pull) refuses a switch as Showdown does: the step does not
+advance, the refused side's mask loses its switches, and the other side's action is kept for the
+next step. `OpponentEnv(env, opponent)` plays one random side per battle against a policy
+function `(state, side, key) -> action` (random over the engine's legal mask by default) and
+returns time steps of batch shape [B]. The module docstring has the details.
+
 ## Benchmarks
 
 Run `python -m pokejax.bench --json` for the random legal policy, adding
 `--batch-size 16384` to change the batch or `--with-observation` to observe
-both sides. The cold first call includes compilation and one rollout.
+both sides. `--env` measures the environment of `pokejax.env` (sampler draws, auto-reset,
+rewards, flags) with the random policy on both sides instead of the bare engine loop. The
+cold first call includes compilation and one rollout.
 
 Measured 2026-11-17 on an NVIDIA GeForce RTX 3060 Ti, JAX 0.12.0.1,
 HEAD `93a1b26fbbbd8bc0dbc527647b7a2bbc3e7ce7dd`:
