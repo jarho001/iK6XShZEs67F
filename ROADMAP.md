@@ -320,6 +320,31 @@ already brought the engine from 3,419,031 to 2,434,930 steps per second.
 - Size the batch for the 3060 Ti; keep batch size and network width as config
   so the RTX 6000 runs only change a config file.
 
+Tasks, in order. Each is one commit with its tests; training runs and
+their outputs stay outside git.
+
+1. Training core: a pure JAX training loop on the Phase 3 environment and
+   its opponent wrapper. The network embeds species, moves, items,
+   abilities and types, encodes each team member with shared weights and
+   pools over each side's team, adds field, request and last-step events,
+   then a recurrent core (GRU or LSTM, chosen in the config) and masked
+   policy and value heads. Rollouts in one scan; GAE that bootstraps
+   truncated battles and not terminated ones; minibatches of whole
+   sequences with the hidden state stored at each sequence start and reset
+   at episode boundaries. Configuration in files (batch, rollout length,
+   widths, learning rates), checkpoints that resume bit for bit, metrics
+   to disk. Check: it beats random clearly with the default config, and
+   the unit tests cover masking, GAE, sequence boundaries and resume.
+2. Self-play and evaluation: the learner plays both sides, against itself
+   and a pool of past checkpoints kept on the device, with a configured
+   share of battles against the baselines. Every N updates it evaluates
+   against the four baselines with confidence intervals and logs it.
+3. Sizing and the first long run: measure memory and throughput on the
+   3060 Ti over batch size, rollout length and width; one config file for
+   the 3060 Ti and one for the RTX 6000 machines that differ only in
+   sizes; then a long run on the 3060 Ti to the exit, with the curve and
+   evaluation results recorded in the README.
+
 Exit: beats max-damage in well over half of evaluation games, and the
 training curve is still improving.
 
