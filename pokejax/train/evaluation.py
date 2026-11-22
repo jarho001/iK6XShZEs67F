@@ -20,13 +20,21 @@ def wilson_interval(successes: int, trials: int, z: float = Z95) -> tuple[float,
 
 
 def summarize_battles(
-	opponent: str, battles: int, wins: int, truncated: int, mean_length: float
+	opponent: str,
+	battles: int,
+	wins: int,
+	truncated: int,
+	mean_length: float,
+	policy: str = "sampled",
 ) -> dict:
-	"""A learner's results against one opponent. Truncated battles count as not won."""
+	"""A learner's results against one opponent. Truncated battles count as not won.
+
+	policy names how the learner chose its actions: "sampled" from its policy or "greedy" (argmax).
+	"""
 	low, high = wilson_interval(wins, battles)
 	return {
 		"opponent": opponent,
-		"policy": "sampled",
+		"policy": policy,
 		"battles": battles,
 		"wins": wins,
 		"win_rate": wins / battles,

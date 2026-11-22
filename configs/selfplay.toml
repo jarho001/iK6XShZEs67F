@@ -1,0 +1,70 @@
+# Self-play with a pool of past checkpoints and the four baselines (Phase 4, task 2).
+# The network and sizes are those of default.toml. The batch of 1,024 rows is split by
+# opponent.shares: half plays the current network against itself (selfplay), a quarter plays it
+# against a pool of 8 past checkpoints refreshed every 50 updates (pool), and a quarter plays
+# baselines, 64 rows each. opponent.baseline is unused here because shares is set.
+# Run it with `python -m pokejax.train --config configs/selfplay.toml`.
+
+[run]
+name = "selfplay"
+seed = 0
+updates = 2200
+
+[opponent]
+shares = { selfplay = 0.5, pool = 0.25, random = 0.0625, random-move = 0.0625, max-damage = 0.0625, heuristics = 0.0625 }
+
+[pool]
+size = 8
+every = 50
+
+[rollout]
+batch_size = 1024
+rollout_length = 64
+sequence_length = 16
+
+[env]
+max_steps = 1000
+shaping = false
+shaping_coef = 0.1
+
+[network]
+core = "gru"
+activation = "relu"
+core_width = 256
+trunk_width = 256
+member_width = 64
+species_embedding = 32
+move_embedding = 16
+item_embedding = 8
+ability_embedding = 8
+type_embedding = 8
+code_embedding = 4
+
+[ppo]
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+learning_rate_end = 3e-5
+lr_schedule = "linear"
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+value_clip = 0.2
+value_coef = 0.5
+entropy_coef = 0.01
+max_grad_norm = 0.5
+adam_eps = 1e-5
+
+[logging]
+every = 10
+
+[evaluation]
+every = 100
+battles = 1024
+final_battles = 4096
+batch = 1024
+opponents = ["random", "random-move", "max-damage", "heuristics"]
+greedy = true
+
+[checkpoint]
+every = 100

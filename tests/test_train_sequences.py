@@ -4,17 +4,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from train_support import on_cpu, tiny_config, write_pool
 
-from pokejax.train.ppo import RolloutCarry, Trainer, chunk_time
+from pokejax.train.ppo import chunk_time
 
-
-@pytest.fixture(scope="module", autouse=True)
-def cpu():
-	with on_cpu():
-		yield
-	# Compiled executables of a module are not needed after it; a worker keeps them otherwise.
-	jax.clear_caches()
+pytestmark = [pytest.mark.xdist_group("train"), pytest.mark.usefixtures("cpu_only")]
 
 
 def test_chunk_time_puts_chunk_c_of_row_b_at_c_times_batch_plus_b():
@@ -30,72 +23,69 @@ def test_chunk_time_puts_chunk_c_of_row_b_at_c_times_batch_plus_b():
 
 
 @pytest.fixture(scope="module")
-def rollout(tables, tmp_path_factory):
-	"""A tiny trainer and one rollout, whose battles are cut every three steps."""
-	config = tiny_config("rollout.batch_size=4")
-	trainer = Trainer(config, write_pool(tmp_path_factory.mktemp("sequences"), tables))
-	learner = trainer.init()
-	carry = RolloutCarry(learner.env, learner.obs, learner.hidden, learner.key)
-	rollout_fn = jax.jit(lambda params, carry: trainer._rollout(params, carry))
-	_, traj = rollout_fn(learner.params, carry)
-	return trainer, learner, jax.device_get(traj)
+def rollout(league_trainer, cpu_only):
+	"""The shared trainer's learner and one rollout of it, on the host."""
+	learner = league_trainer.init()
+	_, traj = league_trainer.rollout(learner.params, learner.pool, learner.league)
+	return learner, jax.device_get(traj)
 
 
-def test_chunk_replay_equals_the_rollouts_own_forward_pass(rollout):
-	trainer, learner, traj = rollout
+def _lane_chunks(trainer, x):
+	"""A [T, L, ...] rollout array as time-major chunks [M, N, ...] (N chunks of the lanes)."""
 	r = trainer.config.rollout
 	chunks = r.rollout_length // r.sequence_length
-	ended = traj.terminated | traj.truncated
+	return jnp.swapaxes(
+		chunk_time(jnp.asarray(x), chunks, r.sequence_length, trainer.layout.lanes), 0, 1
+	)
+
+
+def _chunk_starts(trainer, hidden):
+	r = trainer.config.rollout
+	chunks = r.rollout_length // r.sequence_length
+	lanes = trainer.layout.lanes
+	return jax.tree.map(
+		lambda x: jnp.asarray(x[:: r.sequence_length].reshape((chunks * lanes,) + x.shape[2:])),
+		hidden,
+	)
+
+
+def test_chunk_replay_equals_the_rollouts_own_forward_pass(league_trainer, rollout):
+	learner, traj = rollout
+	layout, r = league_trainer.layout, league_trainer.config.rollout
+	ended = np.asarray(layout.lanes_in_time(traj.terminated | traj.truncated))
 	# The rollout must hold episode boundaries inside chunks for this check to mean anything.
-	inside = ended.reshape(chunks, r.sequence_length, r.batch_size)[:, :-1]
+	inside = ended.reshape(-1, r.sequence_length, layout.lanes)[:, :-1]
 	assert inside.any()
 
-	def to_steps(x):
-		return jnp.swapaxes(
-			chunk_time(jnp.asarray(x), chunks, r.sequence_length, r.batch_size), 0, 1
-		)
-
-	obs = jax.tree.map(to_steps, traj.obs)
-	start = jax.tree.map(
-		lambda x: jnp.asarray(
-			x[:: r.sequence_length].reshape((chunks * r.batch_size,) + x.shape[2:])
-		),
-		traj.hidden,
+	obs = jax.tree.map(lambda x: _lane_chunks(league_trainer, x), traj.obs)
+	start = _chunk_starts(league_trainer, traj.hidden)
+	logits, values = jax.jit(league_trainer._replay)(
+		learner.params, obs, _lane_chunks(league_trainer, ended), start
 	)
-	logits, values = jax.jit(trainer._replay)(learner.params, obs, to_steps(ended), start)
-	logits, values = np.asarray(logits), np.asarray(values)
-	log_probs = np.asarray(jax.nn.log_softmax(logits))
-	chosen = np.take_along_axis(log_probs, np.asarray(to_steps(traj.action))[..., None], -1)[..., 0]
-	np.testing.assert_allclose(chosen, np.asarray(to_steps(traj.log_prob)), atol=1e-5)
-	np.testing.assert_allclose(values, np.asarray(to_steps(traj.value)), atol=1e-5)
+	log_probs = np.asarray(jax.nn.log_softmax(np.asarray(logits)))
+	actions = np.asarray(_lane_chunks(league_trainer, traj.action))
+	chosen = np.take_along_axis(log_probs, actions[..., None], -1)[..., 0]
+	np.testing.assert_allclose(
+		chosen, np.asarray(_lane_chunks(league_trainer, traj.log_prob)), atol=1e-5
+	)
+	np.testing.assert_allclose(
+		np.asarray(values), np.asarray(_lane_chunks(league_trainer, traj.value)), atol=1e-5
+	)
 
 
-def test_skipping_the_reset_changes_the_replay(rollout):
+def test_skipping_the_reset_changes_the_replay(league_trainer, rollout):
 	"""The reset matters: a replay that carries the state across battles disagrees with the rollout."""
-	trainer, learner, traj = rollout
-	r = trainer.config.rollout
-	chunks = r.rollout_length // r.sequence_length
-
-	def to_steps(x):
-		return jnp.swapaxes(
-			chunk_time(jnp.asarray(x), chunks, r.sequence_length, r.batch_size), 0, 1
-		)
-
-	obs = jax.tree.map(to_steps, traj.obs)
-	start = jax.tree.map(
-		lambda x: jnp.asarray(
-			x[:: r.sequence_length].reshape((chunks * r.batch_size,) + x.shape[2:])
-		),
-		traj.hidden,
-	)
+	learner, traj = rollout
+	obs = jax.tree.map(lambda x: _lane_chunks(league_trainer, x), traj.obs)
+	start = _chunk_starts(league_trainer, traj.hidden)
 
 	def without_reset(params, obs, start):
 		def step(hidden, step_obs):
-			after, _, value = trainer.model.apply({"params": params}, step_obs, hidden)
+			after, _, value = league_trainer.model.apply({"params": params}, step_obs, hidden)
 			return after, value
 
 		_, values = jax.lax.scan(step, start, obs)
 		return values
 
 	values = np.asarray(jax.jit(without_reset)(learner.params, obs, start))
-	assert np.abs(values - np.asarray(to_steps(traj.value))).max() > 1e-4
+	assert np.abs(values - np.asarray(_lane_chunks(league_trainer, traj.value))).max() > 1e-4

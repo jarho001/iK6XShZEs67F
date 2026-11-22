@@ -1,17 +1,26 @@
-"""Recurrent PPO on the opponent environment, with the whole update in one jitted function.
+"""Recurrent PPO on the league of pokejax.train.league, with the whole update in one jitted function.
 
-An update is: a rollout of rollout_length environment steps for batch_size battles, in one
-lax.scan that samples the policy and steps the environment; the bootstrap values; GAE; and
-epochs of minibatch SGD over sequence chunks. The chunks are rollout_length / sequence_length
-consecutive steps of one battle row. Each chunk starts from the recurrent state the rollout had
-at its first step, and the replay resets that state wherever a battle ended, as the rollout did.
+An update is: a rollout of rollout_length steps for batch_size battle rows, in one lax.scan that
+samples the policies and steps the environment (League.play); the bootstrap values; GAE over the
+lanes; and epochs of minibatch SGD over sequence chunks. The chunks are rollout_length /
+sequence_length consecutive steps of one lane. Each chunk starts from the recurrent state the
+rollout had at its first step, and the replay resets that state wherever a battle ended, as the
+rollout did.
 
 Advantages (gae): a terminated step bootstraps zero, a truncated one bootstraps the value of its
-pre-reset observation (env keep_final), and no advantage carries across an ended step, because
-the next step starts a fresh battle in both cases.
+pre-reset observation (final_obs), and no advantage carries across an ended step, because the next
+step starts a fresh battle in both cases.
 
-Steps whose learner switch a hidden trap refused did not advance the battle; they stay in the
-GAE recursion but get zero weight in the losses and the normalisation.
+Steps whose switch a hidden trap refused, and the steps whose action was held (league.py), did not
+count: they stay in the GAE recursion but get zero weight in the losses and the normalisation.
+
+The pool holds pool.size parameter sets stacked on a leading axis, all copies of the initial
+parameters at first. Every pool.every updates the parameters after that update replace the oldest
+set. Pool members are never trained.
+
+Evaluation plays the learner against one baseline on fixed battles (the same keys every call):
+the learner takes side 0 in the even rows and side 1 in the odd ones, and it samples its policy or
+takes the argmax.
 """
 
 import statistics
@@ -24,17 +33,12 @@ import optax
 
 from pokejax.baselines import make_policy
 from pokejax.engine.observation import Observation
-from pokejax.env import DEFAULT_POOL, Env, EnvConfig, LearnerInfo, OpponentEnv, OpponentState
+from pokejax.env import DEFAULT_POOL, Env, EnvConfig
 from pokejax.tables import load_tables
 from pokejax.train.config import PPOSection, TrainConfig
 from pokejax.train.evaluation import summarize_battles
-from pokejax.train.network import (
-	PokePolicy,
-	count_parameters,
-	initial_carry,
-	reset_carry,
-	vocabulary,
-)
+from pokejax.train.league import Layout, League, LeagueState, Transition
+from pokejax.train.network import PokePolicy, count_parameters, reset_carry, vocabulary
 
 # Seed offsets keep the evaluation and calibration keys apart from the training keys.
 EVALUATION_SEED = 1_000_003
@@ -44,46 +48,22 @@ CALIBRATION_SEED = 2_000_003
 class LearnerState(NamedTuple):
 	params: Any
 	opt_state: Any
-	env: OpponentState
-	obs: Observation  # the learner's observation of each battle, [B, ...]
-	hidden: Any  # the carry the next step starts from, [B, ...]
-	key: jax.Array
+	league: LeagueState  # the battles, lanes and carries; its key drives the rollout
+	pool: Any  # K parameter sets stacked on a leading axis
+	pool_inserts: jax.Array  # int32, insertions so far; the next one replaces slot inserts % K
 	update: jax.Array  # int32 scalar, updates done
-
-
-class RolloutCarry(NamedTuple):
-	env: OpponentState
-	obs: Observation
-	hidden: Any
-	key: jax.Array
-
-
-class Transition(NamedTuple):
-	"""One environment step of the rollout; after the scan every leaf is [T, B, ...]."""
-
-	obs: Observation  # the learner's observation the action was chosen from
-	hidden: Any  # the carry before the step
-	action: jax.Array  # int32
-	log_prob: jax.Array  # of the action under the rollout's policy
-	value: jax.Array
-	reward: jax.Array
-	terminated: jax.Array
-	truncated: jax.Array
-	info: LearnerInfo
-	final_obs: Observation  # the observation before an automatic reset
-	after: Any  # the carry after the core for this observation, before any reset
 
 
 class Steps(NamedTuple):
 	"""Sequence chunks, time-major after the gather: leaves are [L, M, ...] in a minibatch."""
 
 	obs: Observation
-	action: jax.Array
-	log_prob: jax.Array
+	action: jax.Array  # int32
+	log_prob: jax.Array  # float32, of the action under the rollout's policy
 	value: jax.Array
 	advantage: jax.Array
 	returns: jax.Array
-	weight: jax.Array  # float32, 0 for a step whose switch was refused
+	weight: jax.Array  # float32, 0 for a step that did not count
 	ended: jax.Array  # bool, the battle ended at this step (the carry resets after it)
 
 
@@ -93,10 +73,8 @@ class Chunks(NamedTuple):
 
 
 class EvaluationCarry(NamedTuple):
-	state: OpponentState
-	obs: Observation
-	hidden: Any
-	finished: jax.Array  # bool [B], the slot's first battle has ended
+	league: LeagueState
+	finished: jax.Array  # bool [B], the row's first battle has ended
 	wins: jax.Array  # bool [B], that battle was won
 	truncated: jax.Array  # bool [B]
 	length: jax.Array  # int32 [B], its environment steps
@@ -169,7 +147,7 @@ def _normalize(values, weight, total):
 
 
 class Trainer:
-	"""The configuration's pure functions and their host setup (tables, pool, jit wrappers).
+	"""The configuration's pure functions and their host setup (tables, league, jit wrappers).
 
 	Nothing here reads the run directory; run.py drives updates, evaluations and checkpoints.
 	"""
@@ -178,7 +156,7 @@ class Trainer:
 		self.config = config
 		self.tables = load_tables()
 		r, p = config.rollout, config.ppo
-		self.base = Env(
+		self.env = Env(
 			EnvConfig(
 				batch_size=r.batch_size,
 				max_steps=config.env.max_steps,
@@ -191,9 +169,20 @@ class Trainer:
 			team_pool,
 			tables=self.tables,
 		)
-		baseline = make_policy(config.opponent.baseline, self.base.tables, self.tables)
-		self.train_env = OpponentEnv(self.base, baseline)
+		self.layout = Layout(config.groups)
 		self.model = PokePolicy(vocabulary(self.tables), config.network)
+		policies = {
+			name: make_policy(name, self.env.tables, self.tables)
+			for name in self.layout.baseline_names
+		}
+		self.league = League(
+			self.env,
+			self.layout,
+			self.model,
+			config.network,
+			config.pool.size,
+			policies,
+		)
 		gradient_steps = config.run.updates * p.epochs * p.minibatches
 		self.schedule = learning_rate_schedule(p, gradient_steps)
 		self.tx = optax.chain(
@@ -202,58 +191,46 @@ class Trainer:
 		)
 		self._init = jax.jit(self._init_state)
 		self._update = jax.jit(self._update_step)
+		self._rollout_jit = jax.jit(self._rollout)
 		self._environment = jax.jit(self._environment_steps)
 		self._evaluators = {}
 
 	# State.
 
 	def _init_state(self, key) -> LearnerState:
-		r = self.config.rollout
 		key, init_key, reset_key = jax.random.split(key, 3)
-		env, timestep = self.train_env.reset(reset_key)
-		hidden = initial_carry(self.config.network, (r.batch_size,))
-		params = self.model.init(init_key, timestep.obs, hidden)["params"]
+		league = self.league.reset(reset_key)._replace(key=key)
+		params = self.model.init(init_key, league.obs, league.hidden)["params"]
 		return LearnerState(
-			params, self.tx.init(params), env, timestep.obs, hidden, key, jnp.int32(0)
+			params=params,
+			opt_state=self.tx.init(params),
+			league=league,
+			pool=None,
+			pool_inserts=jnp.int32(0),
+			update=jnp.int32(0),
 		)
 
 	def init(self, seed: int | None = None) -> LearnerState:
-		"""A fresh learner: initial parameters, optimizer state and battles (seeded)."""
+		"""A fresh learner: initial parameters, optimizer state, pool and battles (seeded)."""
 		seed = self.config.run.seed if seed is None else seed
-		return self._init(jax.random.key(seed))
+		learner = self._init(jax.random.key(seed))
+		# The pool's copies are made outside the jitted init: inside it XLA may recompute the random
+		# initial values for each copy, and the copies then differ in the last bits.
+		pool = jax.tree.map(
+			lambda x: jnp.broadcast_to(x, (self.config.pool.size,) + x.shape), learner.params
+		)
+		return learner._replace(pool=pool)
 
 	def parameter_count(self, learner: LearnerState) -> int:
 		return count_parameters(learner.params)
 
 	# Rollout.
 
-	def _rollout(self, params, carry: RolloutCarry):
-		def step(carry, _):
-			key, action_key = jax.random.split(carry.key)
-			after, logits, value = self.model.apply({"params": params}, carry.obs, carry.hidden)
-			action = jax.random.categorical(action_key, logits)
-			log_prob = jnp.take_along_axis(jax.nn.log_softmax(logits), action[:, None], axis=-1)[
-				:, 0
-			]
-			env, timestep = self.train_env.step(carry.env, action)
-			ended = timestep.terminated | timestep.truncated
-			transition = Transition(
-				obs=carry.obs,
-				hidden=carry.hidden,
-				action=action,
-				log_prob=log_prob,
-				value=value,
-				reward=timestep.reward,
-				terminated=timestep.terminated,
-				truncated=timestep.truncated,
-				info=timestep.info,
-				final_obs=timestep.final_obs,
-				after=after,
-			)
-			next_carry = RolloutCarry(env, timestep.obs, reset_carry(after, ended), key)
-			return next_carry, transition
+	def _rollout(self, params, pool, league: LeagueState):
+		def step(state, _):
+			return self.league.play(params, pool, state)
 
-		return jax.lax.scan(step, carry, None, length=self.config.rollout.rollout_length)
+		return jax.lax.scan(step, league, None, length=self.config.rollout.rollout_length)
 
 	# Loss.
 
@@ -334,34 +311,77 @@ class Trainer:
 
 	# The update.
 
+	def _rollout_metrics(self, traj: Transition, returns, weight) -> dict:
+		"""Battle and learner statistics of one rollout; win rates per group, from perspectives."""
+		layout = self.layout
+		ended = traj.terminated | traj.truncated
+		completed = jnp.maximum(ended.sum().astype(jnp.float32), 1.0)
+		lane_ended = layout.lanes_in_time(ended)
+		lane_completed = jnp.maximum(lane_ended.sum().astype(jnp.float32), 1.0)
+		metrics = {
+			"explained_variance": explained_variance(
+				returns.reshape(-1), traj.value.reshape(-1), weight.reshape(-1)
+			),
+			"completed_battles": ended.sum().astype(jnp.float32),
+			"truncated_battles": traj.truncated.sum().astype(jnp.float32),
+			"win_rate": traj.won.sum() / completed,
+			"mean_battle_length": jnp.where(ended, traj.steps, 0).sum() / completed,
+			"mean_battle_turns": jnp.where(ended, traj.turns, 0).sum() / completed,
+			"mean_terminal_reward": (traj.reward * lane_ended).sum() / lane_completed,
+			"illegal_actions": traj.illegal.sum().astype(jnp.float32),
+			"refused_switches": traj.rejected.sum().astype(jnp.float32),
+		}
+		for name, (start, stop) in layout.spans.items():
+			group_ended = ended[:, start:stop].sum().astype(jnp.float32)
+			group_won = traj.won[:, start:stop].sum().astype(jnp.float32)
+			metrics[f"completed_{name}"] = group_ended
+			metrics[f"win_rate_{name}"] = group_won / jnp.maximum(group_ended, 1.0)
+		return metrics
+
+	def _insert(self, pool, inserts, params, update):
+		"""The pool with the parameters after update `update` in its next slot, every pool.every."""
+		every = self.config.pool.every
+		if every == 0:
+			return pool, inserts
+		due = update % every == 0
+		slot = inserts % self.config.pool.size
+		pool = jax.tree.map(
+			lambda stored, new: stored.at[slot].set(jnp.where(due, new, stored[slot])),
+			pool,
+			params,
+		)
+		return pool, inserts + due.astype(jnp.int32)
+
 	def _update_step(self, learner: LearnerState):
 		p, r = self.config.ppo, self.config.rollout
-		batch, length, sequence = r.batch_size, r.rollout_length, r.sequence_length
+		layout = self.layout
+		lanes, length, sequence = layout.lanes, r.rollout_length, r.sequence_length
 		chunks_per_row = length // sequence
-		carry = RolloutCarry(learner.env, learner.obs, learner.hidden, learner.key)
-		carry, traj = self._rollout(learner.params, carry)
+		league, traj = self._rollout(learner.params, learner.pool, learner.league)
 
 		def apply(obs, hidden):
 			return self.model.apply({"params": learner.params}, obs, hidden)
 
-		_, _, last_value = apply(carry.obs, carry.hidden)
+		_, _, last_value = apply(league.obs, league.hidden)
 		_, _, final_value = apply(merge_leading(traj.final_obs, 2), merge_leading(traj.after, 2))
-		final_value = final_value.reshape(length, batch)
+		final_value = final_value.reshape(length, lanes)
+		terminated = layout.lanes_in_time(traj.terminated)
+		truncated = layout.lanes_in_time(traj.truncated)
 		advantage, returns = gae(
 			traj.reward,
 			traj.value,
-			traj.terminated,
-			traj.truncated,
+			terminated,
+			truncated,
 			final_value,
 			last_value,
 			p.gamma,
 			p.gae_lambda,
 		)
 
-		weight = (~traj.info.rejected).astype(jnp.float32)
+		weight = traj.weight.astype(jnp.float32)
 
 		def chunked(x):
-			return chunk_time(x, chunks_per_row, sequence, batch)
+			return chunk_time(x, chunks_per_row, sequence, lanes)
 
 		steps = Steps(
 			obs=jax.tree.map(chunked, traj.obs),
@@ -371,53 +391,43 @@ class Trainer:
 			advantage=chunked(advantage),
 			returns=chunked(returns),
 			weight=chunked(weight),
-			ended=chunked(traj.terminated | traj.truncated),
+			ended=chunked(terminated | truncated),
 		)
 		start = jax.tree.map(
-			lambda x: x[::sequence].reshape((chunks_per_row * batch,) + x.shape[2:]), traj.hidden
+			lambda x: x[::sequence].reshape((chunks_per_row * lanes,) + x.shape[2:]), traj.hidden
 		)
-		key, shuffle_key = jax.random.split(carry.key)
+		key, shuffle_key = jax.random.split(league.key)
 		params, opt_state, metrics = self._learn(
 			learner.params, learner.opt_state, Chunks(steps, start), shuffle_key
 		)
-
-		info = traj.info
-		ended = info.ended
-		completed = jnp.maximum(ended.sum().astype(jnp.float32), 1.0)
-		wins = (ended & (info.winner == info.learner)).sum()
-		metrics.update(
-			explained_variance=explained_variance(
-				returns.reshape(-1), traj.value.reshape(-1), weight.reshape(-1)
-			),
-			completed_battles=ended.sum().astype(jnp.float32),
-			truncated_battles=traj.truncated.sum().astype(jnp.float32),
-			win_rate=wins / completed,
-			mean_battle_length=jnp.where(ended, info.steps, 0).sum() / completed,
-			mean_battle_turns=jnp.where(ended, info.turns, 0).sum() / completed,
-			mean_terminal_reward=(traj.reward * ended).sum() / completed,
-			illegal_actions=(info.illegal | info.opponent_illegal).sum().astype(jnp.float32),
-			refused_switches=info.rejected.sum().astype(jnp.float32),
-			learning_rate=self.schedule(learner.update * p.epochs * p.minibatches),
-		)
-		learner = LearnerState(
-			params, opt_state, carry.env, carry.obs, carry.hidden, key, learner.update + 1
-		)
+		metrics.update(self._rollout_metrics(traj, returns, weight))
+		update = learner.update + 1
+		metrics["learning_rate"] = self.schedule(learner.update * p.epochs * p.minibatches)
+		pool, inserts = self._insert(learner.pool, learner.pool_inserts, params, update)
+		league = league._replace(key=key)
+		learner = LearnerState(params, opt_state, league, pool, inserts, update)
 		return learner, metrics
 
 	def update(self, learner: LearnerState):
 		"""One update (rollout, GAE and the epochs), jitted; returns the new state and metrics."""
 		return self._update(learner)
 
+	def rollout(self, params, pool, league: LeagueState):
+		"""The rollout of one update on its own, jitted: the league after it and Transition [T, ...].
+
+		Tests and inspection use it; the update runs the same scan inside its own jitted function.
+		"""
+		return self._rollout_jit(params, pool, league)
+
 	# Evaluation.
 
-	def _evaluate_batch(self, wrapper: OpponentEnv, params, key):
-		batch = wrapper.config.batch_size
-		state, timestep = wrapper.reset(key)
+	def _evaluate_batch(self, league: League, params, key, greedy):
+		batch = league.layout.batch
+		learner = jnp.arange(batch, dtype=jnp.int32) % 2
+		state = league.reset(key, learner)
 		zeros = jnp.zeros(batch, jnp.bool_)
 		start = EvaluationCarry(
-			state=state,
-			obs=timestep.obs,
-			hidden=initial_carry(self.config.network, (batch,)),
+			league=state,
 			finished=zeros,
 			wins=zeros,
 			truncated=zeros,
@@ -430,21 +440,15 @@ class Trainer:
 			return (~c.finished.all()) & (c.count < limit)
 
 		def body(c):
-			action_key = jax.random.fold_in(key, c.count)
-			after, logits, _ = self.model.apply({"params": params}, c.obs, c.hidden)
-			action = jax.random.categorical(action_key, logits)
-			state, timestep = wrapper.step(c.state, action)
-			info = timestep.info
-			first = info.ended & ~c.finished
-			won = timestep.terminated & (info.winner == info.learner)
+			state, step = league.play(params, None, c.league, greedy)
+			ended = step.terminated | step.truncated
+			first = ended & ~c.finished
 			return EvaluationCarry(
-				state=state,
-				obs=timestep.obs,
-				hidden=reset_carry(after, info.ended),
-				finished=c.finished | info.ended,
-				wins=jnp.where(first, won, c.wins),
-				truncated=jnp.where(first, timestep.truncated, c.truncated),
-				length=jnp.where(first, info.steps, c.length),
+				league=state,
+				finished=c.finished | ended,
+				wins=jnp.where(first, step.won, c.wins),
+				truncated=jnp.where(first, step.truncated, c.truncated),
+				length=jnp.where(first, step.steps, c.length),
 				count=c.count + 1,
 			)
 
@@ -458,61 +462,71 @@ class Trainer:
 
 	def _evaluator(self, name: str):
 		if name not in self._evaluators:
-			eval_env = self.base.replace(
-				batch_size=self.config.evaluation.batch, observe="both", keep_final=False
+			batch = self.config.evaluation.batch
+			env = self.env.replace(batch_size=batch, keep_final=False)
+			policy = make_policy(name, self.env.tables, self.tables)
+			league = League(
+				env,
+				Layout({name: batch}),
+				self.model,
+				self.config.network,
+				self.config.pool.size,
+				{name: policy},
 			)
-			wrapper = OpponentEnv(eval_env, make_policy(name, self.base.tables, self.tables))
 			self._evaluators[name] = jax.jit(
-				lambda params, key: self._evaluate_batch(wrapper, params, key)
+				lambda params, key, greedy: self._evaluate_batch(league, params, key, greedy)
 			)
 		return self._evaluators[name]
 
-	def evaluate(self, params, opponent: str, battles: int) -> dict:
-		"""The learner (sampling its policy) against one baseline, over fixed battles.
+	def evaluate(self, params, opponent: str, battles: int, greedy: bool = False) -> dict:
+		"""The learner against one baseline over fixed battles, sampling or taking the argmax.
 
 		The battles and their sides come from the same keys every call, so evaluations at
-		different updates play the same battles.
+		different updates, and the sampled and greedy ones, play the same battles.
 		"""
 		batch = self.config.evaluation.batch
 		run = self._evaluator(opponent)
 		key = jax.random.key(self.config.run.seed + EVALUATION_SEED)
 		wins = truncated = length = unfinished = 0
 		for index in range(battles // batch):
-			out = jax.device_get(run(params, jax.random.fold_in(key, index)))
+			out = jax.device_get(run(params, jax.random.fold_in(key, index), jnp.bool_(greedy)))
 			wins += int(out[0])
 			truncated += int(out[1])
 			length += int(out[2])
 			unfinished += int(out[3])
-		result = summarize_battles(opponent, battles, wins, truncated, length / battles)
+		policy = "greedy" if greedy else "sampled"
+		result = summarize_battles(
+			opponent, battles, wins, truncated, length / battles, policy=policy
+		)
 		result["unfinished"] = unfinished
 		return result
+
+	def evaluate_all(self, params, battles: int) -> list[dict]:
+		"""Every configured baseline, sampled and then (if configured) greedy."""
+		modes = (False, True) if self.config.evaluation.greedy else (False,)
+		return [
+			self.evaluate(params, name, battles, greedy)
+			for name in self.config.evaluation.opponents
+			for greedy in modes
+		]
 
 	# Throughput.
 
 	def _environment_steps(self, key):
-		state, timestep = self.train_env.reset(key)
+		state = self.league.reset(key)
 
-		def step(carry, _):
-			state, timestep, key, checksum = carry
-			key, action_key = jax.random.split(key)
-			logits = jnp.where(timestep.legal, 0.0, -jnp.inf)
-			action = jax.random.categorical(action_key, logits)
-			state, timestep = self.train_env.step(state, action)
-			leaves = jax.tree.leaves((timestep.obs, timestep.final_obs))
-			checksum = checksum + sum(jnp.sum(x.astype(jnp.float32)) for x in leaves)
-			return (state, timestep, key, checksum), None
+		def step(state, _):
+			return self.league.random_play(state), None
 
-		init = (state, timestep, key, jnp.float32(0.0))
-		(_, _, _, checksum), _ = jax.lax.scan(
-			step, init, None, length=self.config.rollout.rollout_length
-		)
-		return checksum
+		state, _ = jax.lax.scan(step, state, None, length=self.config.rollout.rollout_length)
+		leaves = jax.tree.leaves(state.obs)
+		return sum(jnp.sum(x.astype(jnp.float32)) for x in leaves)
 
 	def environment_steps_per_second(self, repetitions: int = 3) -> float:
 		"""Environment steps per second of one rollout's worth of steps, without the network.
 
-		The environment alone (sampler draws, auto-reset, the baseline on the other side, the
-		observations) with random legal actions; the median of `repetitions` timed calls after
+		The environment alone (sampler draws, auto-reset, the baselines and observations) with
+		uniform random legal actions on every side; the median of `repetitions` timed calls after
 		one call that compiles.
 		"""
 		key = jax.random.key(self.config.run.seed + CALIBRATION_SEED)
@@ -526,9 +540,9 @@ class Trainer:
 		return steps / statistics.median(durations)
 
 	def forward_cost(self, learner: LearnerState) -> dict:
-		"""FLOPs of one forward pass of one battle's step (XLA cost analysis) and its time."""
-		obs = jax.tree.map(lambda x: x[:1], learner.obs)
-		hidden = jax.tree.map(lambda x: x[:1], learner.hidden)
+		"""FLOPs of one forward pass of one lane's step (XLA cost analysis)."""
+		obs = jax.tree.map(lambda x: x[:1], learner.league.obs)
+		hidden = jax.tree.map(lambda x: x[:1], learner.league.hidden)
 
 		def forward(params, obs, hidden):
 			return self.model.apply({"params": params}, obs, hidden)

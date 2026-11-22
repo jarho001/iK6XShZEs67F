@@ -1,20 +1,13 @@
-"""Checkpoints: a round trip keeps every leaf, and a resumed run continues bit for bit."""
+"""Checkpoints: a round trip keeps every leaf, and a resumed run continues bit for bit on the CPU."""
 
 import jax
 import numpy as np
 import pytest
-from train_support import on_cpu, tiny_config, write_pool
+from train_support import league_config
 
 from pokejax.train.checkpoint import CheckpointError, load_checkpoint, save_checkpoint
-from pokejax.train.ppo import Trainer
 
-
-@pytest.fixture(scope="module", autouse=True)
-def cpu():
-	with on_cpu():
-		yield
-	# Compiled executables of a module are not needed after it; a worker keeps them otherwise.
-	jax.clear_caches()
+pytestmark = [pytest.mark.xdist_group("train"), pytest.mark.usefixtures("cpu_only")]
 
 
 def as_numpy(tree):
@@ -27,44 +20,44 @@ def as_numpy(tree):
 	]
 
 
-@pytest.fixture(scope="module")
-def trainer(tables, tmp_path_factory):
-	return Trainer(tiny_config(), write_pool(tmp_path_factory.mktemp("resume"), tables))
+def test_resume_with_the_pool_continues_bit_for_bit(league_trainer, tmp_path):
+	"""Pool insertions happen at every update here, so the resumed pool must match exactly."""
+	straight = league_trainer.init()
+	for _ in range(3):
+		straight, _ = league_trainer.update(straight)
 
-
-def test_resume_continues_bit_for_bit(trainer, tmp_path):
-	straight = trainer.init()
-	for _ in range(4):
-		straight, _ = trainer.update(straight)
-
-	halfway = trainer.init()
-	for _ in range(2):
-		halfway, _ = trainer.update(halfway)
+	halfway = league_trainer.init()
+	halfway, _ = league_trainer.update(halfway)
 	path = tmp_path / "checkpoint.npz"
-	save_checkpoint(path, halfway, trainer.config)
-	resumed = load_checkpoint(path, trainer.init(), trainer.config)
-	assert int(resumed.update) == 2
+	save_checkpoint(path, halfway, league_trainer.config)
+	resumed = load_checkpoint(path, league_trainer.init(), league_trainer.config)
+	assert int(resumed.update) == 1 and int(resumed.pool_inserts) == 1
 	for _ in range(2):
-		resumed, _ = trainer.update(resumed)
+		resumed, _ = league_trainer.update(resumed)
 
-	assert int(straight.update) == int(resumed.update) == 4
-	for expected, actual in zip(jax.tree.leaves(straight.params), jax.tree.leaves(resumed.params)):
-		np.testing.assert_array_equal(np.asarray(expected), np.asarray(actual))
+	assert int(resumed.update) == int(straight.update) == 3
+	assert int(resumed.pool_inserts) == int(straight.pool_inserts) == 3
 	for expected, actual in zip(as_numpy(straight), as_numpy(resumed)):
 		np.testing.assert_array_equal(expected, actual)
 
 
-def test_round_trip_keeps_every_leaf_and_checks_the_configuration(trainer, tmp_path):
-	learner, _ = trainer.update(trainer.init())
+def test_round_trip_keeps_every_leaf_and_checks_the_configuration(league_trainer, tmp_path):
+	learner, _ = league_trainer.update(league_trainer.init())
 	path = tmp_path / "checkpoint.npz"
-	save_checkpoint(path, learner, trainer.config)
-	loaded = load_checkpoint(path, trainer.init(), trainer.config)
+	save_checkpoint(path, learner, league_trainer.config)
+	loaded = load_checkpoint(path, league_trainer.init(), league_trainer.config)
 	for expected, actual in zip(as_numpy(learner), as_numpy(loaded)):
 		np.testing.assert_array_equal(expected, actual)
 	assert [x.dtype for x in jax.tree.leaves(loaded)] == [x.dtype for x in jax.tree.leaves(learner)]
 
 	# A longer run may resume; another learning rate may not.
-	longer = tiny_config("run.updates=9")
-	load_checkpoint(path, trainer.init(), longer)
+	load_checkpoint(path, league_trainer.init(), league_config("run.updates=9"))
 	with pytest.raises(CheckpointError, match="different configuration"):
-		load_checkpoint(path, trainer.init(), tiny_config("ppo.learning_rate=1e-4"))
+		load_checkpoint(path, league_trainer.init(), league_config("ppo.learning_rate=1e-4"))
+
+
+def test_the_pool_schedule_is_part_of_the_configuration(league_trainer, tmp_path):
+	path = tmp_path / "pool.npz"
+	save_checkpoint(path, league_trainer.init(), league_trainer.config)
+	with pytest.raises(CheckpointError, match="different configuration"):
+		load_checkpoint(path, league_trainer.init(), league_config("pool.every=2"))

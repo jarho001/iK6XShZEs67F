@@ -103,3 +103,71 @@ def test_the_command_line_rejects_bad_values(capsys):
 		main(["--updates", "0"])
 	assert error.value.code == 2
 	assert "run.updates" in capsys.readouterr().err
+
+
+SELFPLAY = Path(__file__).resolve().parents[1] / "configs" / "selfplay.toml"
+
+
+def test_the_selfplay_file_loads_with_every_group():
+	config = load_config(SELFPLAY)
+	assert config.run.name == "selfplay"
+	assert config.groups == {
+		"selfplay": 512,
+		"pool": 256,
+		"random": 64,
+		"random-move": 64,
+		"max-damage": 64,
+		"heuristics": 64,
+	}
+	assert config.pool.size == 8 and config.pool.every == 50
+	assert config.evaluation.opponents == ("random", "random-move", "max-damage", "heuristics")
+	assert config.evaluation.greedy is True
+
+
+def test_the_default_file_sends_every_row_to_the_baseline():
+	config = load_config(DEFAULT)
+	assert config.opponent.shares == {}
+	assert config.groups == {"random": 1024}
+
+
+@pytest.mark.parametrize(
+	"overrides, message",
+	[
+		(["opponent.shares={selfplay=0.5, pool=0.25, random=0.5}"], "must sum to 1"),
+		(["opponent.shares={oracle=1.0}"], "opponent.shares key must be one of"),
+		(["opponent.shares={random=-0.5, pool=1.5}"], "out of range"),
+		(["rollout.batch_size=1001", "opponent.shares={random=0.5, pool=0.5}"], "whole number"),
+		(["rollout.batch_size=4", "opponent.shares={pool=0.25, random=0.75}"], "pool.size"),
+		(['evaluation.opponents=["oracle"]'], "must be one of"),
+		(['evaluation.opponents=["random", "random"]'], "must not repeat"),
+		(
+			["evaluation.batch=3", "evaluation.battles=3", "evaluation.final_battles=3"],
+			"must be even",
+		),
+		(
+			[
+				"rollout.batch_size=2",
+				"rollout.rollout_length=8",
+				"rollout.sequence_length=4",
+				"opponent.shares={selfplay=0.5, random=0.5}",
+			],
+			"minibatches",
+		),
+	],
+)
+def test_invalid_groups_and_evaluation_are_errors(overrides, message):
+	with pytest.raises(ConfigError, match=message):
+		load_config(None, overrides)
+
+
+def test_group_rows_are_whole_rows_in_group_order():
+	config = load_config(
+		None,
+		[
+			"rollout.batch_size=8",
+			"pool.size=2",
+			"opponent.shares={heuristics=0.125, selfplay=0.5, pool=0.25, random=0.125}",
+		],
+	)
+	assert list(config.groups) == ["selfplay", "pool", "random", "heuristics"]
+	assert sum(config.groups.values()) == 8

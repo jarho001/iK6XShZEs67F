@@ -3,10 +3,12 @@
 A run directory (default work/runs/<name>, outside git) holds:
 
 - config.json: the configuration the run started with;
-- metrics.jsonl: one JSON object per line, "kind" update (every logging.every updates) or
-  evaluation (every evaluation.every updates, and the final one with kind final_evaluation);
-- checkpoint.npz: the learner (parameters, optimizer state, battles and keys, update count) and
-  the configuration; written every checkpoint.every updates and at the end;
+- metrics.jsonl: one JSON object per line, "kind" update (every logging.every updates), evaluation
+  (every evaluation.every updates: one result per configured baseline and action policy) and
+  final_evaluation (at the end, with evaluation.final_battles);
+- checkpoint.npz: the learner (parameters, optimizer state, battles and keys, the pool and its
+  insertion count, the update count) and the configuration; written every checkpoint.every updates
+  and at the end;
 - result.json: the summary of the finished run.
 """
 
@@ -26,7 +28,6 @@ CONFIG_FILE = "config.json"
 METRICS_FILE = "metrics.jsonl"
 CHECKPOINT_FILE = "checkpoint.npz"
 RESULT_FILE = "result.json"
-FINAL_OPPONENTS = ("random", "max-damage")
 
 
 class RunError(RuntimeError):
@@ -69,6 +70,7 @@ def run_training(
 		raise RunError(f"{run_dir} already holds a run; resume it or choose another run name")
 
 	trainer = Trainer(config, team_pool)
+	layout = trainer.layout
 	learner = trainer.init()
 	parameters = trainer.parameter_count(learner)
 	cost = trainer.forward_cost(learner)
@@ -89,10 +91,13 @@ def run_training(
 
 	rollout = config.rollout
 	steps_per_update = rollout.batch_size * rollout.rollout_length
+	lane_steps_per_update = layout.lanes * rollout.rollout_length
 	environment_rate = trainer.environment_steps_per_second()
+	groups = ", ".join(f"{name} {rows}" for name, rows in config.groups.items())
 	log(
 		f"{config.run.name}: {parameters} parameters, {cost['flops_per_battle_step']:.0f} "
-		f"forward FLOPs per battle step, environment {environment_rate:,.0f} steps/s"
+		f"forward FLOPs per battle step; rows: {groups}; {layout.lanes} lanes; "
+		f"environment {environment_rate:,.0f} steps/s"
 	)
 	start_time = time.perf_counter()
 	cold_seconds = 0.0
@@ -116,6 +121,7 @@ def run_training(
 					"seconds": time.perf_counter() - start_time,
 					"update_seconds": elapsed,
 					"steps_per_second": steps_per_update / elapsed,
+					"lane_steps_per_second": lane_steps_per_update / elapsed,
 					"environment_steps_per_second": environment_rate,
 				}
 				record.update({name: float(value) for name, value in values.items()})
@@ -127,30 +133,20 @@ def run_training(
 					f"{record['steps_per_second']:,.0f} steps/s"
 				)
 			if config.evaluation.every and update % config.evaluation.every == 0:
-				record = {
-					"kind": "evaluation",
-					"update": update,
-					"results": [
-						trainer.evaluate(learner.params, name, config.evaluation.battles)
-						for name in FINAL_OPPONENTS
-					],
-				}
-				_record(metrics, record)
-				log(_evaluation_line(update, record["results"]))
+				results = trainer.evaluate_all(learner.params, config.evaluation.battles)
+				_record(metrics, {"kind": "evaluation", "update": update, "results": results})
+				log(_evaluation_line(update, results, config.evaluation.battles))
 			if config.checkpoint.every and update % config.checkpoint.every == 0:
 				save_checkpoint(checkpoint_path, learner, config)
 		training_seconds = time.perf_counter() - start_time
 		save_checkpoint(checkpoint_path, learner, config)
 
-		final = [
-			trainer.evaluate(learner.params, name, config.evaluation.final_battles)
-			for name in FINAL_OPPONENTS
-		]
+		final = trainer.evaluate_all(learner.params, config.evaluation.final_battles)
 		_record(
 			metrics,
 			{"kind": "final_evaluation", "update": config.run.updates, "results": final},
 		)
-	log(_evaluation_line(config.run.updates, final, final=True))
+	log(_evaluation_line(config.run.updates, final, config.evaluation.final_battles, final=True))
 
 	env_steps = config.run.updates * steps_per_update
 	updates_done = config.run.updates - start
@@ -159,6 +155,8 @@ def run_training(
 		"device": str(jax.devices()[0]),
 		"jax_version": jax.__version__,
 		"config": config.to_dict(),
+		"groups": config.groups,
+		"lanes": layout.lanes,
 		"parameters": parameters,
 		"forward_flops_per_battle_step": cost["flops_per_battle_step"],
 		"updates": updates_done,
@@ -173,6 +171,9 @@ def run_training(
 		"steps_per_second_median": (
 			steps_per_update / statistics.median(warm_seconds) if warm_seconds else None
 		),
+		"lane_steps_per_second": (
+			lane_steps_per_update * len(warm_seconds) / sum(warm_seconds) if warm_seconds else None
+		),
 		"environment_steps_per_second": environment_rate,
 		"peak_device_bytes": _peak_memory(),
 		"final_evaluation": final,
@@ -181,11 +182,11 @@ def run_training(
 	return result
 
 
-def _evaluation_line(update: int, results: list[dict], final: bool = False) -> str:
+def _evaluation_line(update: int, results: list[dict], battles: int, final: bool = False) -> str:
 	name = "final evaluation" if final else "evaluation"
 	parts = [
-		f"{result['opponent']} {result['win_rate']:.4f} "
-		f"[{result['ci95'][0]:.4f}, {result['ci95'][1]:.4f}] over {result['battles']}"
+		f"{result['opponent']} {result['policy']} {100 * result['win_rate']:.2f}% "
+		f"[{100 * result['ci95'][0]:.2f}, {100 * result['ci95'][1]:.2f}]"
 		for result in results
 	]
-	return f"{name} at {update}: " + "; ".join(parts)
+	return f"{name} at {update} ({battles} battles each): " + "; ".join(parts)

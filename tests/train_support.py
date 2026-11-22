@@ -36,6 +36,23 @@ TINY_OVERRIDES = (
 )
 
 
+# A league of every group, small enough for a test: 8 battle rows split 4 selfplay, 2 pool (one
+# row for each of the two members), 1 random and 1 max-damage row. Battles are cut at 400 steps, so
+# some end within a rollout of 256 steps; pool insertions happen after every update.
+LEAGUE_OVERRIDES = (
+	"rollout.batch_size=8",
+	"rollout.rollout_length=256",
+	"rollout.sequence_length=4",
+	"ppo.minibatches=2",
+	"env.max_steps=400",
+	"opponent.shares={selfplay=0.5, pool=0.25, random=0.125, max-damage=0.125}",
+	"pool.size=2",
+	"pool.every=1",
+	"evaluation.greedy=true",
+	'evaluation.opponents=["max-damage"]',
+)
+
+
 @contextmanager
 def on_cpu():
 	"""Run JAX on the CPU: GPU scatter-adds (embedding gradients) are not bit-reproducible."""
@@ -45,6 +62,10 @@ def on_cpu():
 
 def tiny_config(*overrides: str):
 	return load_config(None, [*TINY_OVERRIDES, *overrides])
+
+
+def league_config(*overrides: str):
+	return tiny_config(*LEAGUE_OVERRIDES, *overrides)
 
 
 def write_pool(directory: Path, tables) -> Path:

@@ -31,3 +31,8 @@ def test_summary_counts_truncated_battles_as_not_won():
 	assert result["battles"] == 100 and result["truncated"] == 5
 	low, high = result["ci95"]
 	assert low < 0.6 < high
+
+
+def test_summary_names_the_action_policy():
+	assert summarize_battles("random", 10, 5, 0, 3.0)["policy"] == "sampled"
+	assert summarize_battles("random", 10, 5, 0, 3.0, policy="greedy")["policy"] == "greedy"

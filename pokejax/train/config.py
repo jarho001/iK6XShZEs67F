@@ -3,7 +3,12 @@
 A file has these tables, and every key is optional (the defaults are the ones below):
 
 - [run]: name, seed, updates, run_dir (default work/runs/<name>)
-- [opponent]: baseline (random, random-move, max-damage or heuristics)
+- [opponent]: baseline (random, random-move, max-damage or heuristics): the opponent of every row
+  when shares is empty. shares is a table of the fraction of the batch's rows in each group:
+  selfplay, pool, and the four baselines by name. The fractions must sum to 1 and give whole
+  numbers of rows (see group_rows and pokejax/train/league.py).
+- [pool]: size (K, past parameter sets kept on the device), every (updates between insertions of
+  the current parameters, 0 for never)
 - [rollout]: batch_size (parallel battles), rollout_length (steps per update),
   sequence_length (steps per minibatch chunk; must divide rollout_length)
 - [env]: max_steps (environment steps before a battle is truncated), shaping, shaping_coef
@@ -14,7 +19,8 @@ A file has these tables, and every key is optional (the defaults are the ones be
   entropy_coef, max_grad_norm, adam_eps
 - [logging]: every (updates between metric lines)
 - [evaluation]: every (updates between evaluations, 0 for none), battles, final_battles, batch
-  (battles per evaluation call; battles and final_battles must be multiples of it)
+  (battles per evaluation call; battles and final_battles must be multiples of it, and batch must
+  be even), opponents (baselines by name) and greedy (also evaluate the argmax actions)
 - [checkpoint]: every (updates between checkpoints, 0 for only the final one)
 
 Unknown tables and keys are errors. Overrides are `section.key=value`, with the value read as
@@ -25,15 +31,18 @@ import dataclasses
 import re
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any
+from typing import Any, get_origin
 
 from pokejax.baselines import POLICY_NAMES
 
 CORE_KINDS = ("gru", "lstm")
 ACTIVATIONS = ("relu", "tanh", "gelu")
 LR_SCHEDULES = ("constant", "linear", "cosine")
+# The groups of a batch in the order of their rows (pokejax.train.league).
+GROUP_ORDER = ("selfplay", "pool", *POLICY_NAMES)
+SHARE_TOLERANCE = 1e-9
 DEFAULT_RUN_ROOT = Path("work/runs")
 RUN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 
@@ -80,9 +89,29 @@ class RunSection:
 @dataclass(frozen=True)
 class OpponentSection:
 	baseline: str = "random"
+	shares: dict[str, float] = field(default_factory=dict)
 
 	def __post_init__(self):
 		_check_choice(self.baseline, POLICY_NAMES, "opponent.baseline")
+		for name, share in self.shares.items():
+			_check_choice(name, GROUP_ORDER, "opponent.shares key")
+			_check_float(share, 0.0, 1.0, f"opponent.shares.{name}")
+		if self.shares:
+			total = sum(self.shares.values())
+			_check(
+				abs(total - 1.0) <= SHARE_TOLERANCE,
+				f"opponent.shares must sum to 1, not {total:g}",
+			)
+
+
+@dataclass(frozen=True)
+class PoolSection:
+	size: int = 8  # K: past parameter sets, stacked on the device
+	every: int = 50  # M: updates between insertions of the current parameters; 0 for never
+
+	def __post_init__(self):
+		_check_int(self.size, 1, "pool.size")
+		_check_int(self.every, 0, "pool.every")
 
 
 @dataclass(frozen=True)
@@ -190,6 +219,8 @@ class EvaluationSection:
 	battles: int = 1024
 	final_battles: int = 4096
 	batch: int = 512
+	opponents: tuple[str, ...] = ("random", "max-damage")
+	greedy: bool = False
 
 	def __post_init__(self):
 		_check_int(self.every, 0, "evaluation.every")
@@ -200,6 +231,14 @@ class EvaluationSection:
 		_check(
 			self.final_battles % self.batch == 0,
 			"evaluation.final_battles must be a multiple of batch",
+		)
+		_check(self.batch % 2 == 0, "evaluation.batch must be even (the learner takes each side)")
+		_check(bool(self.opponents), "evaluation.opponents must name at least one baseline")
+		for name in self.opponents:
+			_check_choice(name, POLICY_NAMES, "evaluation.opponents")
+		_check(
+			len(set(self.opponents)) == len(self.opponents),
+			"evaluation.opponents must not repeat a baseline",
 		)
 
 
@@ -214,6 +253,7 @@ class CheckpointSection:
 SECTIONS = {
 	"run": RunSection,
 	"opponent": OpponentSection,
+	"pool": PoolSection,
 	"rollout": RolloutSection,
 	"env": EnvSection,
 	"network": NetworkSection,
@@ -224,10 +264,33 @@ SECTIONS = {
 }
 
 
+def group_rows(opponent: OpponentSection, batch: int) -> dict[str, int]:
+	"""The rows of each group of a batch of `batch` rows, in GROUP_ORDER, empty groups left out.
+
+	With no shares every row is a row of opponent.baseline.
+	"""
+	shares = opponent.shares or {opponent.baseline: 1.0}
+	rows = {}
+	for name in GROUP_ORDER:
+		if name not in shares:
+			continue
+		exact = shares[name] * batch
+		count = round(exact)
+		_check(
+			abs(exact - count) <= 1e-6,
+			f"opponent.shares.{name} = {shares[name]:g} is not a whole number of rows of a "
+			f"batch of {batch}",
+		)
+		if count:
+			rows[name] = count
+	return rows
+
+
 @dataclass(frozen=True)
 class TrainConfig:
 	run: RunSection = RunSection()
 	opponent: OpponentSection = OpponentSection()
+	pool: PoolSection = PoolSection()
 	rollout: RolloutSection = RolloutSection()
 	env: EnvSection = EnvSection()
 	network: NetworkSection = NetworkSection()
@@ -237,11 +300,20 @@ class TrainConfig:
 	checkpoint: CheckpointSection = CheckpointSection()
 
 	def __post_init__(self):
+		rows = group_rows(self.opponent, self.rollout.batch_size)
+		selfplay = rows.get("selfplay", 0)
+		lanes = 2 * selfplay + self.rollout.batch_size - selfplay
+		pool_rows = rows.get("pool", 0)
+		_check(
+			pool_rows % self.pool.size == 0,
+			f"opponent.shares.pool gives {pool_rows} rows, which must be a multiple of "
+			f"pool.size = {self.pool.size}",
+		)
 		chunks = self.rollout.rollout_length // self.rollout.sequence_length
-		total = self.rollout.batch_size * chunks
+		total = lanes * chunks
 		_check(
 			total % self.ppo.minibatches == 0,
-			f"batch_size x rollout_length / sequence_length = {total} sequences must divide "
+			f"{lanes} lanes x {chunks} chunks = {total} sequences must divide "
 			f"evenly into ppo.minibatches = {self.ppo.minibatches}",
 		)
 
@@ -249,8 +321,13 @@ class TrainConfig:
 	def run_dir(self) -> Path:
 		return Path(self.run.run_dir) if self.run.run_dir else DEFAULT_RUN_ROOT / self.run.name
 
+	@property
+	def groups(self) -> dict[str, int]:
+		"""The rows of each group of the batch (group_rows)."""
+		return group_rows(self.opponent, self.rollout.batch_size)
+
 	def to_dict(self) -> dict[str, Any]:
-		return {section: dataclasses.asdict(getattr(self, section)) for section in SECTIONS}
+		return {section: _plain(dataclasses.asdict(getattr(self, section))) for section in SECTIONS}
 
 	@classmethod
 	def from_dict(cls, data: Mapping[str, Any]) -> "TrainConfig":
@@ -260,6 +337,15 @@ class TrainConfig:
 		for name, section_type in SECTIONS.items():
 			sections[name] = _section(section_type, name, data.get(name, {}))
 		return cls(**sections)
+
+
+def _plain(value):
+	"""Tuples as lists, so that a dictionary equals its JSON round trip."""
+	if isinstance(value, dict):
+		return {key: _plain(item) for key, item in value.items()}
+	if isinstance(value, (list, tuple)):
+		return [_plain(item) for item in value]
+	return value
 
 
 def _section(section_type, name: str, values) -> Any:
@@ -289,6 +375,13 @@ def _coerce(value, kind, name: str):
 	if kind is str:
 		_check(isinstance(value, str), f"{name} must be a string")
 		return value
+	origin = get_origin(kind)
+	if origin is dict:
+		_check(isinstance(value, Mapping), f"{name} must be a table")
+		return {str(key): _coerce(item, float, f"{name}.{key}") for key, item in value.items()}
+	if origin is tuple:
+		_check(isinstance(value, (list, tuple)), f"{name} must be a list")
+		return tuple(_coerce(item, str, f"{name}[{index}]") for index, item in enumerate(value))
 	raise TypeError(f"unsupported field type for {name}: {kind}")
 
 

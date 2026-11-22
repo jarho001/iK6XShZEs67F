@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from train_support import TINY_OVERRIDES, on_cpu, write_pool
+from train_support import TINY_OVERRIDES, write_pool
 
 from pokejax.env import Env, EnvConfig, OpponentEnv
 from pokejax.train.config import load_config
@@ -19,17 +19,11 @@ from pokejax.train.network import (
 
 BATCH = 4
 
-
-@pytest.fixture(scope="module", autouse=True)
-def cpu():
-	with on_cpu():
-		yield
-	# Compiled executables of a module are not needed after it; a worker keeps them otherwise.
-	jax.clear_caches()
+pytestmark = [pytest.mark.xdist_group("train"), pytest.mark.usefixtures("cpu_only")]
 
 
 @pytest.fixture(scope="module")
-def observed(tables, tmp_path_factory):
+def observed(tables, tmp_path_factory, cpu_only):
 	"""A learner's observation of four battles (both sides' views) and its legal masks."""
 	pool = write_pool(tmp_path_factory.mktemp("network"), tables)
 	env = OpponentEnv(Env(EnvConfig(BATCH, observe="both"), pool, tables=tables))
