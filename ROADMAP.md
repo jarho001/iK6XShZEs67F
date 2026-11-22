@@ -359,8 +359,30 @@ training curve is still improving.
   building the same observation from Showdown's requests and protocol.
 - Compare win rate against the same baseline in the engine and on Showdown.
 
-Exit: the two win rates are close. A large gap means an engine or observation
-bug; find it with the whole-battle statistics and fix it before more training.
+Tasks, in order. Everything runs on the pinned local Showdown simulator
+(BattleStream); nothing connects to a server.
+
+1. Showdown player: a Node bridge runs many battles at once in the pinned
+   simulator from the same team pool, builds each learner side's
+   observation with reference/player-view.cjs, and a Python driver runs
+   the network on batches of them (recurrent state per battle) and sends
+   back choices, including forced switches and refused trapped switches.
+   The opponent is a Node baseline from reference/baselines.cjs. The
+   bridge keeps both sides' requests and the protocol per battle, so a
+   later state rebuilder for forward search has everything it needs.
+   Check: thousands of battles without errors against each baseline, and
+   the win rates next to the engine's evaluation of the same checkpoint.
+2. Closing the gap: whole-battle statistics of the learner against
+   max-damage in both simulators (win rate by side, battle length, move,
+   switch, status and faint frequencies, how often the policy's choice was
+   refused), find the causes of any gap and fix them in the engine, the
+   observation or the player, with differential cases where the engine
+   was wrong.
+
+Exit: the two win rates are close: within 3 percentage points against
+each baseline, with at least 4,000 battles on each side. A large gap means
+an engine or observation bug; find it with the whole-battle statistics and
+fix it before more training.
 
 ### Phase 6: final training
 
