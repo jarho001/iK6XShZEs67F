@@ -372,12 +372,14 @@ Tasks, in order. Everything runs on the pinned local Showdown simulator
    later state rebuilder for forward search has everything it needs.
    Check: thousands of battles without errors against each baseline, and
    the win rates next to the engine's evaluation of the same checkpoint.
-2. Closing the gap: whole-battle statistics of the learner against
-   max-damage in both simulators (win rate by side, battle length, move,
-   switch, status and faint frequencies, how often the policy's choice was
-   refused), find the causes of any gap and fix them in the engine, the
-   observation or the player, with differential cases where the engine
-   was wrong.
+2. Closing the gap, only if task 1 misses the exit: whole-battle
+   statistics of the learner against max-damage in both simulators (win
+   rate by side, battle length, move, switch, status and faint
+   frequencies, how often the policy's choice was refused), find the
+   causes of any gap and fix them in the engine, the observation or the
+   player, with differential cases where the engine was wrong. Not needed
+   this time: task 1 measured a largest gap of 0.63 points (README,
+   Phase 5 results); it stays the procedure for later checkpoints.
 
 Exit: the two win rates are close: within 3 percentage points against
 each baseline, with at least 4,000 battles on each side. A large gap means

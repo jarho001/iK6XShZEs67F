@@ -385,3 +385,31 @@ Caveats. The features read the observation only, so no hidden information enters
 the Pokemon's IVs, which the observation does not carry, so the features count it as a Normal move of
 power 70. The max-damage scores agree with the baseline to 1e-4 everywhere else (checked on real battles).
 The evaluation battles use fixed keys, so every checkpoint of a run plays the same battles.
+
+### Phase 5 results
+
+The Phase 4 checkpoint (`work/runs/rtx3060ti`) played in the pinned local Showdown simulator through
+the bridge (`reference/showdown-player.cjs`, `python -m pokejax.showdown`) against the Node
+baselines, next to the engine's evaluation of the same checkpoint on the same team pairs and learner
+sides (`python -m pokejax.showdown.compare --checkpoint work/runs/rtx3060ti --battles 4096`). 4,096
+battles per row, JAX on the CPU (the GPU was in use), Wilson 95% intervals.
+
+| Opponent | Policy | Engine win % | Showdown win % | Difference (points) |
+|---|---|---|---|---:|
+| random | sampled | 99.29 [98.99, 99.51] | 99.73 [99.52, 99.85] | +0.44 |
+| random | greedy | 99.58 [99.34, 99.74] | 99.58 [99.34, 99.74] | +0.00 |
+| random-move | sampled | 95.63 [94.96, 96.21] | 95.90 [95.25, 96.46] | +0.27 |
+| random-move | greedy | 96.02 [95.38, 96.58] | 96.66 [96.06, 97.16] | +0.63 |
+| max-damage | sampled | 76.56 [75.24, 77.83] | 77.17 [75.86, 78.43] | +0.61 |
+| max-damage | greedy | 78.56 [77.28, 79.79] | 78.83 [77.56, 80.06] | +0.27 |
+| heuristics | sampled | 75.05 [73.70, 76.35] | 75.05 [73.70, 76.35] | +0.00 |
+| heuristics | greedy | 76.68 [75.36, 77.95] | 77.29 [75.99, 78.55] | +0.61 |
+
+Exit: within 3 points against each baseline with at least 4,000 battles a side; the largest gap is
+0.63 points, so it passes. Over all 32,768 Showdown battles: 0 errors, 0 disagreements between the
+observed legal mask and Showdown's request, 0 truncations; refused trapped switches 3.6 to 5.1 per 100
+battles, the same size as in the engine; mean battle length within 0.3 steps. The first observation of
+every battle matches the engine's leaf for leaf (floats within 1 ulp: XLA divides by multiplying with
+a reciprocal). Showdown is ahead by +0.35 points on average (6 of 8 rows positive, none negative);
+individually only random/sampled is significant (p = 0.003). On the GPU the same comparison gave a
+largest gap of 1.51 points. Showdown battles run at about 45 per second in one Node process.
