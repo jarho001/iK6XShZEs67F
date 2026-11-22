@@ -1,0 +1,7 @@
+# The CUDA 12 GPU build of JAX for NVIDIA drivers from 525.60.13 on (the lab machines run 550).
+# Same JAX version and shared pins as requirements.txt; only the CUDA plugin differs. The
+# pip-installed CUDA 12 libraries are the newest the plugin allows; constraints-cuda12-driver550.txt
+# pins them to the oldest it allows, for hosts where the newest ones are too new for the driver.
+-r requirements-common.txt
+jax[cuda12]==0.12.0.1; sys_platform == "linux"
+jax==0.12.0.1; sys_platform != "linux"

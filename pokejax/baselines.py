@@ -85,9 +85,8 @@ from pokejax.engine.state import (
 	BattleState,
 )
 from pokejax.engine.variable_moves import hidden_power_for
+from pokejax.policy_names import POLICY_NAMES
 from pokejax.tables import Tables, load_tables
-
-POLICY_NAMES = ("random", "random-move", "max-damage", "heuristics")
 
 # poke-env SimpleHeuristicsPlayer constants.
 SPEED_TIER_COEFFICIENT = 0.1

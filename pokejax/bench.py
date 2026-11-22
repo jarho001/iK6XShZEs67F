@@ -36,6 +36,13 @@ DEFAULT_STEPS = 256
 DEFAULT_REPETITIONS = 3
 
 
+def device_memory() -> dict:
+	"""The default device's memory counters in bytes (peak and current use, limit); {} without any."""
+	stats = jax.devices()[0].memory_stats() or {}
+	keys = ("peak_bytes_in_use", "bytes_in_use", "bytes_limit")
+	return {key: int(stats[key]) for key in keys if key in stats}
+
+
 def _new_states(key, pool, tables, batch_size, team_indices=None, prepared=None):
 	"""Reset a batch on teams drawn from the whole pool, or from team_indices (pokejax.sampler).
 
@@ -228,6 +235,7 @@ def _benchmark(
 		"battles_per_second_max": max(battle_rates),
 		"completed_battles": sum(counts),
 		"mean_battle_length": sum(completed_lengths) / sum(counts) if sum(counts) else None,
+		"device_memory": device_memory(),
 	}
 
 

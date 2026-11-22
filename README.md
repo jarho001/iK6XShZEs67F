@@ -11,7 +11,10 @@ Toolkit). It has Python 3.13 with the pins from `requirements.txt` (JAX
 0.12.0.1 for CUDA 13), Node 22, git, ripgrep, and two agent CLIs: Claude Code
 (`claude`) and the Codex CLI (`codex`). The host needs an
 NVIDIA driver that supports CUDA 13 (580 or newer); the CUDA libraries come
-from pip.
+from pip. For a driver of 525 or newer (the lab's 550 hosts), build the CUDA 12 variant with
+`--build-arg JAX_CUDA=cuda12`; `cuda12-driver550` pins the CUDA 12 libraries to older releases as a
+fallback. The lab image is built with `--build-arg INSTALL_AGENTS=0`, which leaves out both agent CLIs.
+The lab kit that runs on the RTX 6000 machines is described in `lab/README.md`.
 
 Build (from the repo root):
 
@@ -38,9 +41,7 @@ docker run --rm -it --gpus all --shm-size=2g -v "$(pwd)":/workspace -v pokemon-j
 
 Leave out `--gpus all` for CPU only; JAX then falls back to the CPU. The named
 volumes keep the Claude Code and Codex logins between containers (sign in to
-Codex with `codex login --device-auth`). JAX allocates GPU memory
-on demand (`XLA_PYTHON_CLIENT_PREALLOCATE=false`); pass `-e
-XLA_PYTHON_CLIENT_PREALLOCATE=true` for long training runs.
+Codex with `codex login --device-auth`). The image sets no XLA allocator variable. The lab and `python -m pokejax.sizing` preallocate 90% of each GPU's memory per process (`XLA_PYTHON_CLIENT_PREALLOCATE=true`, `XLA_PYTHON_CLIENT_MEM_FRACTION=0.90`) unless you set those yourself; the tests set preallocation off. Other runs get JAX's default, or pass `-e XLA_PYTHON_CLIENT_PREALLOCATE=false` to share a GPU between processes.
 
 Inside the container:
 

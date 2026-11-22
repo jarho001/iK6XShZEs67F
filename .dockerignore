@@ -1,3 +1,7 @@
-# Only requirements.txt is copied into the image; the repo is mounted at run time.
+# Only the pins and the build scripts are copied into the image; the repo is mounted at run time.
 *
-!requirements.txt
+!requirements*.txt
+!constraints-*.txt
+!docker
+!docker/install-pins.sh
+!docker/selfcheck.sh

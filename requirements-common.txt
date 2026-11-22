@@ -1,0 +1,8 @@
+# Pins shared by every image variant: requirements.txt (CUDA 13, the default) and
+# requirements-cuda12.txt (CUDA 12, for NVIDIA drivers older than 580) both include this file.
+jaxlib==0.12.0.1
+flax==0.12.12
+optax==0.2.9
+numpy==2.5.5
+pytest==9.2.0
+ruff==0.17.5

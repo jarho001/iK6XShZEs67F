@@ -1,0 +1,84 @@
+# RTX 6000 Ada candidate (Phase 4, task 3): configs/selfplay.toml with 16,384 battle rows per update
+# instead of 1,024. Nothing else changes, so the lab's per-GPU runs differ from the 3060 Ti run only in
+# the batch size (and the run name).
+#
+# Why 16,384 (work/sizing-3060ti-fixed, the Phase 4 task 3 report). With the lab's allocator settings
+# (preallocation, 90% of the GPU) the peak device memory of an update is set by XLA's temporary arena for
+# the rollout-length arrays: about 11.7 KB per lane-step, where lanes = 1.5 x the batch rows here (a
+# self-play row gives two lanes) and the rollout is 64 steps. Measured on the 3060 Ti: batch 2,048 peaks
+# at 2.15 GiB and 3,072 at 3.19 GiB. Batch 4,096 needs a 4.14 GiB arena, which this WSL2 card cannot
+# allocate: a single 4.0 GiB allocation is refused, a 3.0 GiB one is not. The arena does not shrink with
+# more minibatches (8 or 16 still need 4.14 GiB), so it is set by lanes x rollout.
+# The RTX 6000 gives JAX 0.9 x 48 GB = 40.2 GiB, so the estimate is about 1.08 MiB per row at rollout 64
+# (the 16,384-row arena is one 16.6 GiB block: the lab's probe and sweep tell whether the RTX takes it):
+# 8,192 rows about 8.6 GiB, 16,384 rows about 17.2 GiB (43% of the budget), 32,768 rows about 34.4 GiB
+# (86%, too close to the limit). Rule: the largest power of two whose estimate stays at or under half the
+# budget, so 16,384 at rollout 64. Rollout 128 doubles the estimate per row, so it is not the candidate.
+# The width (2x is about 40% slower on the learner on the 3060 Ti) and the core (LSTM is about 5%
+# slower there) stay at the defaults.
+#
+# Run it with `python -m pokejax.train --config configs/rtx6000.toml`.
+
+[run]
+name = "rtx6000"
+seed = 0
+updates = 2200
+
+[opponent]
+shares = { selfplay = 0.5, pool = 0.25, random = 0.0625, random-move = 0.0625, max-damage = 0.0625, heuristics = 0.0625 }
+
+[pool]
+size = 8
+every = 50
+
+[rollout]
+batch_size = 16384
+rollout_length = 64
+sequence_length = 16
+
+[env]
+max_steps = 1000
+shaping = false
+shaping_coef = 0.1
+
+[network]
+core = "gru"
+activation = "relu"
+core_width = 256
+trunk_width = 256
+member_width = 64
+species_embedding = 32
+move_embedding = 16
+item_embedding = 8
+ability_embedding = 8
+type_embedding = 8
+code_embedding = 4
+
+[ppo]
+epochs = 4
+minibatches = 4
+learning_rate = 3e-4
+learning_rate_end = 3e-5
+lr_schedule = "linear"
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+value_clip = 0.2
+value_coef = 0.5
+entropy_coef = 0.01
+max_grad_norm = 0.5
+adam_eps = 1e-5
+
+[logging]
+every = 10
+
+[evaluation]
+every = 100
+battles = 1024
+final_battles = 4096
+batch = 1024
+opponents = ["random", "random-move", "max-damage", "heuristics"]
+greedy = true
+
+[checkpoint]
+every = 100

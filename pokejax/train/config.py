@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, get_origin
 
-from pokejax.baselines import POLICY_NAMES
+from pokejax.policy_names import POLICY_NAMES
 
 CORE_KINDS = ("gru", "lstm")
 ACTIVATIONS = ("relu", "tanh", "gelu")

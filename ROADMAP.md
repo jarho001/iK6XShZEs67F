@@ -344,8 +344,11 @@ their outputs stay outside git.
 3. Sizing and the first long run: measure memory and throughput on the
    3060 Ti over batch size, rollout length and width; one config file for
    the 3060 Ti and one for the RTX 6000 machines that differ only in
-   sizes; then a long run on the 3060 Ti to the exit, with the curve and
-   evaluation results recorded in the README.
+   sizes; an unattended lab kit (lab/run.sh, CUDA 12 image option) that
+   collects the same measurements and a short training run on the RTX 6000
+   machines, where no agent runs, into one archive; then a long run on the
+   3060 Ti to the exit, with the curve and evaluation results recorded in
+   the README.
 
 Exit: beats max-damage in well over half of evaluation games, and the
 training curve is still improving.
