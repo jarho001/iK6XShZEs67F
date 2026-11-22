@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="440" viewBox="0 0 760 440" font-family="system-ui, sans-serif">
+<rect width="760" height="440" fill="#fcfcfb"/>
+<text x="70" y="28" font-size="15" font-weight="600" fill="#0b0b0b">Phase 4: win rate against max-damage and heuristics</text>
+<g font-size="12" fill="#0b0b0b"><rect x="70" y="38" width="10" height="10" fill="#2a78d6"/><text x="86" y="47">max-damage (sampled)</text><rect x="240" y="38" width="10" height="10" fill="#eb6834"/><text x="256" y="47">heuristics (sampled)</text></g>
+<line x1="70" y1="380" x2="640" y2="380" stroke="#e6e5e1" stroke-width="1"/>
+<text x="62" y="384" font-size="11" fill="#52514e" text-anchor="end">55%</text>
+<line x1="70" y1="326.6666666666667" x2="640" y2="326.6666666666667" stroke="#e6e5e1" stroke-width="1"/>
+<text x="62" y="330.6666666666667" font-size="11" fill="#52514e" text-anchor="end">60%</text>
+<line x1="70" y1="273.33333333333337" x2="640" y2="273.33333333333337" stroke="#e6e5e1" stroke-width="1"/>
+<text x="62" y="277.33333333333337" font-size="11" fill="#52514e" text-anchor="end">65%</text>
+<line x1="70" y1="220" x2="640" y2="220" stroke="#e6e5e1" stroke-width="1"/>
+<text x="62" y="224" font-size="11" fill="#52514e" text-anchor="end">70%</text>
+<line x1="70" y1="166.66666666666669" x2="640" y2="166.66666666666669" stroke="#e6e5e1" stroke-width="1"/>
+<text x="62" y="170.66666666666669" font-size="11" fill="#52514e" text-anchor="end">75%</text>
+<line x1="70" y1="113.33333333333331" x2="640" y2="113.33333333333331" stroke="#e6e5e1" stroke-width="1"/>
+<text x="62" y="117.33333333333331" font-size="11" fill="#52514e" text-anchor="end">80%</text>
+<line x1="70" y1="60" x2="640" y2="60" stroke="#e6e5e1" stroke-width="1"/>
+<text x="62" y="64" font-size="11" fill="#52514e" text-anchor="end">85%</text>
+<text x="70" y="398" font-size="11" fill="#52514e" text-anchor="middle">0</text>
+<text x="212.5" y="398" font-size="11" fill="#52514e" text-anchor="middle">1000</text>
+<text x="355" y="398" font-size="11" fill="#52514e" text-anchor="middle">2000</text>
+<text x="497.5" y="398" font-size="11" fill="#52514e" text-anchor="middle">3000</text>
+<text x="640" y="398" font-size="11" fill="#52514e" text-anchor="middle">4000</text>
+<text x="355" y="426" font-size="12" fill="#52514e" text-anchor="middle">training update (1,024 battle rows per update)</text>
+<text transform="translate(16 220) rotate(-90)" font-size="12" fill="#52514e" text-anchor="middle">win rate, 1,024 battles per point</text>
+<line x1="70" y1="326.6666666666667" x2="640" y2="326.6666666666667" stroke="#8a8985" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="646" y="330.6666666666667" font-size="11" fill="#52514e">exit target 60%</text>
+<path d="M105.6,282.3 L141.3,245.8 L176.9,235.4 L212.5,222.9 L248.1,242.7 L283.8,200.0 L319.4,203.1 L355.0,213.5 L390.6,193.8 L426.3,174.0 L461.9,183.3 L497.5,165.6 L533.1,162.5 L568.8,156.3 L604.4,158.3 L640.0,147.9" fill="none" stroke="#2a78d6" stroke-width="2"/>
+<circle cx="105.6" cy="282.3" r="4" fill="#2a78d6"/>
+<circle cx="141.3" cy="245.8" r="4" fill="#2a78d6"/>
+<circle cx="176.9" cy="235.4" r="4" fill="#2a78d6"/>
+<circle cx="212.5" cy="222.9" r="4" fill="#2a78d6"/>
+<circle cx="248.1" cy="242.7" r="4" fill="#2a78d6"/>
+<circle cx="283.8" cy="200.0" r="4" fill="#2a78d6"/>
+<circle cx="319.4" cy="203.1" r="4" fill="#2a78d6"/>
+<circle cx="355.0" cy="213.5" r="4" fill="#2a78d6"/>
+<circle cx="390.6" cy="193.8" r="4" fill="#2a78d6"/>
+<circle cx="426.3" cy="174.0" r="4" fill="#2a78d6"/>
+<circle cx="461.9" cy="183.3" r="4" fill="#2a78d6"/>
+<circle cx="497.5" cy="165.6" r="4" fill="#2a78d6"/>
+<circle cx="533.1" cy="162.5" r="4" fill="#2a78d6"/>
+<circle cx="568.8" cy="156.3" r="4" fill="#2a78d6"/>
+<circle cx="604.4" cy="158.3" r="4" fill="#2a78d6"/>
+<circle cx="640.0" cy="147.9" r="4" fill="#2a78d6"/>
+<path d="M105.6,295.8 L141.3,271.9 L176.9,272.9 L212.5,261.5 L248.1,262.5 L283.8,219.8 L319.4,218.8 L355.0,234.4 L390.6,204.2 L426.3,208.3 L461.9,220.8 L497.5,188.5 L533.1,186.5 L568.8,182.3 L604.4,175.0 L640.0,159.4" fill="none" stroke="#eb6834" stroke-width="2"/>
+<circle cx="105.6" cy="295.8" r="4" fill="#eb6834"/>
+<circle cx="141.3" cy="271.9" r="4" fill="#eb6834"/>
+<circle cx="176.9" cy="272.9" r="4" fill="#eb6834"/>
+<circle cx="212.5" cy="261.5" r="4" fill="#eb6834"/>
+<circle cx="248.1" cy="262.5" r="4" fill="#eb6834"/>
+<circle cx="283.8" cy="219.8" r="4" fill="#eb6834"/>
+<circle cx="319.4" cy="218.8" r="4" fill="#eb6834"/>
+<circle cx="355.0" cy="234.4" r="4" fill="#eb6834"/>
+<circle cx="390.6" cy="204.2" r="4" fill="#eb6834"/>
+<circle cx="426.3" cy="208.3" r="4" fill="#eb6834"/>
+<circle cx="461.9" cy="220.8" r="4" fill="#eb6834"/>
+<circle cx="497.5" cy="188.5" r="4" fill="#eb6834"/>
+<circle cx="533.1" cy="186.5" r="4" fill="#eb6834"/>
+<circle cx="568.8" cy="182.3" r="4" fill="#eb6834"/>
+<circle cx="604.4" cy="175.0" r="4" fill="#eb6834"/>
+<circle cx="640.0" cy="159.4" r="4" fill="#eb6834"/>
+<text x="648" y="151.91666666666669" font-size="12" font-weight="600" fill="#2a78d6">76.8%</text>
+<text x="648" y="163.375" font-size="12" font-weight="600" fill="#eb6834">75.7%</text>
+</svg>

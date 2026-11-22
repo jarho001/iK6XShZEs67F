@@ -9,6 +9,7 @@ from train_support import TINY_OVERRIDES, write_pool
 
 from pokejax.env import Env, EnvConfig, OpponentEnv
 from pokejax.train.config import load_config
+from pokejax.train.features import BENCH_COUNT, MOVE_COUNT, MOVE_FEATURES, SWITCH_FEATURES
 from pokejax.train.network import (
 	PokePolicy,
 	count_parameters,
@@ -99,3 +100,52 @@ def test_a_single_legal_action_is_chosen_with_no_nan(tables, observed):
 	assert float(logp) == pytest.approx(0.0, abs=1e-6)
 	assert float(entropy) == pytest.approx(0.0, abs=1e-6)
 	assert all(np.all(np.isfinite(np.asarray(g))) for g in jax.tree.leaves(grads))
+
+
+def featured_network(action_head, core="gru"):
+	overrides = [
+		*TINY_OVERRIDES,
+		"network.features=true",
+		f"network.action_head={action_head}",
+		"network.action_width=8",
+		f"network.core={core}",
+	]
+	return load_config(None, overrides).network
+
+
+@pytest.mark.parametrize("action_head", ["dense", "factored"])
+def test_features_and_action_heads_mask_illegal_actions(tables, observed, action_head):
+	obs, legal = observed
+	network = featured_network(action_head)
+	model = PokePolicy(vocabulary(tables), network)
+	hidden = initial_carry(network, (BATCH,))
+	params = model.init(jax.random.key(1), obs, hidden)["params"]
+	# Two switch actions only: 5 and 6.
+	narrowed = obs._replace(legal_actions=jnp.zeros_like(legal).at[:, 5:7].set(True))
+	_, logits, value = model.apply({"params": params}, narrowed, hidden)
+	assert logits.shape == (BATCH, 9) and value.shape == (BATCH,)
+	assert np.all(np.isfinite(np.asarray(logits)))
+	probabilities = np.asarray(jax.nn.softmax(logits))
+	assert np.all(probabilities[:, [0, 1, 2, 3, 4, 7, 8]] == 0.0)
+	np.testing.assert_allclose(probabilities[:, 5:7].sum(axis=1), 1.0, atol=1e-6)
+
+
+@pytest.mark.parametrize("core", ["gru", "lstm"])
+def test_factored_encode_then_step_is_the_whole_call(tables, observed, core):
+	obs, _ = observed
+	network = featured_network("factored", core)
+	model = PokePolicy(vocabulary(tables), network)
+	hidden = initial_carry(network, (BATCH,))
+	params = model.init(jax.random.key(1), obs, hidden)["params"]
+	projected = model.apply({"params": params}, obs, method=PokePolicy.encode)
+	width = (3 if core == "gru" else 4) * network.core_width  # GRU and LSTM gates
+	assert projected.shape == (
+		BATCH,
+		width + MOVE_COUNT * MOVE_FEATURES + BENCH_COUNT * SWITCH_FEATURES,
+	)
+	_, logits, value = model.apply(
+		{"params": params}, hidden, projected, obs.legal_actions, method=PokePolicy.step
+	)
+	_, whole_logits, whole_value = model.apply({"params": params}, obs, hidden)
+	np.testing.assert_allclose(np.asarray(logits), np.asarray(whole_logits), atol=1e-6)
+	np.testing.assert_allclose(np.asarray(value), np.asarray(whole_value), atol=1e-6)

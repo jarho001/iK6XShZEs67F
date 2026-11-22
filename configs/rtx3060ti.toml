@@ -1,0 +1,77 @@
+# Phase 4, task 3: the training setup chosen by the experiments in README.md ("Phase 4 results").
+# Recurrent maskable PPO with self-play, a pool of past checkpoints and the four baselines, as in
+# selfplay.toml, with three changes the experiments found: public damage and matchup features with a
+# per-action (factored) policy head (network.features, network.action_head), a learning rate of 1e-3
+# decaying linearly to 1e-4 (instead of 3e-4 to 3e-5), and a batch of 1,024 battle rows.
+# run.updates is also the length of the learning-rate decay: 4,000 updates, so the rate is below 5e-4
+# after about 2,000 updates. A 12,000-update decay kept it near 9e-4 for thousands of updates; that run
+# plateaued at 68 to 72% against max-damage from update 1,000 (README, "Phase 4 results").
+# Run it with `python -m pokejax.train --config configs/rtx3060ti.toml` on the RTX 3060 Ti (see the
+# README for the allocator settings).
+
+[run]
+name = "rtx3060ti"
+seed = 0
+updates = 4000
+
+[opponent]
+shares = { selfplay = 0.375, pool = 0.25, random = 0.0625, random-move = 0.0625, max-damage = 0.125, heuristics = 0.125 }
+
+[pool]
+size = 8
+every = 50
+
+[rollout]
+batch_size = 1024
+rollout_length = 64
+sequence_length = 16
+
+[env]
+max_steps = 1000
+shaping = false
+shaping_coef = 0.1
+
+[network]
+core = "gru"
+activation = "relu"
+core_width = 256
+trunk_width = 256
+member_width = 64
+species_embedding = 32
+move_embedding = 16
+item_embedding = 8
+ability_embedding = 8
+type_embedding = 8
+code_embedding = 4
+features = true
+action_head = "factored"
+action_width = 64
+
+[ppo]
+epochs = 4
+minibatches = 4
+learning_rate = 1e-3
+learning_rate_end = 1e-4
+lr_schedule = "linear"
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+value_clip = 0.2
+value_coef = 0.5
+entropy_coef = 0.01
+max_grad_norm = 0.5
+adam_eps = 1e-5
+
+[logging]
+every = 10
+
+[evaluation]
+every = 250
+battles = 1024
+final_battles = 4096
+batch = 1024
+opponents = ["random", "random-move", "max-damage", "heuristics"]
+greedy = true
+
+[checkpoint]
+every = 250

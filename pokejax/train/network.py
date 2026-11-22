@@ -11,11 +11,17 @@ opponent as it sees them), with any number of leading batch axes. In order:
    max) and the active member's encoding is kept apart: three vectors per side.
 3. A trunk (two dense layers) over both teams, the field (turn, request, legal mask, weather,
    hazards, Trick Room, Wish and Healing Wish), each side's active volatiles and boosts, and the
-   last step's events of both sides. Steps 1 to 3 are feed-forward: encode() runs them over any
-   number of steps at once, and the input projections of the core are the last part of it.
+   last step's events of both sides. With network.features the trunk also takes the public damage
+   and matchup features of pokejax/train/features.py (each move slot's power, type effectiveness,
+   STAB and the max-damage score; each switch's matchup and threat; the threat to the active).
+   Steps 1 to 3 are feed-forward: encode() runs them over any number of steps at once, and the
+   input projections of the core are the last part of it.
 4. A recurrent core (GRU or LSTM, from the config; GateCore), which is the only part a scan over
    time has to run, then the heads: policy logits over the nine actions with illegal actions set
-   to ILLEGAL_LOGIT, and a scalar value. step() is the core and the heads.
+   to ILLEGAL_LOGIT, and a scalar value. The dense head (network.action_head = "dense") is one
+   linear layer over the core output; the factored head ("factored") scores each move slot and each
+   switch from the core output and that action's own features (ActionScorer, shared by the moves
+   and by the switches). step() is the core and the heads.
 """
 
 from typing import NamedTuple
@@ -29,6 +35,14 @@ from pokejax.engine.events import CANT_FOCUS_PUNCH, EFFECT_SUPER, ENTRY_REPLACEM
 from pokejax.engine.state import NUM_WEATHERS, STATUS_NAMES, TEAM_SLOTS
 from pokejax.tables import Tables
 from pokejax.train.config import NetworkSection
+from pokejax.train.features import (
+	BENCH_COUNT,
+	MOVE_COUNT,
+	MOVE_FEATURES,
+	SWITCH_FEATURES,
+	action_features,
+	public_tables,
+)
 
 # The logit of an illegal action; its exponential is exactly zero in float32.
 ILLEGAL_LOGIT = -1e9
@@ -218,6 +232,24 @@ class GateCore(nn.Module):
 		return (cell, hidden), hidden
 
 
+class ActionScorer(nn.Module):
+	"""One logit per action of a kind, from the core output and each action's own features.
+
+	h [..., W] and features [..., A, F] give logits [..., A]: a two-layer MLP over the core output
+	(repeated for each action) and that action's features, shared by the actions of the kind.
+	"""
+
+	width: int
+	activation: str
+
+	@nn.compact
+	def __call__(self, h, features):
+		act = ACTIVATIONS[self.activation]
+		shared = jnp.broadcast_to(h[..., None, :], features.shape[:-1] + h.shape[-1:])
+		x = act(nn.Dense(self.width, name="hidden")(jnp.concatenate([shared, features], -1)))
+		return nn.Dense(1, kernel_init=nn.initializers.orthogonal(0.01), name="output")(x)[..., 0]
+
+
 class PokePolicy(nn.Module):
 	"""(observation, recurrent carry) to (next carry, masked policy logits, value).
 
@@ -249,7 +281,11 @@ class PokePolicy(nn.Module):
 		self.trunk_0 = nn.Dense(n.trunk_width)
 		self.trunk_1 = nn.Dense(n.trunk_width)
 		self.core = GateCore(n.core, n.core_width)
-		self.policy = nn.Dense(NUM_ACTIONS, kernel_init=nn.initializers.orthogonal(0.01))
+		if n.action_head == "factored":
+			self.move_scorer = ActionScorer(n.action_width, n.activation, name="move_scorer")
+			self.switch_scorer = ActionScorer(n.action_width, n.activation, name="switch_scorer")
+		else:
+			self.policy = nn.Dense(NUM_ACTIONS, kernel_init=nn.initializers.orthogonal(0.01))
 		self.value = nn.Dense(1, kernel_init=nn.initializers.orthogonal(1.0))
 
 	def _members(self, side, lead, scalars, extra=()):
@@ -319,16 +355,43 @@ class PokePolicy(nn.Module):
 		]
 		event_features = jnp.concatenate(event_parts, axis=-1).reshape(lead + (-1,))
 
-		x = jnp.concatenate(
-			[own_team, foe_team, field, own_active, foe_active, event_features], axis=-1
-		)
+		parts = [own_team, foe_team, field, own_active, foe_active, event_features]
+		action_inputs = ()
+		if n.features:
+			move_f, switch_f, threat = action_features(obs, public_tables())
+			move_flat = move_f.reshape(lead + (-1,))
+			switch_flat = switch_f.reshape(lead + (-1,))
+			parts += [move_flat, switch_flat, threat[..., None]]
+			action_inputs = (move_flat, switch_flat)
+		x = jnp.concatenate(parts, axis=-1)
 		x = act(self.trunk_0(x))
-		return self.core.project(act(self.trunk_1(x)))
+		projected = self.core.project(act(self.trunk_1(x)))
+		if n.action_head == "factored":
+			projected = jnp.concatenate([projected, *action_inputs], axis=-1)
+		return projected
 
 	def step(self, carry, projected, legal):
-		"""The recurrent core on one step's projected inputs, then the heads: (carry, logits, value)."""
-		carry, out = self.core.recur(carry, projected)
-		logits = self.policy(out)
+		"""The recurrent core on one step's projected inputs, then the heads: (carry, logits, value).
+
+		With the factored head, projected also carries each action's features (encode) after the
+		core's inputs; the policy logits are the move scorer's (4) and the switch scorer's (5).
+		"""
+		n = self.network
+		if n.action_head == "factored":
+			width = (3 if n.core == "gru" else 4) * n.core_width
+			carry, out = self.core.recur(carry, projected[..., :width])
+			features = projected[..., width:]
+			lead = features.shape[:-1]
+			move_f = features[..., : MOVE_COUNT * MOVE_FEATURES]
+			switch_f = features[..., MOVE_COUNT * MOVE_FEATURES :]
+			move_f = move_f.reshape(lead + (MOVE_COUNT, MOVE_FEATURES))
+			switch_f = switch_f.reshape(lead + (BENCH_COUNT, SWITCH_FEATURES))
+			logits = jnp.concatenate(
+				[self.move_scorer(out, move_f), self.switch_scorer(out, switch_f)], axis=-1
+			)
+		else:
+			carry, out = self.core.recur(carry, projected)
+			logits = self.policy(out)
 		logits = jnp.where(legal, logits, ILLEGAL_LOGIT)
 		return carry, logits, self.value(out)[..., 0]
 

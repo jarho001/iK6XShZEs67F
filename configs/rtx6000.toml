@@ -1,31 +1,19 @@
-# RTX 6000 Ada candidate (Phase 4, task 3): configs/selfplay.toml with 16,384 battle rows per update
-# instead of 1,024. Nothing else changes, so the lab's per-GPU runs differ from the 3060 Ti run only in
-# the batch size (and the run name).
-#
-# Why 16,384 (work/sizing-3060ti-fixed, the Phase 4 task 3 report). With the lab's allocator settings
-# (preallocation, 90% of the GPU) the peak device memory of an update is set by XLA's temporary arena for
-# the rollout-length arrays: about 11.7 KB per lane-step, where lanes = 1.5 x the batch rows here (a
-# self-play row gives two lanes) and the rollout is 64 steps. Measured on the 3060 Ti: batch 2,048 peaks
-# at 2.15 GiB and 3,072 at 3.19 GiB. Batch 4,096 needs a 4.14 GiB arena, which this WSL2 card cannot
-# allocate: a single 4.0 GiB allocation is refused, a 3.0 GiB one is not. The arena does not shrink with
-# more minibatches (8 or 16 still need 4.14 GiB), so it is set by lanes x rollout.
-# The RTX 6000 gives JAX 0.9 x 48 GB = 40.2 GiB, so the estimate is about 1.08 MiB per row at rollout 64
-# (the 16,384-row arena is one 16.6 GiB block: the lab's probe and sweep tell whether the RTX takes it):
-# 8,192 rows about 8.6 GiB, 16,384 rows about 17.2 GiB (43% of the budget), 32,768 rows about 34.4 GiB
-# (86%, too close to the limit). Rule: the largest power of two whose estimate stays at or under half the
-# budget, so 16,384 at rollout 64. Rollout 128 doubles the estimate per row, so it is not the candidate.
-# The width (2x is about 40% slower on the learner on the 3060 Ti) and the core (LSTM is about 5%
-# slower there) stay at the defaults.
-#
+# RTX 6000 candidate (Phase 4, task 3): configs/rtx3060ti.toml with 16,384 battle rows per update
+# instead of 1,024. Nothing else changes (the batch size is the only size that differs), so the lab's
+# per-GPU runs are the same training with more rows. The batch is the part 1 choice (see
+# work/codex/runs/p4t3a-final.md): the largest power of two whose estimated peak memory stays at or
+# under half the 40.2 GiB the RTX 6000 gives JAX. The features add activations per row, so the
+# estimate is a little higher than part 1's; the lab's probe and fallback decide what fits. The lab
+# sets the update count from its time budget; run.updates here is the 3060 Ti's.
 # Run it with `python -m pokejax.train --config configs/rtx6000.toml`.
 
 [run]
 name = "rtx6000"
 seed = 0
-updates = 2200
+updates = 4000
 
 [opponent]
-shares = { selfplay = 0.5, pool = 0.25, random = 0.0625, random-move = 0.0625, max-damage = 0.0625, heuristics = 0.0625 }
+shares = { selfplay = 0.375, pool = 0.25, random = 0.0625, random-move = 0.0625, max-damage = 0.125, heuristics = 0.125 }
 
 [pool]
 size = 8
@@ -53,12 +41,15 @@ item_embedding = 8
 ability_embedding = 8
 type_embedding = 8
 code_embedding = 4
+features = true
+action_head = "factored"
+action_width = 64
 
 [ppo]
 epochs = 4
 minibatches = 4
-learning_rate = 3e-4
-learning_rate_end = 3e-5
+learning_rate = 1e-3
+learning_rate_end = 1e-4
 lr_schedule = "linear"
 gamma = 0.99
 gae_lambda = 0.95
@@ -73,7 +64,7 @@ adam_eps = 1e-5
 every = 10
 
 [evaluation]
-every = 100
+every = 250
 battles = 1024
 final_battles = 4096
 batch = 1024
@@ -81,4 +72,4 @@ opponents = ["random", "random-move", "max-damage", "heuristics"]
 greedy = true
 
 [checkpoint]
-every = 100
+every = 250

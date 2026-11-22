@@ -13,7 +13,9 @@ A file has these tables, and every key is optional (the defaults are the ones be
   sequence_length (steps per minibatch chunk; must divide rollout_length)
 - [env]: max_steps (environment steps before a battle is truncated), shaping, shaping_coef
 - [network]: core (gru or lstm), activation, core_width, trunk_width, member_width and the
-  embedding sizes
+  embedding sizes; features (public damage and matchup inputs, pokejax/train/features.py),
+  action_head (dense: one linear layer over the core output; factored: a scorer per action from
+  the core output and that action's features, which needs features) and action_width
 - [ppo]: epochs, minibatches, learning_rate, learning_rate_end, lr_schedule (constant, linear or
   cosine), gamma, gae_lambda, clip, value_clip (0 turns value clipping off), value_coef,
   entropy_coef, max_grad_norm, adam_eps
@@ -39,6 +41,7 @@ from pokejax.policy_names import POLICY_NAMES
 
 CORE_KINDS = ("gru", "lstm")
 ACTIVATIONS = ("relu", "tanh", "gelu")
+ACTION_HEADS = ("dense", "factored")
 LR_SCHEDULES = ("constant", "linear", "cosine")
 # The groups of a batch in the order of their rows (pokejax.train.league).
 GROUP_ORDER = ("selfplay", "pool", *POLICY_NAMES)
@@ -155,10 +158,20 @@ class NetworkSection:
 	ability_embedding: int = 8
 	type_embedding: int = 8
 	code_embedding: int = 4
+	features: bool = False
+	action_head: str = "dense"
+	action_width: int = 64
 
 	def __post_init__(self):
 		_check_choice(self.core, CORE_KINDS, "network.core")
 		_check_choice(self.activation, ACTIVATIONS, "network.activation")
+		_check_choice(self.action_head, ACTION_HEADS, "network.action_head")
+		_check(
+			self.features or self.action_head == "dense",
+			"network.action_head = factored needs network.features = true",
+		)
+		_check(isinstance(self.features, bool), "network.features must be true or false")
+		_check_int(self.action_width, 1, "network.action_width")
 		for name in (
 			"core_width",
 			"trunk_width",

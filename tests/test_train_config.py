@@ -171,3 +171,28 @@ def test_group_rows_are_whole_rows_in_group_order():
 	)
 	assert list(config.groups) == ["selfplay", "pool", "random", "heuristics"]
 	assert sum(config.groups.values()) == 8
+
+
+def test_network_features_are_off_by_default():
+	network = load_config(None).network
+	assert network.features is False
+	assert network.action_head == "dense" and network.action_width == 64
+
+
+@pytest.mark.parametrize(
+	"override, message",
+	[
+		("network.action_head=factored", "needs network.features"),
+		("network.action_head=oracle", "must be one of"),
+		("network.features=1", "must be true or false"),
+		("network.action_width=0", "at least 1"),
+	],
+)
+def test_invalid_network_features_are_errors(override, message):
+	with pytest.raises(ConfigError, match=message):
+		load_config(None, [override])
+
+
+def test_factored_heads_load_with_features():
+	network = load_config(None, ["network.features=true", "network.action_head=factored"]).network
+	assert network.features and network.action_head == "factored"

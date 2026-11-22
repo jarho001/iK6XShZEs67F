@@ -241,3 +241,147 @@ switches, Struggle, confusion, statuses, and the use counts of every move and co
 smallest raw p-values are 0.018 to 0.087 (one per run, a different metric each time: for example
 `status.par` 0.044 with seed 1 for max-damage against random, which is 0.81 with seed 2). Random
 against random, for the Phase 2 comparison, is under Phase 2 results.
+
+### Phase 4 results
+
+Exit check (ROADMAP.md, Phase 4): beats max-damage in well over half of evaluation games, and the
+training curve is still improving. The chosen run, `configs/rtx3060ti.toml`, won 76.49% of 4,096
+battles against max-damage with sampled actions (95% Wilson CI 75.17 to 77.76) and 78.64% with greedy
+actions (77.36 to 79.87). Against heuristics it won 75.00% and 76.83%. The curve rose from 70.6% at
+update 2,000 to 76.8% at update 4,000 (1,024 battles per point), but the last 1,000 updates gained
+about 1.7 points against a CI of about plus or minus 3, so the late rise is a slope, not a confirmed
+trend (see "Still improving" below).
+
+Setup (run directory `work/runs/rtx3060ti`, outside git; console log `work/codex/runs/rtx3060ti-console.log`):
+
+- Configuration: `configs/rtx3060ti.toml`, run with `XLA_PYTHON_CLIENT_PREALLOCATE=true
+  XLA_PYTHON_CLIENT_MEM_FRACTION=0.90` (the lab's allocator settings; the default allocator ran out of
+  memory at 2,048 rows in the experiments).
+- Network: GRU core of 256, trunk of 256, member encoder of 64, 741,659 parameters. Public damage and
+  matchup features (`network.features`: each move slot's power, accuracy, STAB, type effectiveness
+  against the opponent's current types and max-damage score; each switch's matchup and threat; the
+  threat to the active member) and a per-action policy head (`network.action_head = "factored"`: one
+  scorer for the move slots and one for the switches, width 64).
+- Rows: 1,024 battle rows per update: 384 self-play (768 lanes), 256 pool rows (a pool of 8 past
+  parameter sets, refreshed every 50 updates), 64 random, 64 random-move, 128 max-damage and 128
+  heuristics. 1,408 learner lanes.
+- Rollout 64 steps, sequences of 16, 4 epochs of 4 minibatches, learning rate 1e-3 decaying linearly
+  to 1e-4 over the run (4,000 updates), gamma 0.99, GAE lambda 0.95, clip 0.2, entropy coefficient 0.01.
+- Throughput (median of the update times, 4,000 updates): 78,383 environment steps per second of
+  training (65,536 steps per update); the environment alone (random legal actions, no network) runs 401,159 steps per second on the same
+  settings. The first update, which compiles, took 61.7 s.
+- GPU memory: 1.60 GB peak (`peak_bytes_in_use`).
+- Wall time: 3,620 s of training, including the 16 evaluations (every 250 updates, 1,024 battles per
+  baseline and policy) and the checkpoints, then about 2 minutes for the final evaluation of 4,096
+  battles per baseline and policy.
+
+Evaluation curve (win rate %, sampled / greedy, 1,024 battles per cell):
+
+| Update | random | random-move | max-damage | heuristics |
+|---:|---|---|---|---|
+| 250 | 98.5 / 99.1 | 89.5 / 92.4 | 64.2 / 68.7 | 62.9 / 64.6 |
+| 500 | 98.9 / 99.1 | 91.1 / 93.1 | 67.6 / 70.6 | 65.1 / 67.9 |
+| 750 | 99.1 / 99.4 | 92.1 / 93.8 | 68.6 / 69.9 | 65.0 / 68.7 |
+| 1000 | 99.1 / 99.4 | 92.2 / 94.4 | 69.7 / 72.1 | 66.1 / 68.4 |
+| 1250 | 99.2 / 99.5 | 93.1 / 95.1 | 67.9 / 72.7 | 66.0 / 70.9 |
+| 1500 | 99.2 / 99.0 | 95.1 / 95.9 | 71.9 / 72.8 | 70.0 / 71.4 |
+| 1750 | 98.5 / 99.6 | 93.9 / 96.3 | 71.6 / 73.9 | 70.1 / 71.0 |
+| 2000 | 99.6 / 99.2 | 93.8 / 95.2 | 70.6 / 72.3 | 68.7 / 72.4 |
+| 2250 | 98.9 / 99.0 | 95.6 / 96.4 | 72.5 / 72.9 | 71.5 / 71.9 |
+| 2500 | 98.9 / 99.4 | 94.8 / 96.4 | 74.3 / 73.2 | 71.1 / 71.5 |
+| 2750 | 99.2 / 99.4 | 94.3 / 96.6 | 73.4 / 74.3 | 69.9 / 73.8 |
+| 3000 | 98.7 / 99.2 | 94.4 / 95.4 | 75.1 / 76.2 | 72.9 / 74.3 |
+| 3250 | 98.8 / 99.6 | 95.0 / 95.7 | 75.4 / 76.7 | 73.1 / 76.3 |
+| 3500 | 99.4 / 99.8 | 95.3 / 96.5 | 76.0 / 77.1 | 73.5 / 75.2 |
+| 3750 | 99.1 / 99.6 | 96.5 / 96.5 | 75.8 / 76.1 | 74.2 / 75.5 |
+| 4000 | 99.3 / 99.8 | 96.6 / 96.7 | 76.8 / 77.7 | 75.7 / 77.7 |
+
+Final evaluation (4,096 battles per row; learner sides alternate; Wilson 95% intervals):
+
+| Opponent | Policy | Win rate % | 95% Wilson CI % | Wins / battles |
+|---|---|---:|---|---:|
+| heuristics | greedy | 76.83 | 75.51 to 78.10 | 3147 / 4096 |
+| heuristics | sampled | 75.00 | 73.65 to 76.30 | 3072 / 4096 |
+| max-damage | greedy | 78.64 | 77.36 to 79.87 | 3221 / 4096 |
+| max-damage | sampled | 76.49 | 75.17 to 77.76 | 3133 / 4096 |
+| random | greedy | 99.58 | 99.34 to 99.74 | 4079 / 4096 |
+| random | sampled | 99.29 | 98.99 to 99.51 | 4067 / 4096 |
+| random-move | greedy | 96.02 | 95.38 to 96.58 | 3933 / 4096 |
+| random-move | sampled | 95.63 | 94.96 to 96.21 | 3917 / 4096 |
+
+The plot of the curve against max-damage and heuristics (sampled, with the 60% exit target) is
+`docs/phase4-curve.svg`.
+
+Still improving. The curve against max-damage (sampled) reads 70.6% at update 2,000,
+75.1% at 3,000, 76.0% at 3,500, 75.8% at 3,750 and 76.8% at 4,000; against heuristics it reads
+68.7%, 72.9%, 73.5%, 74.2% and 75.7%. Both rose over the run, and the
+learning rate reached its floor at the end. Over the last 1,000 updates the rise is about
+1.7 points against max-damage, inside the CI of a 1,024-battle point
+(about plus or minus 3). We report it as a slope, not as a confirmed trend: the 4,096-battle
+evaluation is the figure to quote.
+
+A longer decay did not help by 2,000 updates. A first run with the same settings but a 12,000-update decay
+(`work/runs/rtx3060ti-h12000-stopped`, stopped at update 2,210) kept the rate near 9e-4 for thousands of
+updates: its curve against max-damage was 71.9% (sampled) at 1,000 updates, 70.1% at 1,500 and 68.6% at 2,000,
+with KL growing from 0.004 to 0.013 per update and the clip fraction from 0.035 to 0.077. The 4,000-update
+decay (the chosen run) reached 75.1% at 3,000 updates. The stopped run is kept in work/ and is not
+evaluated further.
+
+Diagnosis (before the change). The 2,200-update self-play run (`configs/selfplay.toml`, the part 2
+run) stalled at 26% to 34% against max-damage from update 600 on. Its training logs say the update was
+small (approximate KL 0.0003 to 0.003 per update, clip fraction 0.002 to 0.02), the entropy fell from
+1.77 to 0.33, and the explained variance held near 0.6. Replaying its checkpoint against max-damage
+(`work/codex/diag/diag_policy.py`, decision by decision, with the max-damage choice and the public damage
+numbers for the same position) gave these numbers, which also show what the change did:
+
+| Diagnostic, greedy, 512 rows x 300 steps (about 5,000 battles) | selfplay, 2,200 updates | E4, 1,200 updates | chosen, 4,000 updates |
+|---|---:|---:|---:|
+| learner win rate in these battles | 35.2% | 76.7% | 79.0% |
+| move chosen equal to max-damage's move, when both pick a move | 48.0% | 70.2% | 63.2% |
+| policy's top action equal to max-damage's action | 43.9% | 64.5% | 58.2% |
+| probability the policy gives max-damage's action (mean) | 0.44 | 0.59 | 0.53 |
+| super-effective share of move choices (max-damage: 29.1%, 35.9%, 35.3%) | 13.1% | 36.1% | 33.1% |
+| resisted or immune move chosen when a neutral or super option exists | 20.5% | 4.1% | 5.9% |
+| chosen move's max-damage score over the best legal one (mean) | 0.64 | 0.73 | 0.68 |
+| pairs of moves ordered the same way by the policy logits and max-damage scores | 0.69 | 0.74 | 0.71 |
+| status move chosen when a damaging move is legal | 15.4% | 19.6% | 25.1% |
+| voluntary switches (max-damage: never) | 2.5% | 11.8% | 11.7% |
+| voluntary switches to the best legal matchup | 46% | 81% | 81% |
+
+Reading. The network saw the moves only as 16-dimensional embeddings of their IDs, so the product of
+power, type, STAB, accuracy and the boosted attack ratio had to be built by the trunk from scratch; it
+partly managed (ordering agreement 0.69), but it used super-effective moves about half as often as max-damage
+and switched almost never. With the public damage and matchup features as inputs, and a head that scores
+each move slot and each switch from its own features, the same agent picks max-damage's move in about
+two of three positions and uses super-effective moves nearly as often as max-damage does.
+The learning rate was the second bottleneck: at 3e-4 the approximate KL per update was about 0.001, and the
+run at 1e-3 reached 67% against max-damage at 300 updates against 63% at 3e-4 (experiments E3 and E4).
+
+Experiments (one seed, 1,024 battles per point, so differences under about 3 points are noise). Each short
+run is about 1,200 updates (20 to 25 minutes on the RTX 3060 Ti); the trials that were stopped early are
+marked. The final column is the run's own 4,096-battle evaluation.
+
+| Run | What changed from `selfplay.toml` | Updates (minutes) | max-damage at 300 / 600 / 1,000 (sampled / greedy) | Final max-damage, 4,096 battles (sampled / greedy) | Final heuristics (sampled / greedy) |
+|---|---|---:|---|---|---|
+| E0 `selfplay.toml` | none (dense head, lr 3e-4 to 3e-5, 1,024 rows) | 2,200 (30.6) | 14.7 / 15.8, 27.1 / 27.5, 28.3 / 30.1 | 31.9 / 32.1 | 30.9 / 31.9 |
+| E1 | features and factored head | 1,200 (22.2) | 63.1 / 63.7, 65.2 / 67.2, 67.7 / 66.5 | 68.0 / 70.0 | 65.1 / 68.5 |
+| E2 | E1 with 2,048 rows | 810, stopped (26.5) | 64.2 / 66.8, 66.7 / 67.6, (800: 69.4 / 68.0) | not run to the end | not run to the end |
+| E3 | E1 with max-damage and heuristics at 12.5% each (selfplay 37.5%) | 1,200 (21.1) | 63.1 / 64.7, 65.6 / 67.0, 68.6 / 68.4 | 68.1 / 70.4 | 65.4 / 68.6 |
+| E4 | E3 with lr 1e-3 to 1e-4 | 1,200 (21.1) | 67.0 / 67.1, 69.6 / 70.7, 73.9 / 75.6 | 74.9 / 77.2 | 72.2 / 74.3 |
+| E5 | E3 with lr 2e-3 to 2e-4 | 1,060, stopped (19.0) | 63.8 / 65.8, 65.9 / 70.7, 66.7 / 72.0 | not run to the end | not run to the end |
+| L1 | E4 with a 12,000-update decay | 2,210, stopped (34.9) | 66.2 / 69.8, 71.9 / 73.0 (1,000), 68.6 / 71.2 (2,000) | not run to the end | not run to the end |
+| L2 (chosen) | E4 with a 4,000-update decay: `configs/rtx3060ti.toml` | 4,000 (62) | 64.2 / 68.7, 69.7 / 72.1, 75.1 / 76.2 (3,000) | 76.5 / 78.6 | 75.0 / 76.8 |
+
+The 2,048-row run (E2) gave the same curve per update at 1.8 times the time per update, so 1,024 rows
+stayed. Raising the max-damage and heuristics shares (E3) changed nothing measurable, but kept those
+groups at 128 rows each, so it stayed. Raising the learning rate to 2e-3 (E5) was worse than 1e-3 by
+the 1,000-update point. The chosen setup is E4's, with a 4,000-update decay.
+
+Lab kit (lab/README.md). The smoke test with the RTX 6000 configuration on this 8 GB card (`LAB_SMOKE=1
+lab/run.sh`, `configs/rtx6000.toml`): preflight, facts, bench (3 measurements) and the sweep (1 cell, batch 1,024) completed; contention and the training probe ran out of memory at 16,384, 8,192 and 4,096 rows, since one allocation of the 4,096-row arena is above the 3 to 4 GiB this card allows (the part 1 finding), so the lab stopped those steps as its fallback ladder ends there. The pack step wrote `work/lab-results/2026-11-22-fee70b24e9c5-5.tar.gz`, and the lab exited 1 with "lab run not complete", which the brief accepts for this card. On the RTX 6000 the first rung, 16,384 rows, is the one expected to run.
+
+Caveats. The features read the observation only, so no hidden information enters them, and tests cover that
+(`tests/test_train_features.py`). One exception to matching max-damage: Hidden Power's type depends on
+the Pokemon's IVs, which the observation does not carry, so the features count it as a Normal move of
+power 70. The max-damage scores agree with the baseline to 1e-4 everywhere else (checked on real battles).
+The evaluation battles use fixed keys, so every checkpoint of a run plays the same battles.
