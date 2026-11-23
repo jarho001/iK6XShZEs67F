@@ -497,6 +497,7 @@ def test_shapes_dtypes_jit_vmap(battles):
 	assert o_boosted.own.boosts[0] == -1
 	assert o_boosted.opponent.boosts[1] == 0.5
 	integer_fields = {"species", "types", "moves", "status", "item", "ability"}
+	integer_fields |= {"hidden_type", "return_power"}
 	integer_fields |= {"encore_move", "disabled_move", "choice_move"}
 	scalar_fields = {
 		"confused",
@@ -529,6 +530,8 @@ def test_shapes_dtypes_jit_vmap(battles):
 		"pp": (6, 4),
 		"stats": (6, 6),
 		"boosts": (7,),
+		"hidden_type": (6, 4),
+		"return_power": (6, 4),
 	}
 	for team in (o.own, o.opponent):
 		for name, x in zip(team._fields, team):
@@ -1003,10 +1006,15 @@ def test_a_disguised_holder_shows_the_level_of_its_disguise(battles):
 		level=s.level.at[foe, active].set(81).at[foe, bench].set(60),
 		volatiles=s.volatiles.at[foe, S.ILLUSION_SLOT].set(bench + 1),
 		shown_species=s.shown_species.at[foe, active].set(s.species[foe, bench]),
+		shown_level=s.shown_level.at[foe, active].set(60),
 	)
 	o = OBSERVE(disguised, 0, t)
 	np.testing.assert_allclose(o.opponent.level[0], 0.60)
-	revealed = disguised._replace(volatiles=disguised.volatiles.at[foe, S.ILLUSION_SLOT].set(0))
+	# The disguise breaks: the real level is announced (the replace line).
+	revealed = disguised._replace(
+		volatiles=disguised.volatiles.at[foe, S.ILLUSION_SLOT].set(0),
+		shown_level=disguised.shown_level.at[foe, active].set(81),
+	)
 	np.testing.assert_allclose(OBSERVE(revealed, 0, t).opponent.level[0], 0.81)
 
 

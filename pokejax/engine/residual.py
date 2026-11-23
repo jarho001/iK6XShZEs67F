@@ -216,6 +216,49 @@ def _ability_order5(state, enabled, first, bench_alive, tables, item_rows, rows,
 	return reveal_abilities(state, cure)
 
 
+def _bad_dreams(state, enabled, first, bench_alive, rows):
+	"""Bad Dreams: each holder's callback in speed order, the faster holder first.
+
+	A callback damages the foe when the foe sleeps (data/abilities.ts baddreams: onResidual, skipped
+	once the holder has fainted). Faints are resolved after each callback (sim/battle.ts runEvent), so
+	the slower holder's callback sees the faint of a foe that the faster one knocked out, and a battle
+	that the first callback ends stops the second. Returns the state, the holders that showed Bad
+	Dreams [2] and whether a callback ended the battle.
+	"""
+	active = state.active
+	hook = rows[:, RESIDUAL]
+	slots = jnp.arange(TEAM_SLOTS)[None, :] == active[:, None]
+	enabled = enabled & jnp.ones((2,), jnp.bool_)
+	shown = jnp.zeros((2,), jnp.bool_)
+	battle_over = jnp.zeros((), jnp.bool_)
+	for position in range(2):
+		holder = jnp.where(position == 0, first, 1 - first)
+		victim = 1 - holder
+		hp = state.hp[SIDES, active].astype(jnp.int32)
+		maximum = state.stats[SIDES, active, HP].astype(jnp.int32)
+		hit = (
+			enabled[holder]
+			& ~battle_over
+			& (hook[holder] == RESIDUAL_BAD_DREAMS)
+			& (hp[holder] > 0)
+			& (state.status[victim, active[victim]] == SLEEP)
+			& (hp[victim] > 0)
+			# Gen 5 Magic Guard blocks the damage silently (no -activate), so Bad Dreams is not shown.
+			& ~has_hook(rows[victim], MAGIC_GUARD)
+		)
+		damage = jnp.where(hit, jnp.maximum(maximum[victim] // 8, 1), 0)
+		after = jnp.maximum(hp[victim] - damage, 0)
+		write = (SIDES == victim)[:, None] & slots & hit
+		knocked_out = hit & (after == 0) & ~bench_alive[victim]
+		state = state._replace(
+			hp=jnp.where(write, after.astype(state.hp.dtype), state.hp),
+			winner=jnp.where(knocked_out, holder.astype(state.winner.dtype), state.winner),
+		)
+		shown = shown | ((SIDES == holder) & hit)
+		battle_over = battle_over | knocked_out
+	return state, shown, battle_over
+
+
 def _ability_order28(state, enabled, first, bench_alive, tables, item_rows, rows, key, forced):
 	del item_rows
 	active = state.active
@@ -239,17 +282,8 @@ def _ability_order28(state, enabled, first, bench_alive, tables, item_rows, rows
 	columns = jnp.arange(NUM_VOLATILES)
 	volatiles = jnp.where((columns[None, :] == SLOW_START), slow_counter[:, None], state.volatiles)
 	state = state._replace(boosts=boosts, volatiles=volatiles)
-	foe = 1 - SIDES
-	foe_hp = state.hp[foe, active[foe]].astype(jnp.int32)
-	foe_max = state.stats[foe, active[foe], 0].astype(jnp.int32)
-	foe_sleeping = state.status[foe, active[foe]] == SLEEP
-	dreams = live & (hook == RESIDUAL_BAD_DREAMS) & foe_sleeping & (foe_hp > 0)
-	dream_damage = jnp.where(dreams, jnp.maximum(foe_max // 8, 1), 0)
-	# Gen 5 Magic Guard blocks the damage silently (no -activate), so Bad Dreams is not shown.
-	dreams &= ~has_hook(rows[foe], MAGIC_GUARD)
-	dream_damage = jnp.where(dreams, dream_damage, 0)
-	damage = dream_damage[::-1]
-	state, still_enabled = _apply_damage(state, damage, enabled, first, bench_alive)
+	state, dreams, battle_over = _bad_dreams(state, enabled, first, bench_alive, rows)
+	still_enabled = enabled & jnp.ones((2,), jnp.bool_) & ~battle_over
 	state = _harvest(state, still_enabled, key, forced, tables, rows)
 	return reveal_abilities(state, boosted | dreams)
 

@@ -505,3 +505,20 @@ test('a refused switch is remembered the same way by a view that gets the lines 
 	assert.deepEqual(live.observation(), game.views[0].observation());
 	assert.equal(live.trapHolds(), true);
 });
+
+test('the own request names Hidden Power\'s type and Return\'s power, and the view keeps both', () => {
+	// All IVs 31 make Hidden Power Dark (the request gives its type only, as generation 5 does), and
+	// happiness 255 makes Return's power 102. Only the own side has them.
+	const game = play(
+		[member('Gengar', ['hiddenpower', 'return', 'splash']), member('Mew', ['splash'])],
+		[member('Wobbuffet', ['splash']), member('Pikachu', ['splash'])],
+	);
+	const own = game.views[0].ownObservation();
+	assert.equal(own.hidden_type[0][0], type('dark'));
+	assert.deepEqual(own.hidden_type[0].slice(1), [0, 0, 0]);
+	assert.equal(own.return_power[0][1], 102);
+	assert.deepEqual([own.return_power[0][0], own.return_power[0][2], own.return_power[0][3]], [0, 0, 0]);
+	assert.deepEqual(own.hidden_type[1], [0, 0, 0, 0]);
+	// The foe's request is not the learner's: its Hidden Power and Return are not in the observation.
+	assert.equal('hidden_type' in game.views[0].opponentObservation(), false);
+});

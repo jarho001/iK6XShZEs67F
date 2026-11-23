@@ -180,6 +180,10 @@ fresh recordings with new seeds; see `tests/test_regress.py`). With both sides o
 environment (random policies) runs 2,243,745 steps/s. Cold first call: 32.7 to 33.8 s, 35.3 s with
 observations; cold compile under 60 s: pass.
 
+After the Phase 6 review fixes the engine alone runs 2,831,828 and 2,857,718 steps/s (two runs),
+below the 3,000,000 target: the Flame Body fix resolves multi-hit moves twice, about 5%. Training
+is limited by the learner (about 78k steps/s), so this does not slow training.
+
 Observation (tasks 1 and 2). `observe` shows what one player can know at a decision point: the
 own team in full, the opponent as revealed, both actives' public volatiles, weather, hazards, Trick
 Room, pending Wish and Healing Wish, and a fixed record of the last step's visible events (action

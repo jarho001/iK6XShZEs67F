@@ -153,7 +153,8 @@ function newSide(index) {
 function newMember(name) {
 	return {
 		name, species: '', baseSpecies: '', level: 100, hp: 0, maxhp: 0, status: '', stats: null,
-		moves: [], pp: [], maxpp: [], baseAbility: '', ability: '', item: '', consumed: false,
+		moves: [], hiddenTypes: [], returnPowers: [], pp: [], maxpp: [], baseAbility: '', ability: '',
+		item: '', consumed: false,
 		knockedOff: false, itemRevealed: false, itemPublic: '', revealed: new Set(),
 		savedRevealed: null, types: null, seen: 0, fainted: false, formeSpecies: '',
 	};
@@ -244,11 +245,29 @@ class PlayerView {
 		if (refused) this.trapKnown = { own: this.sides[this.me].entries, foe: this.sides[1 - this.me].entries };
 	}
 
-	// The own side was refused a switch and neither active has changed since.
+	// The own side was refused a switch and neither active has changed since, and the foe's active
+	// still traps it (see trapperTraps).
 	trapHolds() {
 		const known = this.trapKnown;
 		return known !== null && known.own === this.sides[this.me].entries
-			&& known.foe === this.sides[1 - this.me].entries;
+			&& known.foe === this.sides[1 - this.me].entries && this.trapperTraps();
+	}
+
+	// hidden_traps in pokejax/engine/actions.py. An unrevealed foe active is the trapper that refused
+	// the switch. A revealed one stops trapping when its ability is no longer a trapping one (Mummy
+	// announces its new ability), or when it cannot trap the own active (Shadow Tag's own user, Arena
+	// Trap's Flying or Levitate, Magnet Pull's non-Steel).
+	trapperTraps() {
+		const own = this.sides[this.me].active;
+		const foe = this.sides[1 - this.me].active;
+		if (!own || !foe || foe.fainted) return false;
+		if (foe.ability === '') return true;
+		if (foe.ability === 'shadowtag') return own.ability !== 'shadowtag';
+		if (foe.ability === 'magnetpull') return this.currentTypes(own).includes('steel');
+		if (foe.ability === 'arenatrap') {
+			return !this.currentTypes(own).includes('flying') && own.ability !== 'levitate';
+		}
+		return false;
 	}
 
 	// Steps. A step is the protocol between two requests; endStep closes it at the next request.
@@ -459,6 +478,8 @@ class PlayerView {
 			member.baseAbility = toID(entry.baseAbility);
 			member.item = toID(entry.item);
 			const moves = entry.moves.map(requestMoveId);
+			member.hiddenTypes = entry.moves.map(id => this.requestHiddenType(id));
+			member.returnPowers = entry.moves.map(requestReturnPower);
 			if (moves.join() !== member.moves.join()) {
 				member.moves = moves;
 				member.pp = moves.map(id => this.maxPp(id));
@@ -575,6 +596,12 @@ function requestMoveId(id) {
 	// The request adds Hidden Power's type and Return's and Frustration's power to the ID.
 	if (id.startsWith('hiddenpower')) return 'hiddenpower';
 	return id.replace(/^(return|frustration)\d+$/, '$1');
+}
+
+// Return's power, as the request's ID names it (zero for other moves).
+function requestReturnPower(id) {
+	const match = /^return(\d+)$/.exec(id);
+	return match ? Number(match[1]) : 0;
 }
 
 function effectName(text) {
@@ -1088,6 +1115,13 @@ PlayerView.prototype.index = function (table, id) {
 	return id ? this.tables[table].index.get(id) || 0 : 0;
 };
 
+// Hidden Power's type as the request's ID names it, plus one (zero for other moves).
+PlayerView.prototype.requestHiddenType = function (id) {
+	const match = /^hiddenpower([a-z]+)$/.exec(id);
+	const type = match ? this.tables.types.get(match[1]) : undefined;
+	return type === undefined ? 0 : type + 1;
+};
+
 PlayerView.prototype.typePair = function (types) {
 	const first = types[0] === undefined ? 0 : types[0] + 1;
 	const second = types[1] === undefined ? 0 : types[1] + 1;
@@ -1141,6 +1175,8 @@ PlayerView.prototype.ownObservation = function () {
 		species: members.map(member => this.speciesIndex(this.currentSpecies(member))),
 		types: members.map(member => this.typePair(this.currentTypes(member))),
 		moves: members.map(member => pad(member.moves.map(id => this.index('moves', id)), MOVE_SLOTS)),
+		hidden_type: members.map(member => pad(member.hiddenTypes, MOVE_SLOTS)),
+		return_power: members.map(member => pad(member.returnPowers, MOVE_SLOTS)),
 		level: members.map(member => member.level / 100),
 		pp: members.map(member => pad(member.moves.map((_, i) => member.pp[i] / Math.max(member.maxpp[i], 1)), MOVE_SLOTS)),
 		hp: members.map(member => member.hp / Math.max(member.maxhp, 1)),

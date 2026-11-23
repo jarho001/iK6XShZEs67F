@@ -183,6 +183,31 @@ test('a trapped switch is refused, the side is asked again without switches, and
 	assert.equal(game.errors.length, 0);
 });
 
+test('a discovered trap ends when Mummy gives the trapper Mummy, and the switches come back', () => {
+	// Arena Trap refuses the learner's switch. Diglett's Sucker Punch then hits the learner's Mummy holder
+	// and Diglett takes Mummy while both stay active: the trap is gone, so the next request offers switches.
+	const cofagrigus = member('cofagrigus', ['shadowball', 'splash'], { ability: 'mummy' });
+	const diglett = member('diglett', ['suckerpunch'], { ability: 'arenatrap' });
+	const game = battle([[cofagrigus, member('snorlax', ['bodyslam']), member('mew', ['psychic'])],
+		[diglett]], { script: () => 'move 1' });
+	const first = game.decision();
+	assert.equal(first.legal[4], true);
+	game.act(4);
+	assert.equal(game.refusals, 1);
+	const second = game.decision();
+	assert.equal(second.refused, true);
+	assert.deepEqual(second.legal.slice(4), [false, false, false, false, false]);
+	game.act(0);
+	assert.equal(game.battle.sides[1].active[0].ability, 'mummy');
+	const third = game.decision();
+	assert.equal(third.refused, false);
+	assert.deepEqual(third.legal.slice(4), [true, true, false, false, false]);
+	// No known trap is left to remove switches, and the request's mask is the one the player sees.
+	assert.equal(game.knownTrapDecisions, 0);
+	assert.equal(game.maskMismatches, 0);
+	assert.equal(game.errors.length, 0);
+});
+
 test('a battle that reaches the step cap is truncated and counted as not ended', () => {
 	const game = battle([[LEAD], [member('shuckle', ['splash'])]], { maxSteps: 2 });
 	game.decision();

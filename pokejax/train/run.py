@@ -20,7 +20,13 @@ from pathlib import Path
 import jax
 
 from pokejax.env import DEFAULT_POOL
-from pokejax.train.checkpoint import CheckpointError, load_checkpoint, save_checkpoint
+from pokejax.train.checkpoint import (
+	CheckpointError,
+	load_checkpoint,
+	read_checkpoint_config,
+	resolve_decay_updates,
+	save_checkpoint,
+)
 from pokejax.train.config import TrainConfig
 from pokejax.train.ppo import Trainer
 
@@ -69,6 +75,12 @@ def run_training(
 	elif any((run_dir / name).exists() for name in (CONFIG_FILE, METRICS_FILE, CHECKPOINT_FILE)):
 		raise RunError(f"{run_dir} already holds a run; resume it or choose another run name")
 
+	try:
+		saved = read_checkpoint_config(checkpoint_path) if resume else None
+	except CheckpointError as error:
+		raise RunError(str(error)) from error
+	# The learning-rate horizon of a resumed run is the one it started with, unless configured.
+	config = resolve_decay_updates(config, saved)
 	trainer = Trainer(config, team_pool)
 	layout = trainer.layout
 	learner = trainer.init()
@@ -76,7 +88,7 @@ def run_training(
 	cost = trainer.forward_cost(learner)
 	if resume:
 		try:
-			learner = load_checkpoint(checkpoint_path, learner, config)
+			learner = load_checkpoint(checkpoint_path, learner, config, trainer.team_digest)
 		except CheckpointError as error:
 			raise RunError(str(error)) from error
 		start = int(learner.update)
@@ -95,8 +107,8 @@ def run_training(
 	environment_rate = trainer.environment_steps_per_second()
 	groups = ", ".join(f"{name} {rows}" for name, rows in config.groups.items())
 	log(
-		f"{config.run.name}: {parameters} parameters, {cost['flops_per_battle_step']:.0f} "
-		f"forward FLOPs per battle step; rows: {groups}; {layout.lanes} lanes; "
+		f"{config.run.name}: {parameters} parameters, {cost['flops_per_policy_forward']:.0f} "
+		f"FLOPs per policy forward; rows: {groups}; {layout.lanes} lanes; "
 		f"environment {environment_rate:,.0f} steps/s"
 	)
 	start_time = time.perf_counter()
@@ -137,9 +149,9 @@ def run_training(
 				_record(metrics, {"kind": "evaluation", "update": update, "results": results})
 				log(_evaluation_line(update, results, config.evaluation.battles))
 			if config.checkpoint.every and update % config.checkpoint.every == 0:
-				save_checkpoint(checkpoint_path, learner, config)
+				save_checkpoint(checkpoint_path, learner, config, trainer.team_digest)
 		training_seconds = time.perf_counter() - start_time
-		save_checkpoint(checkpoint_path, learner, config)
+		save_checkpoint(checkpoint_path, learner, config, trainer.team_digest)
 
 		final = trainer.evaluate_all(learner.params, config.evaluation.final_battles)
 		_record(
@@ -158,7 +170,7 @@ def run_training(
 		"groups": config.groups,
 		"lanes": layout.lanes,
 		"parameters": parameters,
-		"forward_flops_per_battle_step": cost["flops_per_battle_step"],
+		"flops_per_policy_forward": cost["flops_per_policy_forward"],
 		"updates": updates_done,
 		"resumed_from_update": start,
 		"updates_total": config.run.updates,

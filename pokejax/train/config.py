@@ -18,7 +18,7 @@ A file has these tables, and every key is optional (the defaults are the ones be
   action_head (dense: one linear layer over the core output; factored: a scorer per action from
   the core output and that action's features, which needs features) and action_width
 - [ppo]: epochs, minibatches, learning_rate, learning_rate_end, lr_schedule (constant, linear or
-  cosine), gamma, gae_lambda, clip, value_clip (0 turns value clipping off), value_coef,
+  cosine), decay_updates (0: run.updates at the first start, kept on resume), gamma, gae_lambda, clip, value_clip (0 turns value clipping off), value_coef,
   entropy_coef, max_grad_norm, adam_eps
 - [logging]: every (updates between metric lines)
 - [evaluation]: every (updates between evaluations, 0 for none), battles, final_battles, batch
@@ -201,6 +201,9 @@ class PPOSection:
 	learning_rate: float = 3e-4
 	learning_rate_end: float = 3e-5
 	lr_schedule: str = "linear"
+	# Updates over which the learning rate decays. Zero means run.updates at the first start; a
+	# resumed run keeps the horizon it started with (checkpoint.resolve_decay_updates).
+	decay_updates: int = 0
 	gamma: float = 0.99
 	gae_lambda: float = 0.95
 	clip: float = 0.2
@@ -214,6 +217,7 @@ class PPOSection:
 		_check_int(self.epochs, 1, "ppo.epochs")
 		_check_int(self.minibatches, 1, "ppo.minibatches")
 		_check_choice(self.lr_schedule, LR_SCHEDULES, "ppo.lr_schedule")
+		_check_int(self.decay_updates, 0, "ppo.decay_updates")
 		_check_float(self.learning_rate, 0.0, None, "ppo.learning_rate", low_open=True)
 		_check_float(self.learning_rate_end, 0.0, None, "ppo.learning_rate_end")
 		_check_float(self.gamma, 0.0, 1.0, "ppo.gamma", low_open=True)
@@ -330,6 +334,14 @@ class TrainConfig:
 			f"opponent.shares.pool gives {pool_rows} rows, which must be a multiple of "
 			f"pool.size = {self.pool.size}",
 		)
+		if pool_rows and self.pool.every:
+			horizon = self.pool.size * self.pool.every * self.rollout.rollout_length
+			_check(
+				horizon >= self.env.max_steps,
+				f"pool.size x pool.every x rollout.rollout_length = {horizon} must reach "
+				f"env.max_steps = {self.env.max_steps}: a pool battle may not outlive two "
+				"insertions into its member",
+			)
 		chunks = self.rollout.rollout_length // self.rollout.sequence_length
 		total = lanes * chunks
 		_check(

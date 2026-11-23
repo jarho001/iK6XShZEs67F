@@ -27,7 +27,7 @@ from .abilities import (
 	move_abilities,
 	reveal_abilities,
 )
-from .actions import SIDES, move_availability
+from .actions import SIDES, hidden_traps, move_availability
 from .boosts import BELLY_DRUM, apply_boosts
 from .damage import accuracy_hit
 from .damage_effects import SELF_FAINT_ALWAYS, apply_damage_effects, apply_poison_touch
@@ -1094,6 +1094,11 @@ def step(state, actions, key, forced, engine_tables):
 		turn=state.turn + finish_turn.astype(jnp.int32),
 	)
 	clear_plan = finish_turn | ended
-	# A discovered hidden trap ends with either side's active (the player left, or the trapper did).
-	state = state._replace(trap_known=state.trap_known & jnp.all(state.active == active_before))
+	# A discovered hidden trap ends with either side's active (the player left, or the trapper did),
+	# and when the trapper no longer traps (Mummy gave it another ability, with both actives in).
+	state = state._replace(
+		trap_known=state.trap_known
+		& jnp.all(state.active == active_before)
+		& hidden_traps(state, engine_tables)
+	)
 	return _clear_turn_plan(finish_events(state, bounds, ongoing), clear_plan)

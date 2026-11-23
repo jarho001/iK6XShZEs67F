@@ -37,13 +37,17 @@ def enter_illusion(state, entering, tables):
 		state.volatiles,
 	)
 	shown_slot = jnp.where(disguised, rightmost, active)
-	shown = state.species[SIDES, jnp.clip(shown_slot, 0, TEAM_SLOTS - 1)]
+	clipped = jnp.clip(shown_slot, 0, TEAM_SLOTS - 1)
+	shown = state.species[SIDES, clipped]
+	shown_level = state.level[SIDES, clipped]
+	entered = member_mask(state, entering)
 	return state._replace(
 		volatiles=volatiles,
 		shown_species=jnp.where(
-			member_mask(state, entering),
-			shown[:, None].astype(state.shown_species.dtype),
-			state.shown_species,
+			entered, shown[:, None].astype(state.shown_species.dtype), state.shown_species
+		),
+		shown_level=jnp.where(
+			entered, shown_level[:, None].astype(state.shown_level.dtype), state.shown_level
 		),
 	)
 
@@ -57,8 +61,13 @@ def break_illusion(state, broken, tables):
 		on[:, None] & (columns[None, :] == ILLUSION_SLOT), 0, state.volatiles
 	).astype(state.volatiles.dtype)
 	real = state.species[SIDES, state.active]
-	shown = jnp.where(member_mask(state, on), real[:, None], state.shown_species)
+	real_level = state.level[SIDES, state.active]
+	revealed = member_mask(state, on)
+	shown = jnp.where(revealed, real[:, None], state.shown_species)
+	shown_level = jnp.where(revealed, real_level[:, None], state.shown_level)
 	state = state._replace(
-		volatiles=volatiles, shown_species=shown.astype(state.shown_species.dtype)
+		volatiles=volatiles,
+		shown_species=shown.astype(state.shown_species.dtype),
+		shown_level=shown_level.astype(state.shown_level.dtype),
 	)
 	return reveal_abilities(state, on)

@@ -41,13 +41,20 @@ battles. What that check settled, beyond the fields above:
   choice that such a trap forbids is refused and the side is asked again with trapped: true;
   from then on its mask has no switches (BattleState.trap_known, set by the environment and
   cleared when either active changes). The foe's flag is never read.
+- Own moves: the request's move IDs name Hidden Power's type (generation 5 shows no power) and
+  Return's power, which OwnObservation carries as hidden_type and return_power, zero for other moves.
 - A Transformed member keeps its own stats and base ability in its request (the copied ones are
   the foe's, and show only where the protocol names an ability); a foe's lock (Outrage) is never
   announced and is not observed; the own lock is the move request's single move without PP.
-- An Illusion holder is shown at the level of the member it copies. Which roster entry a later
+- An Illusion holder is shown at the level its switch-in line announced: the level of the member
+  it copies while disguised, and the real level once the disguise breaks (the replace line). A
+  silent switch-out keeps the announced level (BattleState.shown_level). Which roster entry a later
   switch-in belongs to is ambiguous while a holder is in play (the protocol names it only when
   the disguise breaks), so obs_diff leaves the opponent's roster arrays out from the first time
-  a holder is on the field.
+  a holder is on the field. The engine keeps one roster row per team member, while the protocol
+  reader merges entries by name: a holder that enters under the name of a member already seen
+  gives the engine one more row than the player sees (a remaining difference: it needs per-row
+  storage of the revealed details, and obs_diff leaves those roster leaves out).
 - At the last decision point (no request follows) HP of members that left the field in the last
   step and the stats after a forme change are what the last request said; obs_diff skips them.
 """
@@ -56,6 +63,8 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+
+from pokejax.mechanics.hidden_power import hidden_power
 
 from .actions import move_availability, observed_actions
 from .events import (
@@ -73,6 +82,7 @@ from .events import (
 	OUTCOME_MISS,
 	protocol_percent,
 )
+from .move_data import read_move
 from .state import (
 	AUTOTOMIZE,
 	CHOICE_MOVE,
@@ -106,6 +116,7 @@ from .state import (
 	TWO_TURN_MOVE,
 	YAWN,
 )
+from .variable_moves import BP_RETURN, TYPE_HIDDEN_POWER
 
 
 class OwnObservation(NamedTuple):
@@ -113,6 +124,10 @@ class OwnObservation(NamedTuple):
 	species: jax.Array  # int16 [6]
 	types: jax.Array  # int16 [6, 2], current types (Roost's Flying removal not shown)
 	moves: jax.Array  # int16 [6, 4]
+	# The request's move IDs carry the details the owner sees: Hidden Power's type (gen 5 shows no
+	# power) and Return's power. Zero for every other move.
+	hidden_type: jax.Array  # int16 [6, 4], Hidden Power's type ID plus one
+	return_power: jax.Array  # int16 [6, 4], Return's power from happiness
 	level: jax.Array  # float32 [6]
 	pp: jax.Array  # float32 [6, 4]
 	hp: jax.Array  # float32 [6]
@@ -307,10 +322,21 @@ def observe(state, side, engine_tables) -> Observation:
 	# Fainted members show no status: the request says '0 fnt'.
 	own_status = jnp.where(state.hp[side] == 0, 0, state.status[side])
 
+	own_moves = read_move(engine_tables, state.moves[side])
+	hidden_kind, _ = hidden_power(state.ivs[side].astype(jnp.int32))
+	member_hidden_type = engine_tables.hidden_power_type[hidden_kind]
+	own_hidden_type = jnp.where(
+		own_moves.move_type_rule == TYPE_HIDDEN_POWER, member_hidden_type[:, None] + 1, 0
+	)
+	returned = jnp.maximum(state.happiness[side].astype(jnp.int32) * 10 // 25, 1)
+	own_return_power = jnp.where(own_moves.move_bp_rule == BP_RETURN, returned[:, None], 0)
+
 	own = OwnObservation(
 		state.species[side],
 		own_types.astype(jnp.int16) + 1,
 		state.moves[side],
+		own_hidden_type.astype(jnp.int16),
+		own_return_power.astype(jnp.int16),
 		f(state.level[side]) / 100,
 		f(state.pp[side]) / jnp.maximum(f(state.max_pp[side]), 1),
 		f(state.hp[side]) / jnp.maximum(f(state.stats[side, :, 0]), 1),
@@ -355,8 +381,9 @@ def observe(state, side, engine_tables) -> Observation:
 	disguise = state.volatiles[foe, ILLUSION_SLOT].astype(jnp.int32) - 1
 	disguised = disguise >= 0
 	live = on_field & ~disguised
-	# Illusion Level Mod: the disguised holder is shown at the level of the member it copies.
-	shown_level = state.level[foe, jnp.where(on_field & disguised, disguise, slots)]
+	# Illusion Level Mod: a disguised holder is shown at the level of the member it copies, and the
+	# level stays the announced one after a silent switch-out.
+	shown_level = state.shown_level[foe, slots]
 	shown_types = engine_tables.species_types[species]
 	types = jnp.where(live[:, None], foe_live[slots], shown_types)
 	opponent = OpponentObservation(

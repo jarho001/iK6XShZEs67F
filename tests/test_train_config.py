@@ -215,3 +215,13 @@ def test_feature_set_is_full_by_default_and_needs_features():
 def test_invalid_feature_sets_are_errors(override, message):
 	with pytest.raises(ConfigError, match=message):
 		load_config(None, [override])
+
+
+def test_a_pool_turns_over_within_a_battle_or_the_config_is_refused():
+	"""A pool battle may not outlive two insertions into its member: pool.size x pool.every x
+	rollout.rollout_length must reach env.max_steps (train_support's league has 2 x 1 x 256 >= 400)."""
+	from train_support import league_config
+
+	assert league_config("env.max_steps=400").env.max_steps == 400
+	with pytest.raises(ConfigError, match="may not outlive two insertions"):
+		league_config("env.max_steps=600")

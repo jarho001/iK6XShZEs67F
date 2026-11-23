@@ -64,6 +64,30 @@ def move_availability(state, engine_tables):
 	return moves, usable, choice_active, choice_usable
 
 
+def hidden_traps(state, engine_tables):
+	"""[2] flags: the foe's active member traps this side's active now, whatever the request says.
+
+	Arena Trap traps a grounded member, Shadow Tag any member but a Shadow Tag user, and Magnet Pull
+	a Steel type. It reads the current abilities, so a trapper that stops trapping (Mummy gives it
+	another ability) stops at once.
+	"""
+	foe = 1 - SIDES
+	abilities = active_abilities(state, engine_tables)
+	foe_ability = abilities[foe, TRAP]
+	types = state.types[SIDES, state.active]
+	smackdown = state.volatiles[:, SMACKDOWN] > 0
+	grounded = ~jnp.any(types == engine_tables.flying_type, axis=-1) | smackdown
+	grounded &= ~has_hook(abilities, LEVITATE) | smackdown
+	steel = jnp.any(types == engine_tables.steel_type, axis=-1)
+	foe_alive = state.hp[foe, state.active[foe]] > 0
+	shadow_user = abilities[:, TRAP] == TRAP_SHADOW
+	return foe_alive & (
+		((foe_ability == TRAP_ARENA) & grounded)
+		| ((foe_ability == TRAP_SHADOW) & ~shadow_user)
+		| ((foe_ability == TRAP_MAGNET) & steel)
+	)
+
+
 def action_masks(state, engine_tables):
 	"""Match Pokemon.getMoveRequestData and Side.chooseSwitch without effects.
 
@@ -100,20 +124,7 @@ def action_masks(state, engine_tables):
 	source_alive = state.hp[foe, state.active[foe]] > 0
 	trapped = (state.volatiles[:, PARTIALLY_TRAPPED] > 0) & source_active & source_alive
 	can_switch &= ~trapped
-	abilities = active_abilities(state, engine_tables)
-	foe_ability = abilities[foe, TRAP]
-	types = state.types[SIDES, state.active]
-	smackdown = state.volatiles[:, SMACKDOWN] > 0
-	grounded = ~jnp.any(types == engine_tables.flying_type, axis=-1) | smackdown
-	grounded &= ~has_hook(abilities, LEVITATE) | smackdown
-	steel = jnp.any(types == engine_tables.steel_type, axis=-1)
-	foe_alive = state.hp[foe, state.active[foe]] > 0
-	shadow_user = abilities[:, TRAP] == TRAP_SHADOW
-	trapped_by_ability = foe_alive & (
-		((foe_ability == TRAP_ARENA) & grounded)
-		| ((foe_ability == TRAP_SHADOW) & ~shadow_user)
-		| ((foe_ability == TRAP_MAGNET) & steel)
-	)
+	trapped_by_ability = hidden_traps(state, engine_tables)
 	# A forced switch is never refused: only a move request can be trapped.
 	hidden_trap = trapped_by_ability & (request == MOVE)
 	can_switch |= request == SWITCH

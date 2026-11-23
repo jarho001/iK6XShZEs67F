@@ -15,8 +15,9 @@ Termination and truncation:
 - Rewards, per side [B, 2], are zero-sum: win 1, loss -1, tie 0, when the battle terminates.
   A truncated battle gets no terminal reward.
 - Optional shaping (config.shaping): r += coef * (gamma * phi(s') - phi(s)) with phi the side's
-  summed remaining HP fraction minus the foe's, over 6. phi is zero at reset and for the state
-  after an ended battle (the fresh one), so the shaped return of an episode adds nothing.
+  summed remaining HP fraction minus the foe's, over 6. phi(s') is zero after a termination; after
+  a truncation it is phi of the battle that was cut (the one GAE bootstraps), and the fresh battle
+  that replaces either starts at zero. A terminated episode's shaped return therefore adds nothing.
 
 Illegal and refused actions:
 - A trapped switch (Shadow Tag, Arena Trap, Magnet Pull) that the request did not announce is
@@ -354,8 +355,12 @@ class Env:
 		terminal = side_reward(kept.winner)
 		potential = jnp.zeros(batch, jnp.float32)
 		if c.shaping:
-			potential = jnp.where(ended, 0.0, hp_potential(kept)).astype(jnp.float32)
-			terminal += c.shaping_coef * (c.gamma * potential - es.potential)
+			# A termination has no successor (phi zero). A truncation bootstraps the battle it leaves
+			# (its final observation), so its successor is that battle; only the fresh battle that
+			# replaces it starts at zero.
+			successor = jnp.where(terminated, 0.0, hp_potential(kept)).astype(jnp.float32)
+			terminal += c.shaping_coef * (c.gamma * successor - es.potential)
+			potential = jnp.where(ended, 0.0, successor)
 		reward = jnp.stack((terminal, -terminal), axis=1).astype(jnp.float32)
 
 		fresh = self.new_battles(reset_key)

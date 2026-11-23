@@ -217,6 +217,7 @@ def reset(
 		saved_revealed=jnp.zeros((NUM_SIDES, MOVE_SLOTS), jnp.uint8),
 		pirouette_stats=pirouette_stats,
 		shown_species=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.int16),
+		shown_level=jnp.zeros((NUM_SIDES, TEAM_SLOTS), jnp.uint8),
 		party=jnp.broadcast_to(jnp.arange(TEAM_SLOTS, dtype=jnp.int8), (NUM_SIDES, TEAM_SLOTS)),
 		event=jnp.zeros((NUM_SIDES, EVENT_FIELDS), jnp.int8),
 		event_move=jnp.zeros(NUM_SIDES, jnp.int16),

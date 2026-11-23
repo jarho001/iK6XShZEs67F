@@ -11,8 +11,9 @@ For a batch of observations with leading axes [...]:
 - move features [..., MOVE_COUNT, MOVE_FEATURES]: one row per move slot of the active member:
   power / 100, accuracy, expected hits / 3, physical, status, STAB, effectiveness / 2 against the
   opponent's current types, immune, legal, PP fraction, the max-damage score relative to the best
-  legal move, and log(1 + score) / 5. Hidden Power counts as power 70 of type Normal (its type is
-  not in the observation).
+  legal move, and log(1 + score) / 5. Hidden Power's type and Return's power come from the own
+  request (observation.own.hidden_type and return_power); Hidden Power's power stays the stand-in 70,
+  as the request does not show it in generation 5.
 - switch features [..., BENCH_COUNT, SWITCH_FEATURES]: one row per switch action, in action order:
   legal, the member's HP fraction, its offence / 2 and defence / 2 (poke-env's estimate), the speed
   tier, the matchup / 4, the matchup minus the best legal matchup, over 4, and the threat / 2.
@@ -191,8 +192,11 @@ def action_features(obs, tables: PublicTables, feature_set: str = "full"):
 	# Move slots of the active member.
 	moves = pick(own.moves, own_is_active)  # [..., 4]
 	valid = (moves > 0).astype(f32)
-	move_type = move_type_table[moves]
-	power = jnp.asarray(tables.move_power)[moves]
+	# The request shows Hidden Power's type (type ID plus one) and Return's power of the own moves.
+	hidden_type = pick(own.hidden_type.astype(i32), own_is_active)
+	return_power = pick_float(own.return_power, own_is_active)
+	move_type = jnp.where(hidden_type > 0, hidden_type - 1, move_type_table[moves])
+	power = jnp.where(return_power > 0, return_power, jnp.asarray(tables.move_power)[moves])
 	accuracy = jnp.asarray(tables.move_accuracy)[moves]
 	hits = jnp.asarray(tables.move_hits)[moves]
 	physical = jnp.asarray(tables.move_physical)[moves]

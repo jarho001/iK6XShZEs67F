@@ -15,6 +15,7 @@ from pokejax.engine.abilities import active_abilities
 from pokejax.engine.data import build_engine_tables
 from pokejax.engine.forms import sync_weather_formes
 from pokejax.engine.items import showdown_item_consumed
+from pokejax.engine.observation import observe
 from pokejax.engine.randomness import forced_from_records
 from pokejax.engine.reset import Teams, reset
 from pokejax.engine.step import step
@@ -534,6 +535,69 @@ def test_bad_dreams_is_not_shown_when_magic_guard_blocks_the_damage(world):
 		assert (int(state.hp[1, 0]) == hp_before) == (not shown), ability
 
 
+def bad_dreams_pair(world, faster, last_member):
+	"""Two sleeping Darkrai at 1 HP; the side `faster` acts first in the residual. With last_member
+	both sides have nothing on the bench."""
+	darkrai = {"species": "darkrai", "ability": "baddreams", "moves": ["nastyplot"]}
+	benches = [
+		{"species": s, "moves": ["splash"]}
+		for s in ("mew", "mewtwo", "pikachu", "snorlax", "blissey")
+	]
+	bench = [] if last_member else benches
+	state = start(world, [darkrai, *bench], [darkrai, *bench])
+	slow = 1 - faster
+	state = state._replace(
+		stats=state.stats.at[slow, 0, S.SPE].set(state.stats[slow, 0, S.SPE] // 4),
+		hp=state.hp.at[:, 0].set(1),
+		status=state.status.at[:, 0].set(S.SLEEP),
+		status_counter=state.status_counter.at[:, 0].set(3),
+	)
+	if last_member:
+		state = state._replace(hp=state.hp.at[:, 1:].set(0))
+	return state
+
+
+@pytest.mark.parametrize("faster", [0, 1])
+def test_bad_dreams_callbacks_run_the_faster_holder_first(world, faster):
+	# Showdown (checked at the pinned commit): the faster Darkrai's callback knocks out the other, and
+	# that one's callback is skipped because it has fainted (sim/battle.ts runEvent, resolveFaints
+	# after each handler; data/abilities.ts baddreams: if (!pokemon.hp) return).
+	state = turn(world, bad_dreams_pair(world, faster, last_member=False), [0, 0])
+	assert int(state.hp[faster, 0]) == 1 and int(state.hp[1 - faster, 0]) == 0
+	assert int(state.winner) == S.ONGOING
+
+
+@pytest.mark.parametrize("faster", [0, 1])
+def test_bad_dreams_faint_of_the_last_member_is_won_by_the_faster_holder(world, faster):
+	state = turn(world, bad_dreams_pair(world, faster, last_member=True), [0, 0])
+	assert int(state.hp[faster, 0]) == 1 and int(state.hp[1 - faster, 0]) == 0
+	assert int(state.winner) == faster
+
+
+def test_a_silent_switch_out_keeps_the_disguise_level_on_the_roster(world):
+	# Showdown: the switch-in line carries the disguise's details (Illusion Level Mod, sim/pokemon.ts
+	# getFullDetails). A switch-out clears the disguise with no message, so the foe keeps the level it
+	# was told, and only a broken disguise (the replace line) names the real level.
+	tables, engine = world
+	holder = {"species": "zoroark", "ability": "illusion", "moves": ["tackle"]}
+	copied = {"species": "vileplume", "moves": ["tackle"]}
+	# The learner's Mew only splashes: a hit would break the disguise.
+	state = start(
+		world,
+		[{"species": "mew", "moves": ["splash"]}],
+		[FILLER, holder, FILLER, FILLER, FILLER, copied],
+	)
+	state = state._replace(level=jnp.asarray(state.level).at[1, 1].set(81).at[1, 5].set(88))
+	state = turn(world, state, [0, 4])
+	assert int(state.volatiles[1, S.ILLUSION_SLOT]) == 6
+	assert float(observe(state, 0, engine).opponent.level[1]) == pytest.approx(0.88)
+	state = turn(world, state, [0, 5])
+	assert int(state.active[1]) == 2 and int(state.volatiles[1, S.ILLUSION_SLOT]) == 0
+	seen = observe(state, 0, engine).opponent
+	assert int(seen.species[1]) == tables.species.index["vileplume"]
+	assert float(seen.level[1]) == pytest.approx(0.88)
+
+
 def test_poison_touch_poison_makes_the_receivers_synchronize_show(world):
 	tables, _ = world
 	state = start(
@@ -961,3 +1025,64 @@ def test_an_imposter_that_copies_a_traced_slow_start_starts_its_counter(world):
 	slowstart = tables.abilities.index["slowstart"]
 	assert int(state.ability[0, 1]) == slowstart and int(state.ability[1, 1]) == slowstart
 	assert slow_start(state) == [5, 5]
+
+
+def gear_grind_into_a_substitute(world, ability, flame):
+	"""Gear Grind (two hits) on a 1 HP Substitute. The defender's ability rolls on hit one only."""
+	state = start(
+		world,
+		[{"species": "klinklang", "moves": ["geargrind"]}],
+		[{"species": "chandelure", "ability": ability, "moves": ["tackle"]}],
+	)
+	state = set_volatile(state, 1, S.SUBSTITUTE, 1)
+	records = [hit(0), rec("hit_count", 0, 2)]
+	for occurrence in range(2):
+		records += roll(0, 8, occurrence)
+		records.append(rec("ability_chance", 1, int(flame and occurrence == 0), 2 * occurrence))
+	after = turn(world, state, [0, 0], records)
+	return (
+		int(state.hp[1, 0]) - int(after.hp[1, 0]),
+		int(after.status[0, 0]),
+		int(after.volatiles[1, S.SUBSTITUTE]),
+	)
+
+
+def test_flame_body_on_a_hit_that_breaks_a_substitute_does_nothing(world):
+	# Showdown: a hit on a Substitute returns HIT_SUBSTITUTE and clears the target for that hit, so the
+	# DamagingHit of Flame Body (data/abilities.ts flamebody) never runs (sim/battle-actions.ts, the
+	# substitute step, and the targets[i] = null before spreadDamage). Hit two then deals full damage.
+	plain = gear_grind_into_a_substitute(world, "noability", flame=False)
+	with_flame = gear_grind_into_a_substitute(world, "flamebody", flame=True)
+	assert plain[0] > 0 and plain[2] == 0
+	assert with_flame == plain
+	assert with_flame[1] == S.HEALTHY
+
+
+def tailslap_with_lum(world, burns):
+	"""Tailslap (2 to 5 hits) by a Lum Berry holder against Flame Body; burns lists the hits whose
+	roll gives a burn."""
+	state = start(
+		world,
+		[{"species": "mew", "item": "lumberry", "moves": ["tailslap"]}],
+		[{"species": "magcargo", "ability": "flamebody", "moves": ["tackle"]}],
+	)
+	records = [rec("order", 0, 0), hit(0), rec("hit_count", 0, 4)]
+	for occurrence in range(4):
+		records += roll(0, 8, occurrence)
+		records.append(rec("ability_chance", 1, int(occurrence in burns), 2 * occurrence))
+	after = turn(world, state, [0, 0], records)
+	return int(state.hp[1, 0]) - int(after.hp[1, 0]), int(after.status[0, 0]), int(after.item[0, 0])
+
+
+def test_a_lum_berry_cures_a_flame_body_burn_before_the_next_hit(world):
+	# Showdown: the burn is set between the hits, Lum Berry eats at once (data/items.ts lumberry,
+	# onAfterSetStatus), so the next hit is not burned and deals full damage. A burn after the berry is
+	# gone holds, and halves the hits after it (the existing burn test covers that).
+	plain, plain_status, plain_item = tailslap_with_lum(world, burns=())
+	assert plain_status == S.HEALTHY and plain_item != 0
+	cured, cured_status, cured_item = tailslap_with_lum(world, burns=(0,))
+	assert cured == plain and cured_status == S.HEALTHY and cured_item == 0
+	# The second burn comes after the berry is gone, so it stays: hit 3 is halved.
+	twice, twice_status, twice_item = tailslap_with_lum(world, burns=(0, 2))
+	assert twice_status == S.BURN and twice_item == 0
+	assert plain * 0.8 < twice < plain

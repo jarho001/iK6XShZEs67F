@@ -20,9 +20,22 @@ learner's side, after the selfplay lanes. Opponent sides give no lanes: they sam
 carry their own recurrent state where the policy has one, and they get no gradient.
 
 A held action: when a side's switch is refused by a hidden trap, the battle does not advance and
-the other side's action of that step is kept and played at the next step (pokejax.env). The lane of
-that other side has weight zero at the step that was held, and the sample it drew there is not
-played; the sample of the step before, which is played, keeps its weight.
+the other side's action of that step is kept and played at the next step (pokejax.env). The held
+side sees the same observation twice, so the step that plays the held action does not advance its
+recurrent state (its carry stays as it was), for lanes and pool rows alike, and the sample it draws
+there is discarded: that lane has weight zero and advance false. The sample of the step before, which
+is played, keeps its weight and advances the carry.
+
+Weights (Transition.weight and Transition.actor): a refused action is a decision of its own (the
+retry that follows it is a transition), so it counts; a substituted illegal action does not count.
+The policy's losses and their normalisation use only the decisions with a real choice (actor): not a
+no-op or a single legal action, whose log-probability is zero.
+
+Pool rows keep the parameters they started a battle with. Each pool member has its current and its
+previous parameters (PoolParams); a pool row reads the current ones from the start of a battle until
+the insertion that replaces its member, and the previous ones after it (pool_fresh is false), so an
+insertion never changes a battle in progress. The config keeps pool.size * pool.every *
+rollout.rollout_length at least env.max_steps, so no battle outlives two insertions into its member.
 """
 
 from collections.abc import Callable, Mapping
@@ -105,6 +118,20 @@ class Layout:
 		return rows if self.identity_lanes else rows[:, self.lane_rows]
 
 
+class PoolParams(NamedTuple):
+	"""The pool's parameters, stacked on a leading member axis [K, ...]: current and previous."""
+
+	current: Any
+	previous: Any
+
+
+def select_lanes(mask, new, old):
+	"""Per lane (or row): new where mask [N] is true, old elsewhere, for every leaf [N, ...]."""
+	return jax.tree.map(
+		lambda a, b: jnp.where(mask.reshape(mask.shape + (1,) * (a.ndim - 1)), a, b), new, old
+	)
+
+
 class LeagueState(NamedTuple):
 	"""What the rollout carries between steps; battle leaves have the batch axis."""
 
@@ -113,6 +140,7 @@ class LeagueState(NamedTuple):
 	obs: Observation  # [L, ...]: what each lane sees now
 	hidden: Any  # [L, W]: each lane's recurrent carry (a pair for an LSTM)
 	pool_hidden: Any  # [P, W]: the carry of each pool row's member
+	pool_fresh: jax.Array  # bool [P]: the row's battle began after its member's last insertion
 	key: jax.Array
 
 
@@ -125,10 +153,12 @@ class Transition(NamedTuple):
 	seat: jax.Array  # int32 [L]: the seat each lane played (0 or 1)
 	log_prob: jax.Array  # float32 [L]: of the action, under the policy that sampled it
 	value: jax.Array  # float32 [L]
-	after: Any  # each lane's carry after its observation, before any reset
+	after: Any  # each lane's carry after its observation (kept, not advanced, where held)
 	final_obs: Observation  # each lane's observation of the battle before an automatic reset
 	reward: jax.Array  # float32 [L]: the reward of the lane's seat
-	weight: jax.Array  # bool [L]: False where the step's action was refused or held
+	advance: jax.Array  # bool [L]: False where the lane's observation is a repeat (its action held)
+	weight: jax.Array  # bool [L]: a decision of the lane counts (not held, not substituted)
+	actor: jax.Array  # bool [L]: a counted decision with a real choice (two or more legal actions)
 	terminated: jax.Array  # bool [B]
 	truncated: jax.Array  # bool [B]
 	won: jax.Array  # bool [B]: the battle that ended was won from its perspective
@@ -203,13 +233,18 @@ class League:
 			obs=self.observe_lanes(env_state.state, learner),
 			hidden=initial_carry(self.network, (layout.lanes,)),
 			pool_hidden=initial_carry(self.network, (layout.pool,)),
+			pool_fresh=jnp.ones((layout.pool,), jnp.bool_),
 			key=key,
 		)
 
 	# Opponents and actions.
 
-	def pool_forward(self, pool, obs, hidden):
-		"""Each pool member on its slice of the pool rows: the carries after and the logits [P]."""
+	def pool_forward(self, pool: PoolParams, obs, hidden, fresh):
+		"""Each pool row's member on its row: the carries after and the logits [P].
+
+		A row reads its member's current parameters while fresh (its battle began after the member's
+		last insertion) and the previous ones otherwise, so both sets run on every pool row.
+		"""
 		members = self.pool_size
 		rows = self.layout.pool
 		per_member = rows // members
@@ -224,10 +259,20 @@ class League:
 			after, logits, _ = self.model.apply({"params": params}, member_obs, member_hidden)
 			return after, logits
 
-		after, logits = jax.vmap(apply)(pool, jax.tree.map(cut, obs), jax.tree.map(cut, hidden))
-		return jax.tree.map(join, after), join(logits)
+		def forward(stacked):
+			after, logits = jax.vmap(apply)(
+				stacked, jax.tree.map(cut, obs), jax.tree.map(cut, hidden)
+			)
+			return jax.tree.map(join, after), join(logits)
 
-	def opponent_actions(self, pool, state: LeagueState, key):
+		after_now, logits_now = forward(pool.current)
+		after_before, logits_before = forward(pool.previous)
+		return (
+			select_lanes(fresh, after_now, after_before),
+			jnp.where(fresh[:, None], logits_now, logits_before),
+		)
+
+	def opponent_actions(self, pool: PoolParams, state: LeagueState, key):
 		"""The opponent seats' actions, in row order [B - S], and the pool's carries after."""
 		layout = self.layout
 		pool_key, baseline_key = jax.random.split(key)
@@ -235,7 +280,7 @@ class League:
 		pool_after = None
 		if layout.pool:
 			obs = self.observe_pool(state.env.state, state.learner)
-			after, logits = self.pool_forward(pool, obs, state.pool_hidden)
+			after, logits = self.pool_forward(pool, obs, state.pool_hidden, state.pool_fresh)
 			parts.append(jax.random.categorical(pool_key, logits).astype(jnp.int32))
 			pool_after = after
 		if layout.baselines:
@@ -262,7 +307,12 @@ class League:
 	# Steps.
 
 	def _advance(self, state: LeagueState, actions, after, pool_after):
-		"""The environment step, the next learner sides and observations, and the step's outcome."""
+		"""The environment step, the next learner sides and observations, and the step's outcome.
+
+		after is each lane's carry after its observation and pool_after each pool row's, both already
+		kept (not advanced) where the action was held. A held lane's and a held pool row's carry is
+		kept here as well, so the carries of this step are the ones the next step starts from.
+		"""
 		layout = self.layout
 		key, side_key = jax.random.split(state.key)
 		env_state, advance = self.env.advance(state.env, actions)
@@ -270,27 +320,34 @@ class League:
 		ended = info.ended
 		redraw = jax.random.bernoulli(side_key, shape=(layout.batch,)).astype(jnp.int32)
 		learner = jnp.where(ended & layout.learner_redraw, redraw, state.learner)
+		seats = layout.lane_seats(state.learner)
+		held = state.env.has_held[layout.lane_rows, seats]
 		hidden = reset_carry(after, layout.lanes_of(ended))
+		pool_held = state.env.has_held[layout.pool_rows, 1 - state.learner[layout.pool_rows]]
+		pool_fresh = state.pool_fresh | ended[layout.pool_rows]
 		if pool_after is None:
 			pool_hidden = state.pool_hidden
 		else:
-			pool_hidden = reset_carry(pool_after, ended[layout.pool_rows])
+			kept = select_lanes(pool_held, state.pool_hidden, pool_after)
+			pool_hidden = reset_carry(kept, ended[layout.pool_rows])
 		next_state = LeagueState(
 			env=env_state,
 			learner=learner,
 			obs=self.observe_lanes(env_state.state, learner),
 			hidden=hidden,
 			pool_hidden=pool_hidden,
+			pool_fresh=pool_fresh,
 			key=key,
 		)
-		seats = layout.lane_seats(state.learner)
 		perspective = jnp.where(layout.is_selfplay_row, 0, state.learner)
+		counted = ~(info.illegal[layout.lane_rows, seats] | held)
+		real_choice = jnp.sum(state.obs.legal_actions, axis=-1) >= 2
 		outcome = {
 			"final_obs": self.observe_lanes(advance.final_state, state.learner),
 			"reward": advance.reward[layout.lane_rows, seats],
-			"weight": ~(
-				info.rejected[layout.lane_rows, seats] | state.env.has_held[layout.lane_rows, seats]
-			),
+			"advance": ~held,
+			"weight": counted,
+			"actor": counted & real_choice,
 			"terminated": advance.terminated,
 			"truncated": advance.truncated,
 			"won": advance.terminated & (info.winner == perspective),
@@ -301,11 +358,11 @@ class League:
 		}
 		return next_state, outcome
 
-	def play(self, params, pool, state: LeagueState, greedy=False):
+	def play(self, params, pool: PoolParams | None, state: LeagueState, greedy=False):
 		"""One step: the learner's lanes sample (or take the argmax when greedy), the opponents act.
 
-		Returns the next state and the step's Transition. pool is the stacked pool parameters
-		(None when the layout has no pool rows). greedy may be a traced boolean.
+		Returns the next state and the step's Transition. pool holds the pool's current and previous
+		parameters (None when the layout has no pool rows). greedy may be a traced boolean.
 		"""
 		key, lane_key, opponent_key = jax.random.split(state.key, 3)
 		state = state._replace(key=key)
@@ -315,12 +372,15 @@ class League:
 		log_prob = jnp.take_along_axis(jax.nn.log_softmax(logits), action[:, None], axis=-1)[:, 0]
 		opponents, pool_after = self.opponent_actions(pool, state, opponent_key)
 		actions = self.assemble(action, opponents, state.learner)
+		seats = self.layout.lane_seats(state.learner)
+		held = state.env.has_held[self.layout.lane_rows, seats]
+		after = select_lanes(held, state.hidden, after)
 		next_state, outcome = self._advance(state, actions, after, pool_after)
 		transition = Transition(
 			obs=state.obs,
 			hidden=state.hidden,
 			action=action,
-			seat=self.layout.lane_seats(state.learner),
+			seat=seats,
 			log_prob=log_prob,
 			value=value,
 			after=after,

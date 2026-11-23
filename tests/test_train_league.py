@@ -5,13 +5,14 @@ in which battles end.
 """
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from pokejax.baselines import make_policy
-from pokejax.engine.actions import legal_actions
+from pokejax.engine.actions import action_masks, legal_actions
 from pokejax.engine.observation import observe
-from pokejax.train.league import Layout, take
+from pokejax.train.league import Layout, PoolParams, take
 
 pytestmark = [pytest.mark.xdist_group("train"), pytest.mark.usefixtures("cpu_only")]
 
@@ -90,11 +91,13 @@ def test_the_two_seats_of_a_selfplay_row_keep_separate_recurrent_states(league_t
 	assert (np.abs(own - other).max(axis=-1) > 1e-6).all()
 
 
-def test_refused_and_held_steps_get_no_weight(league_trainer, rollout):
+def test_held_and_substituted_steps_get_no_weight_and_refused_ones_count(league_trainer, rollout):
 	rows = league_trainer.layout.lane_rows
 	seats = rollout.seat[..., None]  # [T, L, 1]
 	refused_by_seat = rollout.rejected[:, rows]  # [T, L, 2]
 	refused = np.take_along_axis(refused_by_seat, seats, axis=-1)[..., 0]
+	illegal_by_seat = rollout.illegal[:, rows]
+	illegal = np.take_along_axis(illegal_by_seat, seats, axis=-1)[..., 0]
 	# A step is held when the other side was refused at the step before and this one was not.
 	before = np.concatenate([np.zeros_like(rollout.rejected[:1]), rollout.rejected[:-1]])
 	ended = rollout.terminated | rollout.truncated
@@ -105,7 +108,12 @@ def test_refused_and_held_steps_get_no_weight(league_trainer, rollout):
 	)
 	held = other_refused & ~ended_before[:, rows]
 	assert (refused | held).any(), "the rollout must refuse or hold some steps"
-	np.testing.assert_array_equal(rollout.weight, ~(refused | held))
+	# A refused action is a decision of its own; a held step's sample and a substitute do not count.
+	np.testing.assert_array_equal(rollout.weight, ~(held | illegal))
+	assert rollout.weight[refused].all()
+	np.testing.assert_array_equal(rollout.advance, ~held)
+	real_choice = np.asarray(rollout.obs.legal_actions).sum(axis=-1) >= 2
+	np.testing.assert_array_equal(rollout.actor, rollout.weight & real_choice)
 
 
 def test_baseline_rows_play_their_policies_and_pool_slices_their_members(league_trainer):
@@ -113,7 +121,10 @@ def test_baseline_rows_play_their_policies_and_pool_slices_their_members(league_
 	learner = league_trainer.init()
 	# Make the members differ, so that a slice given to the wrong member is caught.
 	scale = 1.0 + 0.5 * np.arange(league_trainer.config.pool.size, dtype=np.float32)
-	pool = jax.tree.map(lambda x: x * scale.reshape((-1,) + (1,) * (x.ndim - 1)), learner.pool)
+	scaled = jax.tree.map(
+		lambda x: x * scale.reshape((-1,) + (1,) * (x.ndim - 1)), learner.pool.current
+	)
+	pool = PoolParams(current=scaled, previous=scaled)
 	state = learner.league
 	key = jax.random.key(3)
 	opponents, _ = league.opponent_actions(pool, state, key)
@@ -137,11 +148,11 @@ def test_baseline_rows_play_their_policies_and_pool_slices_their_members(league_
 		assert legal[opponents[offset + row - start]]
 
 	observed = league.observe_pool(state.env.state, state.learner)
-	_, logits = league.pool_forward(pool, observed, state.pool_hidden)
+	_, logits = league.pool_forward(pool, observed, state.pool_hidden, state.pool_fresh)
 	per_member = layout.pool // league_trainer.config.pool.size
 	for member in range(league_trainer.config.pool.size):
 		rows = slice(member * per_member, (member + 1) * per_member)
-		params = take(pool, member)
+		params = take(pool.current, member)
 		_, direct, _ = league_trainer.model.apply(
 			{"params": params}, take(observed, rows), take(state.pool_hidden, rows)
 		)
@@ -154,3 +165,126 @@ def test_reset_takes_the_given_learner_sides(league_trainer):
 	assert np.asarray(state.learner).tolist() == learner.tolist()
 	# One observation per lane, whatever the learner sides are.
 	assert state.obs.own.species.shape[0] == league_trainer.layout.lanes
+
+
+# The held lane and the refused seat, and the pool generations (the review's findings 8 and 9).
+
+KEY = jax.random.key(29)
+
+
+def test_a_held_lane_and_a_held_pool_row_keep_their_carry_and_do_not_count(league_trainer):
+	"""The held seat of row 0 (lane 4) and the held pool row's opponent do not advance: their carries
+	stay, and their decisions get no weight; the other lanes advance and count."""
+	league = league_trainer.league
+	layout = league.layout
+	state = league.reset(KEY, jnp.zeros((layout.batch,), jnp.int32))
+	env = state.env._replace(
+		has_held=state.env.has_held.at[0, 1].set(True).at[layout.pool_rows[0], 1].set(True),
+		held=state.env.held.at[0, 1].set(0).at[layout.pool_rows[0], 1].set(0),
+	)
+	state = state._replace(env=env)
+	learner = league_trainer.init()
+	next_state, transition = league.play(learner.params, learner.pool, state)
+	lane = 4  # row 0's seat 1: the selfplay lanes of seat 1 follow the seat 0 lanes
+	assert int(layout.lane_rows[lane]) == 0 and int(layout.lane_seats(state.learner)[lane]) == 1
+	np.testing.assert_array_equal(
+		np.asarray(next_state.hidden[lane]), np.asarray(state.hidden[lane])
+	)
+	assert not np.asarray(transition.advance)[lane]
+	assert not np.asarray(transition.weight)[lane] and not np.asarray(transition.actor)[lane]
+	np.testing.assert_array_equal(
+		np.asarray(next_state.pool_hidden[0]), np.asarray(state.pool_hidden[0])
+	)
+	# The lane that was not held advanced, and its decision counts.
+	assert np.asarray(transition.advance)[0] and np.asarray(transition.weight)[0]
+	assert not np.array_equal(np.asarray(next_state.hidden[0]), np.asarray(state.hidden[0]))
+	assert np.asarray(next_state.pool_fresh).shape == (layout.pool,)
+
+
+def arena_trapped(league, state, tables):
+	"""Row 0's side 1 active is an Arena Trap user; side 0's active is a grounded Normal type."""
+	battles = state.env.state
+	normal = tables.types.index["normal"]
+	battles = battles._replace(
+		ability=battles.ability.at[0, 1, battles.active[0, 1]]
+		.set(tables.abilities.index["arenatrap"])
+		.at[0, 0, battles.active[0, 0]]
+		.set(tables.abilities.index["noability"]),
+		types=battles.types.at[0, 0, battles.active[0, 0]].set(
+			jnp.array([normal, -1], battles.types.dtype)
+		),
+	)
+	base, blocked = jax.vmap(action_masks, in_axes=(0, None))(battles, league.tables)
+	env = state.env._replace(state=battles, base=base, blocked=blocked)
+	return state._replace(env=env, obs=league.observe_lanes(battles, state.learner))
+
+
+def test_a_refused_switch_counts_and_its_retry_is_a_decision_of_its_own(league_trainer, tables):
+	"""Side 0 of row 0 switches under Arena Trap and is refused: its refused action counts, the
+	battle does not advance, and the other side's action is held. At the retry the refused seat's
+	decision counts again, and the held seat's decision does not (its action was played before)."""
+	league = league_trainer.league
+	layout = league.layout
+	state = arena_trapped(league, league.reset(KEY, jnp.zeros((layout.batch,), jnp.int32)), tables)
+	lanes = np.asarray(layout.lane_rows)
+	zeros = jnp.zeros((layout.batch, 2), jnp.int32)
+	refused_step = zeros.at[0].set(jnp.array([4, 0]))
+	after = state.hidden + 1.0
+	pool_after = state.pool_hidden + 1.0
+	next1, out1 = league._advance(state, refused_step, after, pool_after)
+	assert np.asarray(out1["rejected"])[0].tolist() == [True, False]
+	assert np.asarray(next1.env.has_held)[0].tolist() == [False, True]
+	assert np.asarray(out1["advance"])[0] and np.asarray(out1["weight"])[0]
+	assert np.asarray(out1["advance"])[4] and np.asarray(out1["weight"])[4]
+	np.testing.assert_allclose(np.asarray(next1.hidden[0]), np.asarray(after[0]))
+	# The retry: side 0 moves; side 1's new sample is replaced by its held action.
+	retry = zeros.at[0].set(jnp.array([0, 1]))
+	kept = next1.hidden + 2.0
+	kept = kept.at[4].set(next1.hidden[4])  # the held lane's carry is kept by the caller (play)
+	next2, out2 = league._advance(next1, retry, kept, next1.pool_hidden + 2.0)
+	assert np.asarray(out2["advance"])[0] and np.asarray(out2["weight"])[0]
+	assert not np.asarray(out2["advance"])[4] and not np.asarray(out2["weight"])[4]
+	assert not np.asarray(out2["actor"])[4]
+	np.testing.assert_array_equal(np.asarray(next2.hidden[4]), np.asarray(next1.hidden[4]))
+	assert not np.asarray(out2["rejected"]).any()
+	assert lanes[0] == 0
+
+
+def test_an_insertion_leaves_battles_in_progress_on_their_parameters(league_trainer):
+	trainer = league_trainer
+	league = trainer.league
+	learner = trainer.init()
+	pool = learner.pool
+	layout = league.layout
+	members = trainer.config.pool.size
+	rows = layout.pool
+	per_member = rows // members
+	new = jax.tree.map(lambda x: x + 1.0, learner.params)
+	fresh = jnp.ones((rows,), jnp.bool_)
+	inserted, fresh_after, count = trainer._insert(
+		pool, fresh, jnp.int32(0), new, trainer.config.pool.every
+	)
+	assert int(count) == 1
+	# Member 0 keeps its old parameters as previous, and takes the new ones as current.
+	for old, previous in zip(jax.tree.leaves(pool.current), jax.tree.leaves(inserted.previous)):
+		np.testing.assert_array_equal(np.asarray(old)[0], np.asarray(previous)[0])
+		np.testing.assert_array_equal(np.asarray(old)[1:], np.asarray(previous)[1:])
+	for value, current in zip(jax.tree.leaves(new), jax.tree.leaves(inserted.current)):
+		np.testing.assert_array_equal(np.asarray(value), np.asarray(current)[0])
+	# Its rows began on the old parameters: they now read previous; member 1's rows are untouched.
+	np.testing.assert_array_equal(np.asarray(fresh_after), np.arange(rows) >= per_member)
+	state = league.reset(KEY)
+	obs = league.observe_pool(state.env.state, state.learner)
+	hidden = state.pool_hidden
+	mixed = league.pool_forward(inserted, obs, hidden, fresh_after)[1]
+	now = league.pool_forward(inserted, obs, hidden, jnp.ones((rows,), jnp.bool_))[1]
+	before = league.pool_forward(inserted, obs, hidden, jnp.zeros((rows,), jnp.bool_))[1]
+	np.testing.assert_allclose(np.asarray(mixed)[:per_member], np.asarray(before)[:per_member])
+	np.testing.assert_allclose(np.asarray(mixed)[per_member:], np.asarray(now)[per_member:])
+	assert not np.allclose(np.asarray(now)[:per_member], np.asarray(before)[:per_member])
+
+
+def test_evaluation_refuses_a_count_that_is_not_whole_batches(league_trainer):
+	learner = league_trainer.init()
+	with pytest.raises(ValueError, match="multiple of the evaluation batch"):
+		league_trainer.evaluate(learner.params, "random", 5)

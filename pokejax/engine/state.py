@@ -201,6 +201,10 @@ class BattleState(NamedTuple):
 	# level, IVs, EVs and nature (other members hold unused values).
 	pirouette_stats: jax.Array  # int16 [2, 6, 5]
 	shown_species: jax.Array  # int16 [2, 6]
+	# The level the opponent was last told for each member: the disguise's level while an Illusion
+	# holder is disguised (Illusion Level Mod), the member's own level otherwise. A switch-out clears
+	# the disguise without a message, so the level stays what was announced.
+	shown_level: jax.Array  # uint8 [2, 6]
 	# Showdown's side.pokemon order (array index to team slot). Index 0 is the active member;
 	# a switch-in swaps the entering and leaving positions. Illusion's disguise reads it.
 	party: jax.Array  # int8 [2, 6]

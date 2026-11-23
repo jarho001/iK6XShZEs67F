@@ -87,6 +87,16 @@ def test_float_leaves_are_compared_to_a_tolerance():
 	assert compare_file(FIXTURE, recording=(header, battles)).mismatches
 
 
+def test_a_nan_in_the_player_view_is_a_mismatch():
+	"""NaN compares false to every number, so a tolerance test alone would pass it."""
+	header, battles = one_battle()
+	battles[0]["steps"][2]["views"][0]["own"]["hp"][0] = float("nan")
+	result = compare_file(FIXTURE, recording=(header, battles))
+	assert any(
+		m.path.startswith("own.hp") and m.step == 2 and m.side == 0 for m in result.mismatches
+	)
+
+
 def test_illusion_makes_the_opponent_roster_ambiguous():
 	"""From the first decision point at which the foe's Illusion holder is active, the roster
 	arrays are left out (the protocol cannot say which entry a switch-in belongs to); the

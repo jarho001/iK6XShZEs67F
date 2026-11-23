@@ -4,7 +4,7 @@ import jax
 import numpy as np
 import pytest
 
-from pokejax.train.league import take
+from pokejax.train.league import PoolParams, take
 
 pytestmark = [pytest.mark.xdist_group("train"), pytest.mark.usefixtures("cpu_only")]
 
@@ -18,21 +18,21 @@ def same(first, second):
 
 def test_the_pool_starts_as_copies_and_each_insertion_replaces_the_oldest(league_trainer):
 	learner = league_trainer.init()
-	assert same(take(learner.pool, 0), learner.params)
-	assert same(take(learner.pool, 1), learner.params)
+	assert same(take(learner.pool.current, 0), learner.params)
+	assert same(take(learner.pool.current, 1), learner.params)
 	assert int(learner.pool_inserts) == 0
 	parameters = []
 	# With pool.every = 1 and two members, the insertions go to slots 0, 1, 0.
 	for slot in (0, 1, 0):
-		before = learner.pool
+		before = learner.pool.current
 		learner, _ = league_trainer.update(learner)
-		assert same(take(learner.pool, slot), learner.params)
-		assert same(take(learner.pool, 1 - slot), take(before, 1 - slot))
+		assert same(take(learner.pool.current, slot), learner.params)
+		assert same(take(learner.pool.current, 1 - slot), take(before, 1 - slot))
 		parameters.append(learner.params)
 	assert int(learner.pool_inserts) == 3 and int(learner.update) == 3
 	# The first insertion was replaced: slot 0 holds the third update's parameters.
-	assert same(take(learner.pool, 0), parameters[2])
-	assert not same(take(learner.pool, 0), parameters[0])
+	assert same(take(learner.pool.current, 0), parameters[2])
+	assert not same(take(learner.pool.current, 0), parameters[0])
 
 
 def test_the_learners_steps_do_not_depend_on_the_opponents_outputs(league_trainer):
@@ -42,13 +42,15 @@ def test_the_learners_steps_do_not_depend_on_the_opponents_outputs(league_traine
 	change the battles.
 	"""
 	learner = league_trainer.init()
-	changed = jax.tree.map(lambda x: x * 4.0 + 0.5, learner.pool)
+	moved = jax.tree.map(lambda x: x * 4.0 + 0.5, learner.pool.current)
+	changed = PoolParams(current=moved, previous=moved)
 	observed = league_trainer.league.observe_pool(learner.league.env.state, learner.league.learner)
+	fresh = learner.league.pool_fresh
 	_, logits = league_trainer.league.pool_forward(
-		learner.pool, observed, learner.league.pool_hidden
+		learner.pool, observed, learner.league.pool_hidden, fresh
 	)
 	_, changed_logits = league_trainer.league.pool_forward(
-		changed, observed, learner.league.pool_hidden
+		changed, observed, learner.league.pool_hidden, fresh
 	)
 	assert not np.allclose(np.asarray(logits), np.asarray(changed_logits))
 

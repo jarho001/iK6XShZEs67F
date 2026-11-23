@@ -11,12 +11,16 @@ Advantages (gae): a terminated step bootstraps zero, a truncated one bootstraps 
 pre-reset observation (final_obs), and no advantage carries across an ended step, because the next
 step starts a fresh battle in both cases.
 
-Steps whose switch a hidden trap refused, and the steps whose action was held (league.py), did not
-count: they stay in the GAE recursion but get zero weight in the losses and the normalisation.
+A step whose action a hidden trap refused counts (the retry after it is a transition of its own). A
+held step (league.py) and a substituted illegal action do not: they stay in the GAE recursion but get
+zero weight in the critic loss. The policy's loss, entropy and their normalisation also leave out
+steps with no real choice (a no-op or a single legal action).
 
 The pool holds pool.size parameter sets stacked on a leading axis, all copies of the initial
-parameters at first. Every pool.every updates the parameters after that update replace the oldest
-set. Pool members are never trained.
+parameters at first. Every pool.every updates the parameters after that update replace the set of
+the next slot (round robin), and the replaced set is kept as the member's previous parameters: a
+pool row whose battle began before the insertion keeps reading them until its battle ends
+(league.PoolParams, pool_fresh). Pool members are never trained.
 
 Evaluation plays the learner against one baseline on fixed battles (the same keys every call):
 the learner takes side 0 in the even rows and side 1 in the odd ones, and it samples its policy or
@@ -35,9 +39,10 @@ from pokejax.baselines import make_policy
 from pokejax.engine.observation import Observation
 from pokejax.env import DEFAULT_POOL, Env, EnvConfig
 from pokejax.tables import load_tables
+from pokejax.train.checkpoint import pool_digest
 from pokejax.train.config import PPOSection, TrainConfig
 from pokejax.train.evaluation import summarize_battles
-from pokejax.train.league import Layout, League, LeagueState, Transition
+from pokejax.train.league import Layout, League, LeagueState, PoolParams, Transition, select_lanes
 from pokejax.train.network import PokePolicy, count_parameters, reset_carry, vocabulary
 
 # Seed offsets keep the evaluation and calibration keys apart from the training keys.
@@ -63,7 +68,9 @@ class Steps(NamedTuple):
 	value: jax.Array
 	advantage: jax.Array
 	returns: jax.Array
-	weight: jax.Array  # float32, 0 for a step that did not count
+	weight: jax.Array  # float32, 0 for a step that did not count (held or substituted)
+	actor: jax.Array  # float32, 1 for a counted decision with a real choice (policy and entropy)
+	advance: jax.Array  # bool, the lane's carry advanced at this step (False where held)
 	ended: jax.Array  # bool, the battle ended at this step (the carry resets after it)
 
 
@@ -170,6 +177,8 @@ class Trainer:
 			tables=self.tables,
 		)
 		self.layout = Layout(config.groups)
+		# The digest a checkpoint of this run carries (checkpoint.pool_digest): resumes need the same pool.
+		self.team_digest = pool_digest(self.env.pool, self.env.team_indices)
 		self.model = PokePolicy(vocabulary(self.tables), config.network)
 		policies = {
 			name: make_policy(name, self.env.tables, self.tables)
@@ -183,7 +192,8 @@ class Trainer:
 			config.pool.size,
 			policies,
 		)
-		gradient_steps = config.run.updates * p.epochs * p.minibatches
+		decay = p.decay_updates or config.run.updates
+		gradient_steps = decay * p.epochs * p.minibatches
 		self.schedule = learning_rate_schedule(p, gradient_steps)
 		self.tx = optax.chain(
 			optax.clip_by_global_norm(p.max_grad_norm),
@@ -216,10 +226,10 @@ class Trainer:
 		learner = self._init(jax.random.key(seed))
 		# The pool's copies are made outside the jitted init: inside it XLA may recompute the random
 		# initial values for each copy, and the copies then differ in the last bits.
-		pool = jax.tree.map(
+		stacked = jax.tree.map(
 			lambda x: jnp.broadcast_to(x, (self.config.pool.size,) + x.shape), learner.params
 		)
-		return learner._replace(pool=pool)
+		return learner._replace(pool=PoolParams(current=stacked, previous=stacked))
 
 	def parameter_count(self, learner: LearnerState) -> int:
 		return count_parameters(learner.params)
@@ -234,34 +244,42 @@ class Trainer:
 
 	# Loss.
 
-	def _replay(self, params, obs, ended, start):
+	def _replay(self, params, obs, ended, advance, start):
 		"""The network over chunks from their start carries: logits [L, M, 9], values [L, M].
 
 		The feed-forward encoder runs once over all L * M steps; only the recurrent core is
-		scanned over time, resetting the carry after each step where a battle ended.
+		scanned over time. A step where the lane's action was held keeps its carry (the rollout did
+		not advance it), and the carry resets after each step where a battle ended.
 		"""
 		flat = jax.tree.map(lambda x: x.reshape((-1,) + x.shape[2:]), obs)
 		features = self.model.apply({"params": params}, flat, method=PokePolicy.encode)
 		features = features.reshape(ended.shape + features.shape[1:])
 
 		def step(hidden, xs):
-			step_features, step_legal, step_ended = xs
+			step_features, step_legal, step_ended, step_advance = xs
 			after, logits, value = self.model.apply(
 				{"params": params}, hidden, step_features, step_legal, method=PokePolicy.step
 			)
-			return reset_carry(after, step_ended), (logits, value)
+			kept = select_lanes(step_advance, after, hidden)
+			return reset_carry(kept, step_ended), (logits, value)
 
-		_, (logits, values) = jax.lax.scan(step, start, (features, obs.legal_actions, ended))
+		_, (logits, values) = jax.lax.scan(
+			step, start, (features, obs.legal_actions, ended, advance)
+		)
 		return logits, values
 
 	def _loss(self, params, steps: Steps, start):
 		p = self.config.ppo
-		logits, values = self._replay(params, steps.obs, steps.ended, start)
+		logits, values = self._replay(params, steps.obs, steps.ended, steps.advance, start)
 		log_probs = jax.nn.log_softmax(logits)
 		chosen = jnp.take_along_axis(log_probs, steps.action[..., None], axis=-1)[..., 0]
+		# The critic learns from every counted decision; the policy only from those with a choice,
+		# so that no-op and single-action steps do not dilute its normalisation or metrics.
 		weight = steps.weight
 		total = jnp.maximum(weight.sum(), 1.0)
-		advantage = _normalize(steps.advantage, weight, total)
+		actor = steps.actor
+		actor_total = jnp.maximum(actor.sum(), 1.0)
+		advantage = _normalize(steps.advantage, actor, actor_total)
 
 		ratio = jnp.exp(chosen - steps.log_prob)
 		clipped = jnp.clip(ratio, 1 - p.clip, 1 + p.clip)
@@ -274,16 +292,16 @@ class Trainer:
 		value_loss = 0.5 * value_error
 
 		entropy = -jnp.sum(jnp.exp(log_probs) * log_probs, axis=-1)
-		per_step = policy_loss + p.value_coef * value_loss - p.entropy_coef * entropy
-		loss = (weight * per_step).sum() / total
+		loss = (actor * (policy_loss - p.entropy_coef * entropy)).sum() / actor_total
+		loss += p.value_coef * (weight * value_loss).sum() / total
 
 		log_ratio = chosen - steps.log_prob
 		metrics = {
-			"policy_loss": (weight * policy_loss).sum() / total,
+			"policy_loss": (actor * policy_loss).sum() / actor_total,
 			"value_loss": (weight * value_loss).sum() / total,
-			"entropy": (weight * entropy).sum() / total,
-			"approx_kl": (weight * (ratio - 1 - log_ratio)).sum() / total,
-			"clip_fraction": (weight * (jnp.abs(ratio - 1) > p.clip)).sum() / total,
+			"entropy": (actor * entropy).sum() / actor_total,
+			"approx_kl": (actor * (ratio - 1 - log_ratio)).sum() / actor_total,
+			"clip_fraction": (actor * (jnp.abs(ratio - 1) > p.clip)).sum() / actor_total,
 		}
 		return loss, metrics
 
@@ -338,19 +356,34 @@ class Trainer:
 			metrics[f"win_rate_{name}"] = group_won / jnp.maximum(group_ended, 1.0)
 		return metrics
 
-	def _insert(self, pool, inserts, params, update):
-		"""The pool with the parameters after update `update` in its next slot, every pool.every."""
+	def _insert(self, pool: PoolParams, fresh, inserts, params, update):
+		"""The pool after update `update`, every pool.every updates, in its next slot.
+
+		The slot's current parameters become its previous ones and the new parameters its current
+		ones. The fresh pool rows of that member read the previous parameters from now on (their
+		battles began on them), and the battles that start later read the new ones. Returns the
+		pool, the fresh flags and the insertion count.
+		"""
 		every = self.config.pool.every
 		if every == 0:
-			return pool, inserts
-		due = update % every == 0
+			return pool, fresh, inserts
+		due = jnp.asarray(update) % every == 0
 		slot = inserts % self.config.pool.size
-		pool = jax.tree.map(
+		previous = jax.tree.map(
+			lambda old, current: old.at[slot].set(jnp.where(due, current[slot], old[slot])),
+			pool.previous,
+			pool.current,
+		)
+		current = jax.tree.map(
 			lambda stored, new: stored.at[slot].set(jnp.where(due, new, stored[slot])),
-			pool,
+			pool.current,
 			params,
 		)
-		return pool, inserts + due.astype(jnp.int32)
+		if fresh.shape[0]:
+			per_member = fresh.shape[0] // self.config.pool.size
+			member = jnp.arange(fresh.shape[0]) // per_member
+			fresh = jnp.where(due & (member == slot), False, fresh)
+		return PoolParams(current, previous), fresh, inserts + due.astype(jnp.int32)
 
 	def _update_step(self, learner: LearnerState):
 		p, r = self.config.ppo, self.config.rollout
@@ -379,6 +412,7 @@ class Trainer:
 		)
 
 		weight = traj.weight.astype(jnp.float32)
+		actor = traj.actor.astype(jnp.float32)
 
 		def chunked(x):
 			return chunk_time(x, chunks_per_row, sequence, lanes)
@@ -391,6 +425,8 @@ class Trainer:
 			advantage=chunked(advantage),
 			returns=chunked(returns),
 			weight=chunked(weight),
+			actor=chunked(actor),
+			advance=chunked(traj.advance),
 			ended=chunked(terminated | truncated),
 		)
 		start = jax.tree.map(
@@ -403,8 +439,10 @@ class Trainer:
 		metrics.update(self._rollout_metrics(traj, returns, weight))
 		update = learner.update + 1
 		metrics["learning_rate"] = self.schedule(learner.update * p.epochs * p.minibatches)
-		pool, inserts = self._insert(learner.pool, learner.pool_inserts, params, update)
-		league = league._replace(key=key)
+		pool, fresh, inserts = self._insert(
+			learner.pool, league.pool_fresh, learner.pool_inserts, params, update
+		)
+		league = league._replace(key=key, pool_fresh=fresh)
 		learner = LearnerState(params, opt_state, league, pool, inserts, update)
 		return learner, metrics
 
@@ -482,9 +520,15 @@ class Trainer:
 		"""The learner against one baseline over fixed battles, sampling or taking the argmax.
 
 		The battles and their sides come from the same keys every call, so evaluations at
-		different updates, and the sampled and greedy ones, play the same battles.
+		different updates, and the sampled and greedy ones, play the same battles. battles must
+		be a positive multiple of the evaluation batch: every battle counted is one that was played.
 		"""
 		batch = self.config.evaluation.batch
+		if battles <= 0 or battles % batch:
+			raise ValueError(
+				f"evaluation needs a positive multiple of the evaluation batch ({batch}), "
+				f"got {battles} battles"
+			)
 		run = self._evaluator(opponent)
 		key = jax.random.key(self.config.run.seed + EVALUATION_SEED)
 		wins = truncated = length = unfinished = 0
@@ -540,7 +584,11 @@ class Trainer:
 		return steps / statistics.median(durations)
 
 	def forward_cost(self, learner: LearnerState) -> dict:
-		"""FLOPs of one forward pass of one lane's step (XLA cost analysis)."""
+		"""FLOPs of one policy forward pass for one lane (one observation), by XLA cost analysis.
+
+		A training step runs more than one forward pass per battle row (both learner seats,
+		and a pool or baseline opponent's network), so this is not a per-battle-step count.
+		"""
 		obs = jax.tree.map(lambda x: x[:1], learner.league.obs)
 		hidden = jax.tree.map(lambda x: x[:1], learner.league.hidden)
 
@@ -551,4 +599,4 @@ class Trainer:
 		analysis = compiled.cost_analysis()
 		if isinstance(analysis, (list, tuple)):
 			analysis = analysis[0] if analysis else {}
-		return {"flops_per_battle_step": float((analysis or {}).get("flops", float("nan")))}
+		return {"flops_per_policy_forward": float((analysis or {}).get("flops", float("nan")))}

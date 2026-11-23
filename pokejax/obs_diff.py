@@ -176,7 +176,8 @@ def compare_file(path, *, recording=None, history=None, keep=100000) -> Observat
 			if wanted.shape != got.shape:
 				raise ValueError(f"{name}: engine {got.shape}, player view {wanted.shape}")
 			if leaf.dtype.kind == "f":
-				different = np.abs(got - wanted) > FLOAT_TOLERANCE
+				# A NaN on either side compares false to everything, so it is a mismatch here.
+				different = ~((got == wanted) | (np.abs(got - wanted) <= FLOAT_TOLERANCE))
 			else:
 				different = got != wanted
 			if name == "own.stats":

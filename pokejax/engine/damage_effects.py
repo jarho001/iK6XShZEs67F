@@ -38,6 +38,7 @@ from .abilities import (
 	absorption,
 	absorption_no_effect,
 	apply_boost_delta,
+	berry_allowed,
 	effective_weather,
 	has_hook,
 	reveal_abilities,
@@ -47,7 +48,13 @@ from .damage import accuracy_hit, damage_for_hits, move_damage_bases, type_match
 from .events import EFFECT_IMMUNE, EFFECT_NEUTRAL, EFFECT_NONE, EFFECT_RESISTED, EFFECT_SUPER
 from .facts import active_facts
 from .field import effective_move_type
-from .items import BERRY_SITRUS, CONTACT_ROCKY_HELMET, damage_survival, eat_lum_after_status
+from .items import (
+	BERRY_LUM,
+	BERRY_SITRUS,
+	CONTACT_ROCKY_HELMET,
+	damage_survival,
+	eat_lum_after_status,
+)
 from .move_data import read_move
 from .move_effects import apply_healing_active
 from .randomness import (
@@ -121,10 +128,34 @@ def _round_fraction(value, numerator, denominator):
 	return lax.div(value * numerator.astype(jnp.int32) + denominator // 2, denominator)
 
 
-def _apply_contact_statuses(
-	state, side, foe, row, hit_landed, key, forced, tables, rows, attacker_berry
+class StatusPlan(NamedTuple):
+	"""The contact statuses the attacker takes in one move, hit by hit (Static, Flame Body, Effect Spore).
+
+	first and second are hit indices. A status that Lum Berry cures at once is not held, so the next
+	eligible hit can give the attacker another one (second, applied_again); after that the status
+	holds. burned marks the hits whose damage a burn of the attacker halves: the hits after a burn
+	that is not cured.
+	"""
+
+	first: jax.Array  # int32 scalar
+	applied: jax.Array  # bool scalar
+	status: jax.Array  # int32 scalar
+	second: jax.Array  # int32 scalar
+	applied_again: jax.Array  # bool scalar
+	status_again: jax.Array  # int32 scalar
+	burned: jax.Array  # bool [MAX_HITS]
+
+
+def _contact_status_plan(
+	state, side, foe, row, hit_landed, attacker_hp, key, forced, tables, rows, attacker_berry
 ):
-	"""Resolve contact statuses and Disable across the fixed five-hit axis."""
+	"""Which hits give the attacker a contact status, and which hits a burn halves (StatusPlan).
+
+	A hit gives one only if it landed on the defender (hit_landed) and the defender's ability rolls
+	for it. The attacker takes the status while it has no status, and the foe's ability fails
+	against its immunities. Lum Berry cures the status at once (onAfterSetStatus), so it is then
+	free for the next eligible hit.
+	"""
 	target_hook = rows[foe, CONTACT]
 	indices = jnp.arange(MAX_HITS, dtype=jnp.int32)
 	landed = hit_landed & row.move_contact
@@ -155,7 +186,6 @@ def _apply_contact_statuses(
 	attempt &= candidates != HEALTHY
 	slot = state.active[side]
 	active_status = state.status[side, slot]
-	active_hp = state.hp[side, slot]
 	current_types = state.types[side, slot]
 	present_types = current_types >= 0
 	safe_types = jnp.maximum(current_types, 0)
@@ -172,28 +202,62 @@ def _apply_contact_statuses(
 		(state.status[side] == SLEEP) & (state.sleep_from_foe[side] != 0) & (state.hp[side] > 0)
 	)
 	blocked = type_immune | weather_immune | ability_immune | ((candidates == SLEEP) & sleep_clause)
-	eligible = attempt & (active_status == HEALTHY) & (active_hp > 0) & ~blocked
+	eligible = attempt & (active_status == HEALTHY) & (attacker_hp > 0) & ~blocked
 	first = jnp.argmax(eligible.astype(jnp.int32))
-	inflicted = candidates[first]
-	apply_status = jnp.any(eligible)
-	before_source_status = active_status
-	state = inflict_status(state, side, inflicted, apply_status, key, forced, tables, rows)
-	source_status_applied = (before_source_status == HEALTHY) & (
-		state.status[side, state.active[side]] == inflicted
-	)
-	source_status_applied &= apply_status
-	state = synchronize_status(
-		state, side, foe, inflicted, source_status_applied, key, forced, tables, rows
-	)
-	# Lum Berry eats at once (onAfterSetStatus), before anything that follows the hit, such as the
-	# fatigue confusion that ends Outrage.
-	state = eat_lum_after_status(
+	applied = jnp.any(eligible)
+	status = candidates[first]
+	lum = (attacker_berry == BERRY_LUM) & berry_allowed(state, rows)[side]
+	cured = applied & lum
+	later = eligible & (indices > first)
+	second = jnp.argmax(later.astype(jnp.int32))
+	applied_again = cured & jnp.any(later)
+	status_again = candidates[second]
+	burn_first = applied & ~cured & (status == BURN)
+	burn_second = applied_again & (status_again == BURN)
+	burned = (burn_first & (indices > first)) | (burn_second & (indices > second))
+	return StatusPlan(first, applied, status, second, applied_again, status_again, burned)
+
+
+def _apply_contact_statuses(
+	state, side, foe, row, hit_landed, key, forced, tables, rows, attacker_berry
+):
+	"""Resolve contact statuses across the fixed five-hit axis (StatusPlan), then Curse and Disable."""
+	target_hook = rows[foe, CONTACT]
+	indices = jnp.arange(MAX_HITS, dtype=jnp.int32)
+	defender_roll = chance(key, forced, ABILITY_CHANCE, foe, 2 * indices, 3, 10)
+	plan = _contact_status_plan(
 		state,
-		(SIDES == side) & source_status_applied,
-		rows,
+		side,
+		foe,
+		row,
+		hit_landed,
+		state.hp[side, state.active[side]],
+		key,
+		forced,
 		tables,
-		jnp.where(SIDES == side, attacker_berry, 0),
+		rows,
+		attacker_berry,
 	)
+	applied_any = jnp.zeros((), jnp.bool_)
+	slot = state.active[side]
+	# The berry is eaten by the first application that it cures, so the second has none to eat.
+	berry = jnp.where(SIDES == side, attacker_berry, 0)
+	for status, apply, held in (
+		(plan.status, plan.applied, berry),
+		(plan.status_again, plan.applied_again, jnp.zeros_like(berry)),
+	):
+		before = state.status[side, slot]
+		state = inflict_status(state, side, status, apply, key, forced, tables, rows)
+		# The poisoned foe is the status receiver: its Synchronize copies the status back.
+		source_applied = (before == HEALTHY) & (state.status[side, state.active[side]] == status)
+		source_applied &= apply
+		state = synchronize_status(
+			state, side, foe, status, source_applied, key, forced, tables, rows
+		)
+		# Lum Berry eats at once (onAfterSetStatus), before anything that follows the hit, such as the
+		# fatigue confusion that ends Outrage.
+		state = eat_lum_after_status(state, (SIDES == side) & source_applied, rows, tables, held)
+		applied_any |= source_applied
 	curse = target_hook == CONTACT_CURSED_BODY
 	curse_trigger = jnp.any(hit_landed & curse & defender_roll)
 	curse_trigger &= state.volatiles[side, DISABLE_REMAINING] == 0
@@ -216,23 +280,8 @@ def _apply_contact_statuses(
 		volatiles,
 	)
 	state = state._replace(volatiles=volatiles)
-	ability_reveal = (SIDES == foe) & (source_status_applied | curse_trigger)
+	ability_reveal = (SIDES == foe) & (applied_any | curse_trigger)
 	return reveal_abilities(state, ability_reveal), ability_reveal
-
-
-def _burned_after_hits(state, side, foe, row, count, key, forced, tables, rows, indices):
-	"""Hits that follow a Flame Body burn of the attacker. The burn lands between hits and halves
-	the physical damage of the later ones. A hit is assumed to land (a faint ends the move anyway)."""
-	roll = chance(key, forced, ABILITY_CHANCE, foe, 2 * indices, 3, 10)
-	trigger = (rows[foe, CONTACT] == CONTACT_FLAME_BODY) & row.move_contact & roll
-	trigger &= indices < count
-	slot = state.active[side]
-	types = state.types[side, slot]
-	immune = jnp.any((types >= 0) & tables.status_immune[BURN, jnp.maximum(types, 0)])
-	immune |= tables.weather_status_immune[effective_weather(state, rows), BURN]
-	immune |= (rows[side, STATUS] & (1 << BURN)) != 0
-	trigger &= (state.status[side, slot] == HEALTHY) & ~immune
-	return _before_sum(trigger.astype(jnp.int32)) > 0
 
 
 def apply_poison_touch(state, side, row, hit_landed, key, forced, tables, rows):
@@ -278,7 +327,72 @@ def apply_damage_effects(
 	analytic,
 	switching_foe=False,
 ):
-	"""Resolve a fixed five-hit axis with one move-level damage calculation."""
+	"""Resolve a fixed five-hit axis with one move-level damage calculation (_resolve_hits).
+
+	A burn of the attacker halves the damage of the hits after it, and which hits give the burn
+	depends on which of them land on the defender, so the hits are resolved twice: once without a
+	burn to find the contact statuses (StatusPlan), then with the burn that plan gives. The first
+	resolution's state is unused and the compiler removes it.
+	"""
+	args = (
+		state,
+		side,
+		move,
+		enabled,
+		guarded,
+		invulnerable,
+		key,
+		forced,
+		tables,
+		item_rows,
+		rows,
+		weather,
+		sheer,
+		analytic,
+		switching_foe,
+	)
+	_, _, (landed, attacker_hp) = _resolve_hits(*args)
+	row = read_move(tables, move)
+	plan = _contact_status_plan(
+		state,
+		side,
+		1 - side,
+		row,
+		landed,
+		attacker_hp,
+		key,
+		forced,
+		tables,
+		rows,
+		item_rows.berry_kind[side],
+	)
+	state, result, _ = _resolve_hits(*args, burned=plan.burned)
+	return state, result
+
+
+def _resolve_hits(
+	state,
+	side,
+	move,
+	enabled,
+	guarded,
+	invulnerable,
+	key,
+	forced,
+	tables,
+	item_rows,
+	rows,
+	weather,
+	sheer,
+	analytic,
+	switching_foe=False,
+	burned=None,
+):
+	"""One resolution of the five hits. burned gives the hits that a burn of the attacker halves.
+
+	Returns the state, the HitResult, and (the hits that landed on the defender, the attacker's HP
+	after the contact costs), the probe that the contact statuses are planned from.
+	"""
 	row = read_move(tables, move)
 	facts = active_facts(state)
 	t = tables
@@ -346,7 +460,7 @@ def apply_damage_effects(
 		facts=facts,
 	)
 	hit_indices = jnp.arange(MAX_HITS, dtype=jnp.int32)
-	burn_after = _burned_after_hits(state, side, foe, row, count, key, forced, t, rows, hit_indices)
+	burn_after = jnp.zeros((MAX_HITS,), jnp.bool_) if burned is None else burned
 	damage, can_damage, critical = damage_for_hits(
 		state,
 		side,
@@ -681,24 +795,28 @@ def apply_damage_effects(
 		enabled & ~guarded & ~invulnerable & sub_target & (row.move_category == 2) & checked_hit
 	)
 	sub_refused &= ~absorbed & ~oblivious
-	return state, HitResult(
-		success,
-		effect_hit,
-		hit_landed,
-		field_hit,
-		item_consumptions,
-		(SIDES == foe) & helm_named,
-		contact_reveals | ((SIDES == foe) & reveal_ability),
-		jnp.any(sub_hits),
-		instafaint_kill,
-		missed,
-		immune_line,
-		guarded & enabled,
-		jnp.any(critical & reached) & (row.move_damage_kind == 0),
-		effect,
-		jnp.where(row.move_hit_max > 1, jnp.sum(reached), 0).astype(jnp.int32),
-		heal_full,
-		sub_refused,
-		enabled & ~blocked & checked_hit,
-		sub_hits,
+	return (
+		state,
+		HitResult(
+			success,
+			effect_hit,
+			hit_landed,
+			field_hit,
+			item_consumptions,
+			(SIDES == foe) & helm_named,
+			contact_reveals | ((SIDES == foe) & reveal_ability),
+			jnp.any(sub_hits),
+			instafaint_kill,
+			missed,
+			immune_line,
+			guarded & enabled,
+			jnp.any(critical & reached) & (row.move_damage_kind == 0),
+			effect,
+			jnp.where(row.move_hit_max > 1, jnp.sum(reached), 0).astype(jnp.int32),
+			heal_full,
+			sub_refused,
+			enabled & ~blocked & checked_hit,
+			sub_hits,
+		),
+		(hit_landed, hp_after_contact),
 	)

@@ -255,8 +255,9 @@ def test_potential_based_shaping(full_env):
 		stepped, _ = reference(full_env, es, actions)
 		es, timestep = STEP(full_env, es, actions)
 		ended = np.asarray(timestep.info.ended)
+		terminated = np.asarray(timestep.terminated)
 		winner = np.asarray(stepped.winner)
-		after = np.where(ended, 0.0, np.asarray(hp_potential(stepped)))
+		after = np.where(terminated, 0.0, np.asarray(hp_potential(stepped)))
 		shaping = COEF * (GAMMA * after - before)
 		terminal = np.where(winner == SIDE0, 1.0, np.where(winner == SIDE1, -1.0, 0.0))
 		reward = np.asarray(timestep.reward)
@@ -264,7 +265,7 @@ def test_potential_based_shaping(full_env):
 		np.testing.assert_allclose(reward[:, 1], -(terminal + shaping), atol=1e-5)
 		discounted += scale * shaping
 		scale *= GAMMA
-		for b in np.flatnonzero(ended):
+		for b in np.flatnonzero(terminated):
 			np.testing.assert_allclose(discounted[b], 0.0, atol=1e-5)
 			episodes += 1
 		discounted[ended] = 0
@@ -272,6 +273,30 @@ def test_potential_based_shaping(full_env):
 	assert episodes > 0
 	# Both teams are whole at the start of a battle, so phi is zero there.
 	assert not np.asarray(hp_potential(RESET(full_env, KEY)[0].state)).any()
+
+
+def test_a_truncated_step_keeps_the_potential_of_the_battle_it_leaves(full_env):
+	"""GAE bootstraps a truncated battle from its final observation, so the shaping term of the
+	truncating step uses phi of that battle (not zero, as a termination does); the next battle
+	starts at zero."""
+	es, _ = RESET(full_env, KEY)
+	state = es.state._replace(hp=es.state.hp.at[:, 1].set(es.state.hp[:, 1] // 2))
+	cap = full_env.config.max_steps
+	es = es._replace(
+		state=state,
+		potential=hp_potential(state).astype(jnp.float32),
+		steps=jnp.full(BATCH, cap - 1, jnp.int32),
+	)
+	before = np.asarray(es.potential)
+	stepped, _ = reference(full_env, es, ZEROS)
+	es, timestep = STEP(full_env, es, ZEROS)
+	assert np.asarray(timestep.truncated).all() and not np.asarray(timestep.terminated).any()
+	after = np.asarray(hp_potential(stepped))
+	assert np.abs(after).min() > 0.1
+	np.testing.assert_allclose(
+		np.asarray(timestep.reward)[:, 0], COEF * (GAMMA * after - before), atol=1e-5
+	)
+	np.testing.assert_allclose(np.asarray(es.potential), 0.0, atol=1e-6)
 
 
 def test_truncation_at_the_step_cap_is_separate_from_termination(env):
@@ -419,6 +444,22 @@ def test_a_known_trap_stays_until_either_active_changes(env, tables):
 	es, timestep = STEP(env, es, jnp.tile(jnp.array([[0, 4]]), (BATCH, 1)))
 	assert not np.asarray(es.state.trap_known).any()
 	np.testing.assert_array_equal(np.asarray(es.state.active)[:, 1], 1)
+	assert np.asarray(timestep.legal)[:, 0, 4:].any(axis=1).all()
+
+
+def test_a_known_trap_ends_when_the_trapper_stops_trapping_with_both_actives_in(env, tables):
+	# Mummy gives the trapper another ability in a step (the contact hit). The actives do not change,
+	# but the trap is gone: the knowledge ends with the step and the observed mask offers switches.
+	state = trapped_state(env, tables)
+	refused, _ = STEP(env, env.init(state, KEY), jnp.tile(jnp.array([[4, 0]]), (BATCH, 1)))
+	np.testing.assert_array_equal(
+		np.asarray(refused.state.trap_known), np.tile([True, False], (BATCH, 1))
+	)
+	mummy = tables.abilities.index["mummy"]
+	changed = set_active(refused.state, "ability", 1, mummy)
+	es, timestep = STEP(env, refused._replace(state=changed), ZEROS)
+	assert not np.asarray(es.state.trap_known).any()
+	np.testing.assert_array_equal(np.asarray(es.state.active), np.asarray(refused.state.active))
 	assert np.asarray(timestep.legal)[:, 0, 4:].any(axis=1).all()
 
 

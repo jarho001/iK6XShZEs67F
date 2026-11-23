@@ -114,6 +114,8 @@ def hand_built(obs, own_types, foe_types, moves, foe_moves=(0, 0, 0, 0)):
 		is_active=jnp.zeros_like(obs.own.is_active).at[0, 0].set(1.0),
 		types=jnp.zeros_like(obs.own.types).at[0, 0].set(row(own_types, 2)),
 		moves=jnp.zeros_like(obs.own.moves).at[0, 0].set(row(moves, 4)),
+		hidden_type=jnp.zeros_like(obs.own.hidden_type),
+		return_power=jnp.zeros_like(obs.own.return_power),
 		pp=jnp.ones_like(obs.own.pp),
 	)
 	foe = obs.opponent._replace(
@@ -147,6 +149,32 @@ def test_effectiveness_stab_and_power_on_a_hand_built_position(battles, tables):
 	assert thunderbolt[PHYSICAL] == 0.0 and tackle[PHYSICAL] == 1.0
 	assert thunderbolt[LEGAL] == 1.0 and moves[2, LEGAL] == 0.0
 	assert np.all(moves[2:, POWER] == 0.0)  # empty slots carry no power
+
+
+def test_hidden_power_and_return_take_their_type_and_power_from_the_request(battles, tables):
+	_, _, _, obs = battles
+	hand = hand_built(
+		obs,
+		own_types=[code(tables, "normal")],
+		foe_types=[code(tables, "rock")],
+		moves=[move_id(tables, "hiddenpower"), move_id(tables, "return")],
+	)
+	# The request says Hidden Power is Fire and Return has power 102 (happiness 255). A Normal-type
+	# own active with Return is the STAB case; Hidden Power of another type gets no STAB.
+	fire = code(tables, "fire")
+	hand = hand._replace(
+		own=hand.own._replace(
+			hidden_type=hand.own.hidden_type.at[0, 0, 0].set(fire + 1),
+			return_power=hand.own.return_power.at[0, 0, 1].set(102),
+		)
+	)
+	moves, _, _ = action_features(hand, public_tables())
+	moves = np.asarray(moves)[0]
+	hidden, returned = moves[0], moves[1]
+	# Fire and Normal on Rock are both resisted (1/2, a feature of 0.25); Return has the request's power.
+	assert hidden[EFFECTIVENESS] == pytest.approx(0.25) and hidden[STAB] == 0.0
+	assert returned[POWER] == pytest.approx(1.02) and returned[EFFECTIVENESS] == pytest.approx(0.25)
+	assert returned[STAB] == 1.0
 
 
 def test_an_immune_move_scores_nothing_and_the_neutral_one_is_the_best(battles, tables):
@@ -204,18 +232,27 @@ def test_move_scores_agree_with_the_max_damage_baseline(battles, features, table
 	scores, choice = np.asarray(scores), np.asarray(choice)
 	legal = np.asarray(obs.legal_actions)[:, :MOVE_COUNT]
 	hidden_power = move_id(tables, "hiddenpower")
+	return_move = move_id(tables, "return")
 	checked = 0
 	for b in range(BATCH):
 		active = int(np.argmax(np.asarray(obs.own.is_active)[b]))
 		ids = np.asarray(obs.own.moves)[b, active]
 		for slot in range(MOVE_COUNT):
-			if not legal[b, slot] or ids[slot] == hidden_power:
-				continue  # Hidden Power's type is not in the observation
+			# The baseline keeps its static formula: Hidden Power's type and Return's power are
+			# not in its table, while the features read them from the own request.
+			if not legal[b, slot] or ids[slot] in (hidden_power, return_move):
+				continue
 			decoded = np.expm1(5 * moves[b, slot, LOG_SCORE])
 			assert decoded == pytest.approx(scores[b, slot], rel=1e-4, abs=1e-3)
 			checked += 1
 		md = choice[b]
-		if md < MOVE_COUNT and scores[b, md] > 0 and ids[md] != hidden_power:
+		# The relative score is against the features' own best move, which differs from the baseline's
+		# when a legal move is Hidden Power or Return (see above).
+		uses_request = any(
+			legal[b, slot] and ids[slot] in (hidden_power, return_move)
+			for slot in range(MOVE_COUNT)
+		)
+		if md < MOVE_COUNT and scores[b, md] > 0 and not uses_request:
 			assert moves[b, md, RELATIVE] == pytest.approx(1.0, abs=1e-5)
 	assert checked > 0
 
