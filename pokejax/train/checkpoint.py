@@ -63,7 +63,8 @@ def load_checkpoint(path: Path, template, config: TrainConfig):
 	with np.load(path, allow_pickle=False) as data:
 		if CONFIG_ENTRY not in data.files:
 			raise CheckpointError(f"{path} has no configuration")
-		saved = json.loads(str(data[CONFIG_ENTRY]))
+		# A key a checkpoint predates reads as its default, so older checkpoints still resume.
+		saved = TrainConfig.from_dict(json.loads(str(data[CONFIG_ENTRY]))).to_dict()
 		if _training_settings(saved) != _training_settings(config.to_dict()):
 			raise CheckpointError(
 				f"{path} was written with a different configuration; resume with the same one "

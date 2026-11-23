@@ -14,6 +14,7 @@ A file has these tables, and every key is optional (the defaults are the ones be
 - [env]: max_steps (environment steps before a battle is truncated), shaping, shaping_coef
 - [network]: core (gru or lstm), activation, core_width, trunk_width, member_width and the
   embedding sizes; features (public damage and matchup inputs, pokejax/train/features.py),
+  feature_set (full, dex or dex-no-matchup: which feature columns enter, see features.py),
   action_head (dense: one linear layer over the core output; factored: a scorer per action from
   the core output and that action's features, which needs features) and action_width
 - [ppo]: epochs, minibatches, learning_rate, learning_rate_end, lr_schedule (constant, linear or
@@ -42,6 +43,7 @@ from pokejax.policy_names import POLICY_NAMES
 CORE_KINDS = ("gru", "lstm")
 ACTIVATIONS = ("relu", "tanh", "gelu")
 ACTION_HEADS = ("dense", "factored")
+FEATURE_SETS = ("full", "dex", "dex-no-matchup")
 LR_SCHEDULES = ("constant", "linear", "cosine")
 # The groups of a batch in the order of their rows (pokejax.train.league).
 GROUP_ORDER = ("selfplay", "pool", *POLICY_NAMES)
@@ -159,6 +161,7 @@ class NetworkSection:
 	type_embedding: int = 8
 	code_embedding: int = 4
 	features: bool = False
+	feature_set: str = "full"
 	action_head: str = "dense"
 	action_width: int = 64
 
@@ -171,6 +174,11 @@ class NetworkSection:
 			"network.action_head = factored needs network.features = true",
 		)
 		_check(isinstance(self.features, bool), "network.features must be true or false")
+		_check_choice(self.feature_set, FEATURE_SETS, "network.feature_set")
+		_check(
+			self.features or self.feature_set == "full",
+			f"network.feature_set = {self.feature_set} needs network.features = true",
+		)
 		_check_int(self.action_width, 1, "network.action_width")
 		for name in (
 			"core_width",

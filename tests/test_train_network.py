@@ -8,8 +8,14 @@ import pytest
 from train_support import TINY_OVERRIDES, write_pool
 
 from pokejax.env import Env, EnvConfig, OpponentEnv
-from pokejax.train.config import load_config
-from pokejax.train.features import BENCH_COUNT, MOVE_COUNT, MOVE_FEATURES, SWITCH_FEATURES
+from pokejax.train.config import FEATURE_SETS, load_config
+from pokejax.train.features import (
+	BENCH_COUNT,
+	MOVE_COUNT,
+	MOVE_FEATURES,
+	SWITCH_FEATURES,
+	feature_widths,
+)
 from pokejax.train.network import (
 	PokePolicy,
 	count_parameters,
@@ -102,13 +108,14 @@ def test_a_single_legal_action_is_chosen_with_no_nan(tables, observed):
 	assert all(np.all(np.isfinite(np.asarray(g))) for g in jax.tree.leaves(grads))
 
 
-def featured_network(action_head, core="gru"):
+def featured_network(action_head, core="gru", feature_set="full"):
 	overrides = [
 		*TINY_OVERRIDES,
 		"network.features=true",
 		f"network.action_head={action_head}",
 		"network.action_width=8",
 		f"network.core={core}",
+		f"network.feature_set={feature_set}",
 	]
 	return load_config(None, overrides).network
 
@@ -149,3 +156,30 @@ def test_factored_encode_then_step_is_the_whole_call(tables, observed, core):
 	_, whole_logits, whole_value = model.apply({"params": params}, obs, hidden)
 	np.testing.assert_allclose(np.asarray(logits), np.asarray(whole_logits), atol=1e-6)
 	np.testing.assert_allclose(np.asarray(value), np.asarray(whole_value), atol=1e-6)
+
+
+@pytest.mark.parametrize("feature_set", FEATURE_SETS)
+@pytest.mark.parametrize("action_head", ["dense", "factored"])
+def test_feature_sets_set_the_widths_the_network_reads(tables, observed, feature_set, action_head):
+	obs, _ = observed
+	network = featured_network(action_head, feature_set=feature_set)
+	model = PokePolicy(vocabulary(tables), network)
+	hidden = initial_carry(network, (BATCH,))
+	params = model.init(jax.random.key(1), obs, hidden)["params"]
+	move_width, switch_width, threat = feature_widths(feature_set)
+	# The features sit beside the other trunk inputs: the first trunk layer reads them all.
+	plain = PokePolicy(vocabulary(tables), tiny_network())
+	plain_params = plain.init(jax.random.key(1), obs, initial_carry(tiny_network(), (BATCH,)))[
+		"params"
+	]
+	added = MOVE_COUNT * move_width + BENCH_COUNT * switch_width + threat
+	trunk = params["trunk_0"]["kernel"].shape[0]
+	assert trunk == plain_params["trunk_0"]["kernel"].shape[0] + added
+	_, logits, value = model.apply({"params": params}, obs, hidden)
+	assert logits.shape == (BATCH, 9) and value.shape == (BATCH,)
+	assert np.all(np.isfinite(np.asarray(logits)))
+	if action_head == "factored":
+		projected = model.apply({"params": params}, obs, method=PokePolicy.encode)
+		width = 3 * network.core_width  # GRU gates
+		expected = width + MOVE_COUNT * move_width + BENCH_COUNT * switch_width
+		assert projected.shape == (BATCH, expected)

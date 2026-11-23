@@ -14,6 +14,8 @@ opponent as it sees them), with any number of leading batch axes. In order:
    last step's events of both sides. With network.features the trunk also takes the public damage
    and matchup features of pokejax/train/features.py (each move slot's power, type effectiveness,
    STAB and the max-damage score; each switch's matchup and threat; the threat to the active).
+   network.feature_set picks the columns that enter (features.py): "dex" leaves out the scores and
+   the matchup estimates.
    Steps 1 to 3 are feed-forward: encode() runs them over any number of steps at once, and the
    input projections of the core are the last part of it.
 4. A recurrent core (GRU or LSTM, from the config; GateCore), which is the only part a scan over
@@ -38,9 +40,8 @@ from pokejax.train.config import NetworkSection
 from pokejax.train.features import (
 	BENCH_COUNT,
 	MOVE_COUNT,
-	MOVE_FEATURES,
-	SWITCH_FEATURES,
 	action_features,
+	feature_widths,
 	public_tables,
 )
 
@@ -358,10 +359,12 @@ class PokePolicy(nn.Module):
 		parts = [own_team, foe_team, field, own_active, foe_active, event_features]
 		action_inputs = ()
 		if n.features:
-			move_f, switch_f, threat = action_features(obs, public_tables())
+			move_f, switch_f, threat = action_features(obs, public_tables(), n.feature_set)
 			move_flat = move_f.reshape(lead + (-1,))
 			switch_flat = switch_f.reshape(lead + (-1,))
-			parts += [move_flat, switch_flat, threat[..., None]]
+			parts += [move_flat, switch_flat]
+			if threat is not None:
+				parts.append(threat[..., None])
 			action_inputs = (move_flat, switch_flat)
 		x = jnp.concatenate(parts, axis=-1)
 		x = act(self.trunk_0(x))
@@ -378,14 +381,15 @@ class PokePolicy(nn.Module):
 		"""
 		n = self.network
 		if n.action_head == "factored":
+			move_width, switch_width, _ = feature_widths(n.feature_set)
 			width = (3 if n.core == "gru" else 4) * n.core_width
 			carry, out = self.core.recur(carry, projected[..., :width])
 			features = projected[..., width:]
 			lead = features.shape[:-1]
-			move_f = features[..., : MOVE_COUNT * MOVE_FEATURES]
-			switch_f = features[..., MOVE_COUNT * MOVE_FEATURES :]
-			move_f = move_f.reshape(lead + (MOVE_COUNT, MOVE_FEATURES))
-			switch_f = switch_f.reshape(lead + (BENCH_COUNT, SWITCH_FEATURES))
+			move_f = features[..., : MOVE_COUNT * move_width]
+			switch_f = features[..., MOVE_COUNT * move_width :]
+			move_f = move_f.reshape(lead + (MOVE_COUNT, move_width))
+			switch_f = switch_f.reshape(lead + (BENCH_COUNT, switch_width))
 			logits = jnp.concatenate(
 				[self.move_scorer(out, move_f), self.switch_scorer(out, switch_f)], axis=-1
 			)

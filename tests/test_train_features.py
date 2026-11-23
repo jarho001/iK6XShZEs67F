@@ -17,14 +17,17 @@ from pokejax.baselines import (
 from pokejax.engine.actions import legal_actions
 from pokejax.engine.observation import observe
 from pokejax.env import Env, EnvConfig
+from pokejax.train.config import FEATURE_SETS
 from pokejax.train.features import (
 	BENCH_COUNT,
+	FEATURE_LAYOUTS,
 	MOVE_COUNT,
 	MOVE_FEATURES,
 	SWITCH_FEATURES,
 	THREAT_SCALE,
 	action_features,
 	build_public_tables,
+	feature_widths,
 	public_tables,
 )
 
@@ -242,3 +245,55 @@ def test_no_input_beyond_the_observation(battles, tables):
 		action_features(a, public_tables()), action_features(b, public_tables()), strict=True
 	):
 		np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+
+def test_feature_widths_per_set(battles):
+	_, _, _, obs = battles
+	widths = {"full": (12, 8, True), "dex": (10, 4, False), "dex-no-matchup": (10, 2, False)}
+	assert set(widths) == set(FEATURE_SETS) == set(FEATURE_LAYOUTS)
+	extract = jax.jit(action_features, static_argnames="feature_set")
+	for feature_set, (move_width, switch_width, threat) in widths.items():
+		moves, switches, threat_out = extract(obs, public_tables(), feature_set=feature_set)
+		assert moves.shape == (BATCH, MOVE_COUNT, move_width)
+		assert switches.shape == (BATCH, BENCH_COUNT, switch_width)
+		assert (threat_out is None) == (not threat)
+		assert feature_widths(feature_set) == (move_width, switch_width, int(threat))
+
+
+def test_full_is_the_default_and_the_smaller_sets_keep_its_columns(battles):
+	_, _, _, obs = battles
+	full = action_features(obs, public_tables())
+	assert full[0].shape[-1] == MOVE_FEATURES and full[1].shape[-1] == SWITCH_FEATURES
+	for x, y in zip(full, action_features(obs, public_tables(), "full"), strict=True):
+		np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+	for feature_set in ("dex", "dex-no-matchup"):
+		layout = FEATURE_LAYOUTS[feature_set]
+		moves, switches, threat = action_features(obs, public_tables(), feature_set)
+		np.testing.assert_array_equal(
+			np.asarray(moves), np.asarray(full[0])[..., list(layout.move)]
+		)
+		np.testing.assert_array_equal(
+			np.asarray(switches), np.asarray(full[1])[..., list(layout.switch)]
+		)
+		assert threat is None
+
+
+def test_dex_features_do_not_see_the_opponents_boosts_or_hp(battles):
+	"""The dex sets leave out the damage estimates and the matchups, the only inputs that use the
+	opponent's boosts, and the opponent's HP; the full set does see both."""
+	_, _, _, obs = battles
+	changed = obs._replace(
+		opponent=obs.opponent._replace(
+			boosts=jnp.full_like(obs.opponent.boosts, 2.0 / 6.0), hp=obs.opponent.hp * 0.5
+		)
+	)
+	before = action_features(obs, public_tables())
+	after = action_features(changed, public_tables())
+	assert not np.array_equal(np.asarray(before[0]), np.asarray(after[0]))
+	assert not np.array_equal(np.asarray(before[1]), np.asarray(after[1]))
+	for feature_set in ("dex", "dex-no-matchup"):
+		old = action_features(obs, public_tables(), feature_set)
+		new = action_features(changed, public_tables(), feature_set)
+		np.testing.assert_array_equal(np.asarray(old[0]), np.asarray(new[0]))
+		np.testing.assert_array_equal(np.asarray(old[1]), np.asarray(new[1]))
+		assert old[2] is None and new[2] is None

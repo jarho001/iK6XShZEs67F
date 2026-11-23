@@ -196,3 +196,22 @@ def test_invalid_network_features_are_errors(override, message):
 def test_factored_heads_load_with_features():
 	network = load_config(None, ["network.features=true", "network.action_head=factored"]).network
 	assert network.features and network.action_head == "factored"
+
+
+def test_feature_set_is_full_by_default_and_needs_features():
+	assert load_config(None).network.feature_set == "full"
+	network = load_config(None, ["network.features=true", "network.feature_set=dex"]).network
+	assert network.feature_set == "dex"
+	assert load_config(None).to_dict()["network"]["feature_set"] == "full"
+
+
+@pytest.mark.parametrize(
+	"override, message",
+	[
+		("network.feature_set=dex", "needs network.features = true"),
+		("network.feature_set=sparse", "must be one of"),
+	],
+)
+def test_invalid_feature_sets_are_errors(override, message):
+	with pytest.raises(ConfigError, match=message):
+		load_config(None, [override])

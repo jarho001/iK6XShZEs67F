@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="840" height="444" viewBox="0 0 840 444" role="img">
+<title>Feature ablations: win rate against heuristics (sampled actions)</title>
+<style>text { font-family: system-ui, "Segoe UI", sans-serif; } .line { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; } .train { fill: none; stroke-width: 1.25; stroke-linecap: round; stroke-linejoin: round; opacity: 0.5; } .surface { fill: #fcfcfb; } .primary { fill: #0b0b0b; } .secondary { fill: #52514e; } .muted { fill: #898781; } .grid { stroke: #e1e0d9; stroke-width: 1; } .axis { stroke: #c3c2b7; stroke-width: 1; } .ring { stroke: #fcfcfb; stroke-width: 2; } .ref { stroke: #898781; stroke-width: 1.5; stroke-dasharray: 6 4; } .k0 { stroke: #2a78d6; } .f0 { fill: #2a78d6; } .k1 { stroke: #eb6834; } .f1 { fill: #eb6834; } .k2 { stroke: #1baf7a; } .f2 { fill: #1baf7a; } .k3 { stroke: #eda100; } .f3 { fill: #eda100; } .k4 { stroke: #e87ba4; } .f4 { fill: #e87ba4; } .k5 { stroke: #008300; } .f5 { fill: #008300; } .k6 { stroke: #6250d6; } .f6 { fill: #6250d6; } .k7 { stroke: #e34948; } .f7 { fill: #e34948; } @media (prefers-color-scheme: dark) { .surface { fill: #1a1a19; } .primary { fill: #f0efec; } .secondary { fill: #c3c2b7; } .muted { fill: #898781; } .grid { stroke: #2c2c2a; stroke-width: 1; } .axis { stroke: #383835; stroke-width: 1; } .ring { stroke: #1a1a19; stroke-width: 2; } .ref { stroke: #898781; stroke-width: 1.5; stroke-dasharray: 6 4; } .k0 { stroke: #3987e5; } .f0 { fill: #3987e5; } .k1 { stroke: #d95926; } .f1 { fill: #d95926; } .k2 { stroke: #199e70; } .f2 { fill: #199e70; } .k3 { stroke: #c98500; } .f3 { fill: #c98500; } .k4 { stroke: #d55181; } .f4 { fill: #d55181; } .k5 { stroke: #0ca30c; } .f5 { fill: #0ca30c; } .k6 { stroke: #9085e9; } .f6 { fill: #9085e9; } .k7 { stroke: #e66767; } .f7 { fill: #e66767; } }</style>
+<rect width="840" height="444" class="surface"/>
+<text x="72" y="26" font-size="15" font-weight="600" class="primary">Feature ablations: win rate against heuristics (sampled actions)</text>
+<line x1="72" y1="54" x2="90" y2="54" class="line k0"/>
+<circle cx="81" cy="54" r="4" class="f0 ring"/>
+<text x="98" y="58" font-size="12" class="primary">exp-f4</text>
+<line x1="163.2" y1="54" x2="181.2" y2="54" class="line k1"/>
+<circle cx="172.2" cy="54" r="4" class="f1 ring"/>
+<text x="189.2" y="58" font-size="12" class="primary">abl-a</text>
+<line x1="247.2" y1="54" x2="265.2" y2="54" class="line k2"/>
+<circle cx="256.2" cy="54" r="4" class="f2 ring"/>
+<text x="273.2" y="58" font-size="12" class="primary">abl-b</text>
+<line x1="331.2" y1="54" x2="349.2" y2="54" class="line k3"/>
+<circle cx="340.2" cy="54" r="4" class="f3 ring"/>
+<text x="357.2" y="58" font-size="12" class="primary">abl-b2</text>
+<line x1="422.4" y1="54" x2="440.4" y2="54" class="line k4"/>
+<circle cx="431.4" cy="54" r="4" class="f4 ring"/>
+<text x="448.4" y="58" font-size="12" class="primary">selfplay</text>
+<line x1="72" y1="382.0" x2="700" y2="382.0" class="grid"/>
+<text x="64" y="386.0" font-size="11" text-anchor="end" class="secondary">0%</text>
+<line x1="72" y1="344.5" x2="700" y2="344.5" class="grid"/>
+<text x="64" y="348.5" font-size="11" text-anchor="end" class="secondary">10%</text>
+<line x1="72" y1="307.0" x2="700" y2="307.0" class="grid"/>
+<text x="64" y="311.0" font-size="11" text-anchor="end" class="secondary">20%</text>
+<line x1="72" y1="269.5" x2="700" y2="269.5" class="grid"/>
+<text x="64" y="273.5" font-size="11" text-anchor="end" class="secondary">30%</text>
+<line x1="72" y1="232.0" x2="700" y2="232.0" class="grid"/>
+<text x="64" y="236.0" font-size="11" text-anchor="end" class="secondary">40%</text>
+<line x1="72" y1="194.5" x2="700" y2="194.5" class="grid"/>
+<text x="64" y="198.5" font-size="11" text-anchor="end" class="secondary">50%</text>
+<line x1="72" y1="157.0" x2="700" y2="157.0" class="grid"/>
+<text x="64" y="161.0" font-size="11" text-anchor="end" class="secondary">60%</text>
+<line x1="72" y1="119.5" x2="700" y2="119.5" class="grid"/>
+<text x="64" y="123.5" font-size="11" text-anchor="end" class="secondary">70%</text>
+<line x1="72" y1="82.0" x2="700" y2="82.0" class="grid"/>
+<text x="64" y="86.0" font-size="11" text-anchor="end" class="secondary">80%</text>
+<line x1="72" y1="157.0" x2="700" y2="157.0" class="ref"/>
+<text x="696" y="151.0" font-size="11" text-anchor="end" class="muted">60%</text>
+<text x="72.0" y="400" font-size="11" text-anchor="middle" class="secondary">0</text>
+<text x="197.6" y="400" font-size="11" text-anchor="middle" class="secondary">500</text>
+<text x="323.2" y="400" font-size="11" text-anchor="middle" class="secondary">1,000</text>
+<text x="448.8" y="400" font-size="11" text-anchor="middle" class="secondary">1,500</text>
+<text x="574.4" y="400" font-size="11" text-anchor="middle" class="secondary">2,000</text>
+<text x="700.0" y="400" font-size="11" text-anchor="middle" class="secondary">2,500</text>
+<line x1="72" y1="382" x2="700" y2="382" class="axis"/>
+<text x="386.0" y="424" font-size="12" text-anchor="middle" class="secondary">training update</text>
+<text transform="translate(16 232.0) rotate(-90)" font-size="12" text-anchor="middle" class="secondary">win rate (%)</text>
+<polyline points="97.1,165.2 122.2,147.6 147.4,138.5 172.5,135.2 197.6,130.4 222.7,131.9 247.8,127.1 273.0,116.9 298.1,122.0 323.2,113.9 348.3,110.3 373.4,116.5" class="line k0"/>
+<circle cx="97.1" cy="165.2" r="4" class="f0 ring"><title>exp-f4, update 100: 57.81% against heuristics (sampled, 1,024 battles, 95% CI 54.76 to 60.80)</title></circle>
+<circle cx="122.2" cy="147.6" r="4" class="f0 ring"><title>exp-f4, update 200: 62.50% against heuristics (sampled, 1,024 battles, 95% CI 59.49 to 65.41)</title></circle>
+<circle cx="147.4" cy="138.5" r="4" class="f0 ring"><title>exp-f4, update 300: 64.94% against heuristics (sampled, 1,024 battles, 95% CI 61.97 to 67.80)</title></circle>
+<circle cx="172.5" cy="135.2" r="4" class="f0 ring"><title>exp-f4, update 400: 65.82% against heuristics (sampled, 1,024 battles, 95% CI 62.86 to 68.66)</title></circle>
+<circle cx="197.6" cy="130.4" r="4" class="f0 ring"><title>exp-f4, update 500: 67.09% against heuristics (sampled, 1,024 battles, 95% CI 64.15 to 69.90)</title></circle>
+<circle cx="222.7" cy="131.9" r="4" class="f0 ring"><title>exp-f4, update 600: 66.70% against heuristics (sampled, 1,024 battles, 95% CI 63.75 to 69.52)</title></circle>
+<circle cx="247.8" cy="127.1" r="4" class="f0 ring"><title>exp-f4, update 700: 67.97% against heuristics (sampled, 1,024 battles, 95% CI 65.05 to 70.75)</title></circle>
+<circle cx="273.0" cy="116.9" r="4" class="f0 ring"><title>exp-f4, update 800: 70.70% against heuristics (sampled, 1,024 battles, 95% CI 67.84 to 73.41)</title></circle>
+<circle cx="298.1" cy="122.0" r="4" class="f0 ring"><title>exp-f4, update 900: 69.34% against heuristics (sampled, 1,024 battles, 95% CI 66.44 to 72.08)</title></circle>
+<circle cx="323.2" cy="113.9" r="4" class="f0 ring"><title>exp-f4, update 1,000: 71.48% against heuristics (sampled, 1,024 battles, 95% CI 68.64 to 74.17)</title></circle>
+<circle cx="348.3" cy="110.3" r="4" class="f0 ring"><title>exp-f4, update 1,100: 72.46% against heuristics (sampled, 1,024 battles, 95% CI 69.64 to 75.11)</title></circle>
+<circle cx="373.4" cy="116.5" r="4" class="f0 ring"><title>exp-f4, update 1,200: 70.80% against heuristics (sampled, 1,024 battles, 95% CI 67.94 to 73.50)</title></circle>
+<polyline points="97.1,332.9 122.2,298.5 147.4,287.9 172.5,285.7 197.6,289.0 222.7,286.4 247.8,279.1 273.0,276.5 298.1,274.7 323.2,272.9 348.3,268.8 373.4,274.3" class="line k1"/>
+<circle cx="97.1" cy="332.9" r="4" class="f1 ring"><title>abl-a, update 100: 13.09% against heuristics (sampled, 1,024 battles, 95% CI 11.16 to 15.29)</title></circle>
+<circle cx="122.2" cy="298.5" r="4" class="f1 ring"><title>abl-a, update 200: 22.27% against heuristics (sampled, 1,024 battles, 95% CI 19.82 to 24.91)</title></circle>
+<circle cx="147.4" cy="287.9" r="4" class="f1 ring"><title>abl-a, update 300: 25.10% against heuristics (sampled, 1,024 battles, 95% CI 22.54 to 27.84)</title></circle>
+<circle cx="172.5" cy="285.7" r="4" class="f1 ring"><title>abl-a, update 400: 25.68% against heuristics (sampled, 1,024 battles, 95% CI 23.10 to 28.45)</title></circle>
+<circle cx="197.6" cy="289.0" r="4" class="f1 ring"><title>abl-a, update 500: 24.80% against heuristics (sampled, 1,024 battles, 95% CI 22.26 to 27.54)</title></circle>
+<circle cx="222.7" cy="286.4" r="4" class="f1 ring"><title>abl-a, update 600: 25.49% against heuristics (sampled, 1,024 battles, 95% CI 22.91 to 28.25)</title></circle>
+<circle cx="247.8" cy="279.1" r="4" class="f1 ring"><title>abl-a, update 700: 27.44% against heuristics (sampled, 1,024 battles, 95% CI 24.80 to 30.25)</title></circle>
+<circle cx="273.0" cy="276.5" r="4" class="f1 ring"><title>abl-a, update 800: 28.12% against heuristics (sampled, 1,024 battles, 95% CI 25.46 to 30.96)</title></circle>
+<circle cx="298.1" cy="274.7" r="4" class="f1 ring"><title>abl-a, update 900: 28.61% against heuristics (sampled, 1,024 battles, 95% CI 25.93 to 31.46)</title></circle>
+<circle cx="323.2" cy="272.9" r="4" class="f1 ring"><title>abl-a, update 1,000: 29.10% against heuristics (sampled, 1,024 battles, 95% CI 26.40 to 31.96)</title></circle>
+<circle cx="348.3" cy="268.8" r="4" class="f1 ring"><title>abl-a, update 1,100: 30.18% against heuristics (sampled, 1,024 battles, 95% CI 27.44 to 33.06)</title></circle>
+<circle cx="373.4" cy="274.3" r="4" class="f1 ring"><title>abl-a, update 1,200: 28.71% against heuristics (sampled, 1,024 battles, 95% CI 26.02 to 31.56)</title></circle>
+<polyline points="97.1,174.0 122.2,164.8 147.4,139.9 172.5,136.3 197.6,144.0 222.7,142.9 247.8,138.1 273.0,138.5 298.1,134.1 323.2,124.2 348.3,134.8 373.4,133.7" class="line k2"/>
+<circle cx="97.1" cy="174.0" r="4" class="f2 ring"><title>abl-b, update 100: 55.47% against heuristics (sampled, 1,024 battles, 95% CI 52.41 to 58.49)</title></circle>
+<circle cx="122.2" cy="164.8" r="4" class="f2 ring"><title>abl-b, update 200: 57.91% against heuristics (sampled, 1,024 battles, 95% CI 54.86 to 60.90)</title></circle>
+<circle cx="147.4" cy="139.9" r="4" class="f2 ring"><title>abl-b, update 300: 64.55% against heuristics (sampled, 1,024 battles, 95% CI 61.57 to 67.42)</title></circle>
+<circle cx="172.5" cy="136.3" r="4" class="f2 ring"><title>abl-b, update 400: 65.53% against heuristics (sampled, 1,024 battles, 95% CI 62.56 to 68.38)</title></circle>
+<circle cx="197.6" cy="144.0" r="4" class="f2 ring"><title>abl-b, update 500: 63.48% against heuristics (sampled, 1,024 battles, 95% CI 60.48 to 66.37)</title></circle>
+<circle cx="222.7" cy="142.9" r="4" class="f2 ring"><title>abl-b, update 600: 63.77% against heuristics (sampled, 1,024 battles, 95% CI 60.78 to 66.66)</title></circle>
+<circle cx="247.8" cy="138.1" r="4" class="f2 ring"><title>abl-b, update 700: 65.04% against heuristics (sampled, 1,024 battles, 95% CI 62.07 to 67.90)</title></circle>
+<circle cx="273.0" cy="138.5" r="4" class="f2 ring"><title>abl-b, update 800: 64.94% against heuristics (sampled, 1,024 battles, 95% CI 61.97 to 67.80)</title></circle>
+<circle cx="298.1" cy="134.1" r="4" class="f2 ring"><title>abl-b, update 900: 66.11% against heuristics (sampled, 1,024 battles, 95% CI 63.16 to 68.95)</title></circle>
+<circle cx="323.2" cy="124.2" r="4" class="f2 ring"><title>abl-b, update 1,000: 68.75% against heuristics (sampled, 1,024 battles, 95% CI 65.85 to 71.51)</title></circle>
+<circle cx="348.3" cy="134.8" r="4" class="f2 ring"><title>abl-b, update 1,100: 65.92% against heuristics (sampled, 1,024 battles, 95% CI 62.96 to 68.76)</title></circle>
+<circle cx="373.4" cy="133.7" r="4" class="f2 ring"><title>abl-b, update 1,200: 66.21% against heuristics (sampled, 1,024 battles, 95% CI 63.26 to 69.04)</title></circle>
+<polyline points="97.1,237.0 122.2,217.2 147.4,215.4 172.5,208.8 197.6,211.0 222.7,206.2 247.8,197.8 273.0,195.2 298.1,204.0 323.2,197.4 348.3,189.0 373.4,193.8" class="line k3"/>
+<circle cx="97.1" cy="237.0" r="4" class="f3 ring"><title>abl-b2, update 100: 38.67% against heuristics (sampled, 1,024 battles, 95% CI 35.74 to 41.69)</title></circle>
+<circle cx="122.2" cy="217.2" r="4" class="f3 ring"><title>abl-b2, update 200: 43.95% against heuristics (sampled, 1,024 battles, 95% CI 40.93 to 47.00)</title></circle>
+<circle cx="147.4" cy="215.4" r="4" class="f3 ring"><title>abl-b2, update 300: 44.43% against heuristics (sampled, 1,024 battles, 95% CI 41.42 to 47.49)</title></circle>
+<circle cx="172.5" cy="208.8" r="4" class="f3 ring"><title>abl-b2, update 400: 46.19% against heuristics (sampled, 1,024 battles, 95% CI 43.16 to 49.25)</title></circle>
+<circle cx="197.6" cy="211.0" r="4" class="f3 ring"><title>abl-b2, update 500: 45.61% against heuristics (sampled, 1,024 battles, 95% CI 42.58 to 48.67)</title></circle>
+<circle cx="222.7" cy="206.2" r="4" class="f3 ring"><title>abl-b2, update 600: 46.88% against heuristics (sampled, 1,024 battles, 95% CI 43.84 to 49.94)</title></circle>
+<circle cx="247.8" cy="197.8" r="4" class="f3 ring"><title>abl-b2, update 700: 49.12% against heuristics (sampled, 1,024 battles, 95% CI 46.07 to 52.18)</title></circle>
+<circle cx="273.0" cy="195.2" r="4" class="f3 ring"><title>abl-b2, update 800: 49.80% against heuristics (sampled, 1,024 battles, 95% CI 46.75 to 52.86)</title></circle>
+<circle cx="298.1" cy="204.0" r="4" class="f3 ring"><title>abl-b2, update 900: 47.46% against heuristics (sampled, 1,024 battles, 95% CI 44.42 to 50.52)</title></circle>
+<circle cx="323.2" cy="197.4" r="4" class="f3 ring"><title>abl-b2, update 1,000: 49.22% against heuristics (sampled, 1,024 battles, 95% CI 46.17 to 52.28)</title></circle>
+<circle cx="348.3" cy="189.0" r="4" class="f3 ring"><title>abl-b2, update 1,100: 51.46% against heuristics (sampled, 1,024 battles, 95% CI 48.40 to 54.51)</title></circle>
+<circle cx="373.4" cy="193.8" r="4" class="f3 ring"><title>abl-b2, update 1,200: 50.20% against heuristics (sampled, 1,024 battles, 95% CI 47.14 to 53.25)</title></circle>
+<polyline points="97.1,341.4 122.2,347.2 147.4,326.7 172.5,304.4 197.6,291.9 222.7,287.9 247.8,283.1 273.0,285.0 298.1,276.5 323.2,280.6 348.3,278.0 373.4,272.5 398.6,272.9 423.7,275.4 448.8,278.4 473.9,276.2 499.0,273.2 524.2,264.4 549.3,272.1 574.4,260.1 599.5,268.1 624.6,266.6" class="line k4"/>
+<circle cx="97.1" cy="341.4" r="4" class="f4 ring"><title>selfplay, update 100: 10.84% against heuristics (sampled, 1,024 battles, 95% CI 9.08 to 12.89)</title></circle>
+<circle cx="122.2" cy="347.2" r="4" class="f4 ring"><title>selfplay, update 200: 9.28% against heuristics (sampled, 1,024 battles, 95% CI 7.65 to 11.21)</title></circle>
+<circle cx="147.4" cy="326.7" r="4" class="f4 ring"><title>selfplay, update 300: 14.75% against heuristics (sampled, 1,024 battles, 95% CI 12.71 to 17.05)</title></circle>
+<circle cx="172.5" cy="304.4" r="4" class="f4 ring"><title>selfplay, update 400: 20.70% against heuristics (sampled, 1,024 battles, 95% CI 18.33 to 23.29)</title></circle>
+<circle cx="197.6" cy="291.9" r="4" class="f4 ring"><title>selfplay, update 500: 24.02% against heuristics (sampled, 1,024 battles, 95% CI 21.51 to 26.73)</title></circle>
+<circle cx="222.7" cy="287.9" r="4" class="f4 ring"><title>selfplay, update 600: 25.10% against heuristics (sampled, 1,024 battles, 95% CI 22.54 to 27.84)</title></circle>
+<circle cx="247.8" cy="283.1" r="4" class="f4 ring"><title>selfplay, update 700: 26.37% against heuristics (sampled, 1,024 battles, 95% CI 23.76 to 29.15)</title></circle>
+<circle cx="273.0" cy="285.0" r="4" class="f4 ring"><title>selfplay, update 800: 25.88% against heuristics (sampled, 1,024 battles, 95% CI 23.29 to 28.65)</title></circle>
+<circle cx="298.1" cy="276.5" r="4" class="f4 ring"><title>selfplay, update 900: 28.12% against heuristics (sampled, 1,024 battles, 95% CI 25.46 to 30.96)</title></circle>
+<circle cx="323.2" cy="280.6" r="4" class="f4 ring"><title>selfplay, update 1,000: 27.05% against heuristics (sampled, 1,024 battles, 95% CI 24.42 to 29.85)</title></circle>
+<circle cx="348.3" cy="278.0" r="4" class="f4 ring"><title>selfplay, update 1,100: 27.73% against heuristics (sampled, 1,024 battles, 95% CI 25.08 to 30.56)</title></circle>
+<circle cx="373.4" cy="272.5" r="4" class="f4 ring"><title>selfplay, update 1,200: 29.20% against heuristics (sampled, 1,024 battles, 95% CI 26.50 to 32.06)</title></circle>
+<circle cx="398.6" cy="272.9" r="4" class="f4 ring"><title>selfplay, update 1,300: 29.10% against heuristics (sampled, 1,024 battles, 95% CI 26.40 to 31.96)</title></circle>
+<circle cx="423.7" cy="275.4" r="4" class="f4 ring"><title>selfplay, update 1,400: 28.42% against heuristics (sampled, 1,024 battles, 95% CI 25.74 to 31.26)</title></circle>
+<circle cx="448.8" cy="278.4" r="4" class="f4 ring"><title>selfplay, update 1,500: 27.64% against heuristics (sampled, 1,024 battles, 95% CI 24.99 to 30.46)</title></circle>
+<circle cx="473.9" cy="276.2" r="4" class="f4 ring"><title>selfplay, update 1,600: 28.22% against heuristics (sampled, 1,024 battles, 95% CI 25.55 to 31.06)</title></circle>
+<circle cx="499.0" cy="273.2" r="4" class="f4 ring"><title>selfplay, update 1,700: 29.00% against heuristics (sampled, 1,024 battles, 95% CI 26.31 to 31.86)</title></circle>
+<circle cx="524.2" cy="264.4" r="4" class="f4 ring"><title>selfplay, update 1,800: 31.35% against heuristics (sampled, 1,024 battles, 95% CI 28.58 to 34.25)</title></circle>
+<circle cx="549.3" cy="272.1" r="4" class="f4 ring"><title>selfplay, update 1,900: 29.30% against heuristics (sampled, 1,024 battles, 95% CI 26.59 to 32.16)</title></circle>
+<circle cx="574.4" cy="260.1" r="4" class="f4 ring"><title>selfplay, update 2,000: 32.52% against heuristics (sampled, 1,024 battles, 95% CI 29.72 to 35.45)</title></circle>
+<circle cx="599.5" cy="268.1" r="4" class="f4 ring"><title>selfplay, update 2,100: 30.37% against heuristics (sampled, 1,024 battles, 95% CI 27.63 to 33.26)</title></circle>
+<circle cx="624.6" cy="266.6" r="4" class="f4 ring"><title>selfplay, update 2,200: 30.76% against heuristics (sampled, 1,024 battles, 95% CI 28.01 to 33.66)</title></circle>
+</svg>

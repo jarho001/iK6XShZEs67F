@@ -1,11 +1,18 @@
 """Checkpoints: a round trip keeps every leaf, and a resumed run continues bit for bit on the CPU."""
 
+import json
+
 import jax
 import numpy as np
 import pytest
 from train_support import league_config
 
-from pokejax.train.checkpoint import CheckpointError, load_checkpoint, save_checkpoint
+from pokejax.train.checkpoint import (
+	CONFIG_ENTRY,
+	CheckpointError,
+	load_checkpoint,
+	save_checkpoint,
+)
 
 pytestmark = [pytest.mark.xdist_group("train"), pytest.mark.usefixtures("cpu_only")]
 
@@ -61,3 +68,20 @@ def test_the_pool_schedule_is_part_of_the_configuration(league_trainer, tmp_path
 	save_checkpoint(path, league_trainer.init(), league_trainer.config)
 	with pytest.raises(CheckpointError, match="different configuration"):
 		load_checkpoint(path, league_trainer.init(), league_config("pool.every=2"))
+
+
+def test_a_checkpoint_written_before_feature_set_still_resumes(league_trainer, tmp_path):
+	"""Checkpoints from before network.feature_set do not name the key; it reads as "full"."""
+	learner, _ = league_trainer.update(league_trainer.init())
+	path = tmp_path / "checkpoint.npz"
+	save_checkpoint(path, learner, league_trainer.config)
+	with np.load(path, allow_pickle=False) as data:
+		arrays = {name: data[name] for name in data.files}
+	saved = json.loads(str(arrays[CONFIG_ENTRY]))
+	del saved["network"]["feature_set"]
+	arrays[CONFIG_ENTRY] = np.array(json.dumps(saved, sort_keys=True))
+	old = tmp_path / "old.npz"
+	np.savez(old, **arrays)
+	loaded = load_checkpoint(old, league_trainer.init(), league_trainer.config)
+	for expected, actual in zip(as_numpy(learner), as_numpy(loaded), strict=True):
+		np.testing.assert_array_equal(expected, actual)

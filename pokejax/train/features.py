@@ -19,6 +19,11 @@ For a batch of observations with leading axes [...]:
 - threat [...]: the largest damage estimate of the opponent's revealed moves against the active
   member, as the damage of power x STAB x effectiveness divided by THREAT_SCALE.
 - the switch features carry the threat of each bench member.
+
+network.feature_set picks the columns that enter the network (FEATURE_LAYOUTS). Dropped columns
+are sliced off the outputs, so the network never sees them: "dex" leaves out the max-damage scores
+(move columns 10 and 11), the switches' matchup columns (4 to 7) and the active member's threat;
+"dex-no-matchup" also leaves out the switches' offence and defence (2 and 3).
 """
 
 import functools
@@ -54,6 +59,34 @@ HIDDEN_POWER = 70.0
 # Damage estimate scale of the threat feature (power x STAB x effectiveness).
 THREAT_SCALE = 200.0
 STAB_MULTIPLIER = 1.5
+
+
+class FeatureLayout(NamedTuple):
+	"""The inputs a feature set feeds the network, by column (network.feature_set)."""
+
+	move: tuple[int, ...]  # move feature columns, in order
+	switch: tuple[int, ...]  # switch feature columns, in order
+	threat: bool  # whether the threat of the active member is fed
+
+
+FEATURE_LAYOUTS = {
+	"full": FeatureLayout(tuple(range(MOVE_FEATURES)), tuple(range(SWITCH_FEATURES)), True),
+	"dex": FeatureLayout(tuple(range(10)), (0, 1, 2, 3), False),
+	"dex-no-matchup": FeatureLayout(tuple(range(10)), (0, 1), False),
+}
+
+
+def feature_widths(feature_set: str) -> tuple[int, int, int]:
+	"""The widths of a feature set's move, switch and threat inputs (the threat is 0 or 1)."""
+	layout = FEATURE_LAYOUTS[feature_set]
+	return len(layout.move), len(layout.switch), int(layout.threat)
+
+
+def _columns(x, columns: tuple[int, ...]):
+	"""The columns of the last axis of x, in order (x itself when they are all of them)."""
+	if columns == tuple(range(x.shape[-1])):
+		return x
+	return jnp.take(x, jnp.asarray(columns, jnp.int32), axis=-1)
 
 
 class PublicTables(NamedTuple):
@@ -117,8 +150,12 @@ def _type_index(code, none):
 	return jnp.where(code > 0, code - 1, none)
 
 
-def action_features(obs, tables: PublicTables):
-	"""(move features [..., 4, 12], switch features [..., 5, 8], threat of the active [...])."""
+def action_features(obs, tables: PublicTables, feature_set: str = "full"):
+	"""(move features [..., 4, M], switch features [..., 5, S], threat of the active [...] or None).
+
+	M and S are the widths of the feature set's columns (feature_widths), and the threat is None
+	for a set without it. The default set is every column.
+	"""
 	own, foe = obs.own, obs.opponent
 	f32, i32 = jnp.float32, jnp.int32
 	chart = jnp.asarray(tables.chart)
@@ -259,4 +296,6 @@ def action_features(obs, tables: PublicTables):
 		],
 		axis=-1,
 	)
-	return move_features, switch_features, threat_active
+	layout = FEATURE_LAYOUTS[feature_set]
+	threat = threat_active if layout.threat else None
+	return _columns(move_features, layout.move), _columns(switch_features, layout.switch), threat

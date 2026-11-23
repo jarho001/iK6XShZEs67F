@@ -386,6 +386,26 @@ the Pokemon's IVs, which the observation does not carry, so the features count i
 power 70. The max-damage scores agree with the baseline to 1e-4 everywhere else (checked on real battles).
 The evaluation battles use fixed keys, so every checkpoint of a run plays the same battles.
 
+### Feature ablations
+
+Question: how much of the Phase 4 result comes from the two kinds of column the owner asked about, the max-damage score of each move and poke-env's matchup estimate of each switch? Four runs of E4 differ only in the network's inputs. A has no public features and the dense head (the network of E0). `dex` (B) keeps the move table and the public types, and each switch's legality, HP, offence and defence estimates; it drops the max-damage scores, the speed, matchup and threat columns and the active member's threat. `dex-no-matchup` (B2) also drops the switches' offence and defence. The inputs are chosen by `network.feature_set` (`full` by default, so no existing configuration changed; the columns are in `pokejax/train/features.py`). Each run is 1,200 updates with the settings of E4 (the E3 opponent shares, learning rate 1e-3 decaying to 1e-4, 1,024 rows, rollouts of 64 steps, seed 0), evaluated every 100 updates with 1,024 battles and finally with 4,096 battles per row. The configurations are `work/codex/exp/abl-a.toml`, `abl-b.toml` and `abl-b2.toml`; the run directories `work/runs/abl-a`, `abl-b` and `abl-b2` (outside git). C is E4 itself (`work/runs/exp-f4`, not rerun), and E0 (`work/runs/selfplay`) is shown for reference with its own settings.
+
+| Run | Inputs | Final vs max-damage, 4,096 battles: sampled / greedy (95% Wilson interval) | Final vs heuristics | Final vs random-move | Final vs random | Max-damage at 300 / 600 / 1,000 / 1,200 (sampled / greedy) | Training minutes | Parameters |
+|---|---|---|---|---|---|---|---:|---:|
+| A (`abl-a`) | none, dense head | 32.03 (30.62 to 33.48) / 32.84 (31.42 to 34.29) | 31.18 (29.78 to 32.61) / 31.57 (30.16 to 33.01) | 80.27 (79.03 to 81.46) / 81.76 (80.55 to 82.92) | 97.24 (96.69 to 97.70) / 98.46 (98.04 to 98.80) | 27.93 / 25.59 · 26.27 / 28.81 · 28.81 / 29.49 · 30.27 / 33.50 | 17.9 | 686,882 |
+| B (`abl-b`) | `dex` (move table, public types, PP, HP; switch legal and HP, offence, defence), factored head | 70.85 (69.44 to 72.22) / 74.51 (73.15 to 75.82) | 68.97 (67.54 to 70.37) / 71.75 (70.35 to 73.11) | 93.99 (93.22 to 94.68) / 94.80 (94.08 to 95.44) | 99.22 (98.90 to 99.45) / 99.54 (99.28 to 99.70) | 64.55 / 68.75 · 65.23 / 68.36 · 67.87 / 72.27 · 69.92 / 73.93 | 21.4 | 733,851 |
+| B2 (`abl-b2`) | `dex-no-matchup` (as B, switch legal and HP only), factored head | 54.47 (52.94 to 55.99) / 56.67 (55.14 to 58.18) | 53.42 (51.89 to 54.94) / 55.15 (53.62 to 56.67) | 92.21 (91.35 to 92.99) / 90.82 (89.90 to 91.67) | 98.85 (98.48 to 99.14) / 99.37 (99.07 to 99.57) | 45.41 / 48.14 · 48.44 / 51.95 · 50.20 / 53.03 · 52.34 / 55.08 | 22.4 | 731,163 |
+| C = E4 (`exp-f4`) | all columns (max-damage scores, matchup estimates, threat), factored head | 74.93 (73.58 to 76.23) / 77.20 (75.89 to 78.46) | 72.24 (70.85 to 73.59) / 74.29 (72.93 to 75.61) | 95.26 (94.57 to 95.87) / 95.36 (94.67 to 95.96) | 99.17 (98.84 to 99.41) / 99.34 (99.04 to 99.55) | 66.99 / 67.09 · 69.63 / 70.70 · 73.93 / 75.59 · 74.80 / 76.46 | 21.1 | 741,659 |
+| E0, reference (`selfplay`) | none, dense head; its own settings (2,200 updates, lr 3e-4 to 3e-5) | 31.86 (30.45 to 33.30) / 32.10 (30.69 to 33.55) | 30.88 (29.49 to 32.32) / 31.93 (30.52 to 33.38) | 81.69 (80.48 to 82.84) / 82.35 (81.15 to 83.49) | 97.61 (97.09 to 98.03) / 97.83 (97.33 to 98.23) | 14.75 / 15.82 · 27.05 / 27.54 · 28.32 / 30.08 · 29.30 / 28.81 | 30.6 | 686,882 |
+
+![Win rate against max-damage over training for C, A, B, B2 and E0](docs/ablation-max-damage.svg)
+
+![Win rate against heuristics over training for C, A, B, B2 and E0](docs/ablation-heuristics.svg)
+
+The points are evaluations (1,024 battles, sampled actions); the dashed line is 60%. Colours are fixed per run: C (`exp-f4`) blue, A (`abl-a`) orange, B (`abl-b`) aqua, B2 (`abl-b2`) yellow and E0 (`selfplay`) magenta. No run is still rising beyond the noise at 1,200 updates: the last three evaluation points against max-damage (sampled, 1,000 / 1,100 / 1,200) are A 28.8, 30.3, 30.3; B 67.9, 67.5, 69.9; B2 50.2, 54.1, 52.3; C 73.9, 72.1, 74.8.
+
+Without the public features, on the dense head, the agent stays at about 32% against max-damage (E0: 31.9%), against 54.5% with the move and type inputs alone (B2) and 70.9% with the switch offence and defence estimates too (B). The max-damage scores and the other estimate columns add about 4 points more (C, 74.9%), and the switch offence and defence estimates add about 16 on top of the move and type inputs (B over B2). A and B also differ in the action head, and each arm is one seed, so these are the sizes of the effects, not a clean split between inputs and head.
+
 ### Phase 5 results
 
 The Phase 4 checkpoint (`work/runs/rtx3060ti`) played in the pinned local Showdown simulator through
