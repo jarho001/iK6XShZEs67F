@@ -351,7 +351,9 @@ their outputs stay outside git.
    the README.
 
 Exit: beats max-damage in well over half of evaluation games, and the
-training curve is still improving.
+training curve is still improving. Reached with hand-made features; the
+owner considers that heuristics rather than learning, so Phase 6 sets a
+stricter exit for a learned network.
 
 ### Phase 5: transfer to real Showdown
 
@@ -386,10 +388,77 @@ each baseline, with at least 4,000 battles on each side. A large gap means
 an engine or observation bug; find it with the whole-battle statistics and
 fix it before more training.
 
-### Phase 6: final training
+### Phase 6: a network that learns the game
+
+Phase 4 reached its exit with hand-made features (features.py: type
+effectiveness, STAB, max-damage scores, matchup estimates). Without them
+the same network stalls at about 30% against max-damage (README, Feature
+ablations), and with them the curve flattens early. The owner wants an agent
+that learns type relations and tactics itself and keeps improving with more
+compute. Designs: work/codex/design-sol.md and design-opus.md (outside git).
+
+Input rules for this phase and after:
+- Network inputs are the player-view observation and static dex columns
+  (power, accuracy, type, category, priority, base stats, types). Public
+  protocol facts stay allowed, including the effectiveness event ("It's
+  super effective") of the last step. Not allowed: anything computed from
+  the type chart (effectiveness, STAB-effectiveness products, immunities),
+  damage estimates, stat ratios or matchup scores.
+- Hidden values (the opponent's next action, item, ability, moves) may be
+  training targets of auxiliary losses, never inputs. A test shows that
+  policy, value and recurrent state are identical for identical public
+  histories with different hidden state.
+
+Tasks, in order. Each is one commit with its tests; runs stay outside git.
+
+1. Fixes from the outside review (work/codex/review-sol.md) that would
+   distort the comparison: Illusion level after a silent switch-out, Flame
+   Body after a Substitute hit, Bad Dreams order, Arena Trap knowledge after
+   Mummy (engine, observation and bridge), shaping at truncation, the
+   evaluation count of a partial batch, held retries advancing the waiting
+   side's recurrent state, pool replacement mid-battle, resume keeping its
+   learning-rate horizon and checking the team pool, NaN in the observation
+   differential, the FLOP label. Own moves carry their real Hidden Power
+   type and Return power, as the Showdown request shows them, in the
+   engine and the bridge. Engine fixes come with differential cases.
+2. Pairwise network and screening: shared public descriptors with learned
+   type embeddings; a clean control (same inputs, per-action scorers, no
+   pair module); a pairwise network where each own move meets the opposing
+   active and each opposing move meets each own member; auxiliary targets
+   (opponent's next action, hidden item, ability and moves); a type probe
+   (a linear read-out of the chart multiplier from frozen representations,
+   held-out species and moves). Short runs on the 3060 Ti at equal steps
+   with the Phase 4 league and schedule.
+3. Recurrent roster transformer: field, twelve members, four move
+   candidates and two event tokens, self-attention, GRU on the field token,
+   the same targets and screening against the winner of task 2.
+4. Long run of the winner on the 3060 Ti to the exit, README results.
+   Training-mix changes (opponent shares, pool length, PPO epochs) are
+   tested here, one at a time, only after the architecture is chosen.
+
+Exit, one training seed, evaluations of 4,096 battles (sampled policy,
+greedy reported too):
+- at least 60% against max-damage and against heuristics, with the lower
+  bound of each 95% interval above 55%;
+- at least 55% against its own checkpoint from two thirds of the run;
+- still improving: on a fixed panel (the four baselines and two fixed
+  earlier checkpoints, equal weights, paired team draws), the checkpoint at
+  2X environment steps beats the one at X by at least 2 points with a
+  positive 95% interval, X chosen before the run (for example 80M);
+- the run fits in 12 hours on the 3060 Ti;
+- a test that changing the type chart table does not change the network's
+  inputs (only the battles it plays);
+- the Phase 5 transfer check on the promoted checkpoint: within 3 points
+  per baseline, at least 4,000 battles each.
+
+### Phase 7: final training
 
 Long runs on the RTX 6000 cards, then evaluation on the Showdown ladder or
-against published bots, as the owner decides.
+against published bots, as the owner decides. Measure strength per compute
+doubling on a frozen panel (baselines, earlier checkpoints, the other
+architectures from Phase 6) with the cross-play matrix, on teams held out
+from training; stop a scale-up when two doublings in a row bring no
+meaningful gain.
 
 ## Later: forward search
 
