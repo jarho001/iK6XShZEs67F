@@ -460,6 +460,19 @@ architectures from Phase 6) with the cross-play matrix, on teams held out
 from training; stop a scale-up when two doublings in a row bring no
 meaningful gain.
 
+Tasks, in order:
+
+1. Lab kit for the Phase 6 network: the unattended kit (lab/) runs the
+   pairwise network on both RTX 6000 cards for a time budget, one training
+   arm per GPU (default: the Phase 6 network at a larger batch, and a wider
+   one), keeps checkpoints at doubling step counts, and evaluates them on a
+   fixed panel with the Phase 6 reference checkpoints and a cross-play
+   matrix. Built on the lab machine without a prebuilt image. Check: the
+   smoke mode runs on the 3060 Ti.
+2. The lab run and its analysis: strength per compute doubling for each
+   arm, README results, the choice of the model for the external test.
+3. The external test (ladder or published bots), when the owner decides.
+
 ## Later: forward search
 
 The owner wants forward search on top of the trained policy eventually. It is
