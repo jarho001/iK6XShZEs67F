@@ -12,6 +12,7 @@ from pokejax.train.ppo import Trainer
 
 ROSTER = (
 	"network.width=8",
+	"network.feed_forward_width=12",
 	"network.pair_width=6",
 	"network.interaction_width=3",
 	"network.context_width=16",
@@ -93,11 +94,12 @@ def test_the_splits_hold_out_species_moves_and_dual_pairings():
 		assert result[name]["rows"] + result[name]["train_rows"] == count
 
 
+@pytest.mark.parametrize("arch", ("pairwise", "transformer"))
 def test_the_probe_runs_on_a_small_checkpoint_and_on_the_initial_network(
-	tables, tmp_path_factory, cpu_only
+	tables, tmp_path_factory, cpu_only, arch
 ):
 	pool = write_pool(tmp_path_factory.mktemp("probe"), tables)
-	config = tiny_config("network.arch=pairwise", *ROSTER, *AUXILIARY)
+	config = tiny_config(f"network.arch={arch}", *ROSTER, *AUXILIARY)
 	trainer = Trainer(config, pool)
 	learner = trainer.init()
 	checkpoint = tmp_path_factory.mktemp("checkpoint") / "checkpoint.npz"
@@ -105,7 +107,7 @@ def test_the_probe_runs_on_a_small_checkpoint_and_on_the_initial_network(
 	report = probe.run_probe(
 		checkpoint, probe.read_config(checkpoint), battles=4, steps=6, seed=0, pool=pool
 	)
-	assert report["arch"] == "pairwise"
+	assert report["arch"] == arch
 	for name in ("trained", "random"):
 		assert set(report[name]) == {"species_and_moves", "dual_pairings"}
 	initial = probe.run_probe(None, config, battles=4, steps=6, seed=0, pool=pool)

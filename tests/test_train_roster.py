@@ -23,6 +23,7 @@ from pokejax.train.ppo import Trainer, merge_leading
 
 ROSTER = (
 	"network.width=8",
+	"network.feed_forward_width=12",
 	"network.pair_width=6",
 	"network.interaction_width=3",
 	"network.context_width=16",
@@ -37,7 +38,7 @@ AUXILIARY = (
 	"auxiliary.ability=0.01",
 	"auxiliary.moves=0.03",
 )
-ARCHS = ("control", "pairwise")
+ARCHS = ("control", "pairwise", "transformer")
 BATTLES = 4
 SEAT_ZERO = 0
 
@@ -128,9 +129,10 @@ def test_encode_then_step_is_the_whole_call_and_illegal_actions_get_no_mass(tabl
 	np.testing.assert_allclose(probabilities[:, 5:7].sum(axis=1), 1.0, atol=1e-6)
 
 
-def test_hidden_state_changes_neither_the_outputs_nor_the_carry(tables, battles):
+@pytest.mark.parametrize("arch", ("pairwise", "transformer"))
+def test_hidden_state_changes_neither_the_outputs_nor_the_carry(tables, battles, arch):
 	env, es, _ = battles
-	config = roster_config("pairwise", *AUXILIARY)
+	config = roster_config(arch, *AUXILIARY)
 	model, league = league_for(env, tables, config)
 	rows = np.arange(BATTLES)
 	foe = 1 - SEAT_ZERO
@@ -255,11 +257,12 @@ def test_auxiliary_terms_mask_ineligible_rows_and_finalize_to_rates(tables, batt
 	assert float(finalize_auxiliary(empty_metrics)["aux_kind_eligible"]) == 0.0
 
 
+@pytest.mark.parametrize("arch", ("pairwise", "transformer"))
 def test_truncation_values_are_read_only_where_a_battle_was_truncated(
-	tables, tmp_path_factory, cpu_only
+	tables, tmp_path_factory, cpu_only, arch
 ):
 	pool = write_pool(tmp_path_factory.mktemp("bootstrap"), tables)
-	trainer = Trainer(tiny_config(*ROSTER, *AUXILIARY, "network.arch=pairwise"), pool)
+	trainer = Trainer(tiny_config(*ROSTER, *AUXILIARY, f"network.arch={arch}"), pool)
 	learner = trainer.init()
 	_, traj = trainer.rollout(learner.params, learner.pool, learner.league)
 	assert bool(traj.truncated.any())
@@ -269,18 +272,20 @@ def test_truncation_values_are_read_only_where_a_battle_was_truncated(
 		merge_leading(traj.final_obs, 2),
 		merge_leading(traj.after, 2),
 	)
+	# The chunked bootstrap and the batched call sum in a different order: float32 rounding only.
 	np.testing.assert_allclose(
-		np.asarray(values), np.asarray(direct).reshape(values.shape), atol=1e-6
+		np.asarray(values), np.asarray(direct).reshape(values.shape), atol=1e-5
 	)
 	untruncated = traj._replace(truncated=jnp.zeros_like(traj.truncated))
 	assert not np.any(np.asarray(trainer.final_values(learner.params, untruncated)))
 
 
+@pytest.mark.parametrize("arch", ("pairwise", "transformer"))
 def test_an_update_with_the_auxiliary_heads_reports_finite_rates(
-	tables, tmp_path_factory, cpu_only
+	tables, tmp_path_factory, cpu_only, arch
 ):
 	pool = write_pool(tmp_path_factory.mktemp("update"), tables)
-	config = league_config("network.arch=pairwise", *ROSTER, *AUXILIARY, "run.updates=1")
+	config = league_config(f"network.arch={arch}", *ROSTER, *AUXILIARY, "run.updates=1")
 	trainer = Trainer(config, pool)
 	learner = trainer.init()
 	_, metrics = trainer.update(learner)
@@ -294,3 +299,35 @@ def test_an_update_with_the_auxiliary_heads_reports_finite_rates(
 	):
 		assert 0.0 <= values[name] <= 1.0, name
 	assert "aux_next_action_loss" in values and "aux_moves_loss" in values
+
+
+def test_attention_ignores_masked_keys_and_zeroes_masked_tokens():
+	"""Masked keys reach no valid token, and masked tokens come out as zero."""
+	block = roster.AttentionBlock(width=8, heads=2, feed_forward=12, activation="silu")
+	rng = np.random.default_rng(0)
+	x = jnp.asarray(rng.normal(size=(3, 6, 8)), jnp.float32)
+	valid = jnp.asarray([[True, True, True, False, True, False]] * 3)
+	params = block.init(jax.random.key(0), x, valid)["params"]
+	out = block.apply({"params": params}, x, valid)
+	scrambled = x.at[:, 3].set(50.0).at[:, 5].set(-50.0)
+	again = block.apply({"params": params}, scrambled, valid)
+	keep = np.asarray(valid)
+	np.testing.assert_allclose(np.asarray(again)[keep], np.asarray(out)[keep], atol=1e-6)
+	assert not np.any(np.asarray(out)[~keep])
+	assert not np.any(np.asarray(again)[~keep])
+
+
+def test_the_transformer_has_no_context_layer_and_reads_the_field_token(tables, battles):
+	_, _, timestep = battles
+	obs = side_zero(timestep)
+	config = roster_config("transformer")
+	model = PokePolicy(vocabulary(tables), config.network)
+	hidden = initial_carry(config.network, (BATTLES,))
+	params = model.init(jax.random.key(1), obs, hidden)["params"]["roster"]
+	assert "context" not in params and "context_norm" not in params
+	assert sorted(name for name in params if name.startswith("block_")) == [
+		"block_0",
+		"block_1",
+		"block_2",
+	]
+	assert params["core"]["input"]["kernel"].shape[0] == config.network.width

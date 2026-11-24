@@ -27,6 +27,16 @@ For one decision, with width d (network.width):
    pairwise), by a shared two-layer scorer per kind. The value is a two-layer head.
 5. Training-only auxiliary heads (auxiliary.py) read the foe active's vector and the normalised GRU
    output. They are separate outputs: nothing they compute enters the policy, the value or the carry.
+6. Transformer (network.arch = "transformer", design 2 of design-sol.md): the field, the twelve
+   members, the own active's four move slots and the two events are 19 tokens of width d, with the
+   same descriptors and projections as above. Pre-RMSNorm self-attention blocks (four heads, then a
+   SiLU feed-forward block, each with a residual) mix them, and a final RMSNorm ends them. A masked
+   token (an unseen foe member, an empty move slot) is never attended to and its output stays zero;
+   slot zero stays a token while it is legal, so a request with no move content keeps one. There are
+   no roster positions: a member's side and active flags are in its descriptor. The GRU reads the
+   field token. Each move and each bench member is scored from its own final token and the GRU
+   output, the value from the GRU output, and the auxiliary heads read the opposing active token and
+   the GRU output. The encoding and the carry keep the same layout.
 
 encode() returns one flat vector per decision: the GRU's projected input, the per-move and per-switch
 features, then the foe active vector (the auxiliary heads' input). step_full() reads it back. parts()
@@ -72,6 +82,7 @@ SCORER_WIDTH = 64
 VALUE_WIDTH = 64
 AUX_STEM_WIDTH = 64
 RMS_EPS = 1e-6
+MASKED_SCORE = -1e9  # the attention score of a masked key (its exponential is zero)
 
 
 class Dex(NamedTuple):
@@ -166,6 +177,46 @@ def _summary(vectors, present):
 	return mean, largest
 
 
+def _masked(x, valid):
+	"""x [..., T, d] with the rows where valid [..., T] is false set to zero."""
+	return x * valid[..., None].astype(x.dtype)
+
+
+class AttentionBlock(nn.Module):
+	"""A pre-normalised self-attention block, then a feed-forward block, each with a residual.
+
+	x is [..., T, width] and valid [..., T] (bool). A key with valid false takes no attention, and
+	every invalid token leaves the block as zero.
+	"""
+
+	width: int
+	heads: int
+	feed_forward: int
+	activation: str
+
+	@nn.compact
+	def __call__(self, x, valid):
+		act = ACTIVATIONS[self.activation]
+		head = self.width // self.heads
+		h = RMSNorm(name="attention_norm")(x)
+		query, key, value = jnp.split(nn.Dense(3 * self.width, name="qkv")(h), 3, axis=-1)
+		shape = x.shape[:-1] + (self.heads, head)
+		query, key, value = (t.reshape(shape) for t in (query, key, value))
+		scores = jnp.einsum("...qhe,...khe->...hqk", query, key) * head**-0.5
+		scores = jnp.where(valid[..., None, None, :], scores, MASKED_SCORE)
+		mixed = jnp.einsum("...hqk,...khe->...qhe", jax.nn.softmax(scores, axis=-1), value)
+		x = x + nn.Dense(self.width, name="attention_out")(mixed.reshape(x.shape))
+		h = RMSNorm(name="feed_forward_norm")(x)
+		h = act(nn.Dense(self.feed_forward, name="feed_forward_in")(h))
+		x = x + nn.Dense(self.width, name="feed_forward_out")(h)
+		return _masked(x, valid)
+
+
+# The attention blocks recompute their activations in the backward pass: a replay minibatch of the
+# transformer's replay minibatch does not fit the 3060 Ti in one allocation otherwise (README.md).
+RematAttentionBlock = nn.remat(AttentionBlock)
+
+
 class Parts(NamedTuple):
 	"""The intermediate vectors of a batch of decisions (leading axes [...])."""
 
@@ -216,6 +267,7 @@ class RosterNetwork(nn.Module):
 		self.field_proj = nn.Dense(width, name="field")
 		self.event_proj = nn.Dense(width, name="event")
 		self.pairwise = n.arch == "pairwise"
+		self.transformer = n.arch == "transformer"
 		if self.pairwise:
 			self.move_type_proj = nn.Dense(n.interaction_width, use_bias=False, name="move_type")
 			self.defender_type_proj = nn.Dense(
@@ -224,8 +276,17 @@ class RosterNetwork(nn.Module):
 			self.pair_hidden = nn.Dense(n.pair_width, name="pair_hidden")
 			self.pair_out = nn.Dense(n.pair_width, name="pair_out")
 			self.pair_norm = RMSNorm(name="pair_norm")
-		self.context_proj = nn.Dense(n.context_width, name="context")
-		self.context_norm = RMSNorm(name="context_norm")
+		if self.transformer:
+			self.blocks = [
+				RematAttentionBlock(
+					width, n.attention_heads, n.feed_forward_width, n.activation, name=f"block_{i}"
+				)
+				for i in range(n.attention_blocks)
+			]
+			self.final_norm = RMSNorm(name="final_norm")
+		else:
+			self.context_proj = nn.Dense(n.context_width, name="context")
+			self.context_norm = RMSNorm(name="context_norm")
 		self.core = GateCore("gru", n.core_width)
 		self.out_norm = RMSNorm(name="out_norm")
 		self.move_scorer = ActionScorer(SCORER_WIDTH, n.activation, name="move_scorer")
@@ -406,8 +467,13 @@ class RosterNetwork(nn.Module):
 		own_act = _pick(own_vec, own_active)
 		foe_act = _pick(foe_vec, foe_active)
 
-		own_moves = act(self.move_proj(own_block))  # [..., 6, 4, d]
-		move_vecs = _pick(own_moves, own_active)  # [..., 4, d]
+		if self.transformer:
+			# Only the own active's moves become tokens, so only they are projected.
+			own_moves = None
+			move_vecs = act(self.move_proj(_pick(own_block, own_active)))  # [..., 4, d]
+		else:
+			own_moves = act(self.move_proj(own_block))  # [..., 6, 4, d]
+			move_vecs = _pick(own_moves, own_active)  # [..., 4, d]
 		foe_active_block = _pick(foe_block, foe_active)  # [..., 4, 41]
 		foe_move_vecs = act(self.move_proj(foe_active_block))  # [..., 4, d]
 		foe_move_ids = _rounded(_pick(foe.moves.astype(f32), foe_active))  # [..., 4]
@@ -481,12 +547,16 @@ class RosterNetwork(nn.Module):
 
 	@property
 	def move_width(self) -> int:
-		"""Width of one move's features: its vector, and its pair (pairwise)."""
+		"""Width of one move: its token (transformer), or its vector and its pair (pairwise)."""
+		if self.transformer:
+			return self.network.width
 		return self.network.width + (self.network.pair_width if self.pairwise else 0)
 
 	@property
 	def switch_width(self) -> int:
 		"""Width of one switch's features: its member vector, and its mean outgoing and incoming pairs."""
+		if self.transformer:
+			return self.network.width
 		return self.network.width + (2 * self.network.pair_width if self.pairwise else 0)
 
 	# Encoding and the recurrent step.
@@ -497,45 +567,51 @@ class RosterNetwork(nn.Module):
 		act = ACTIVATIONS[n.activation]
 		p = self.parts(obs)
 		lead = obs.turn.shape
-		own_mean, own_max = _summary(p.own_vec, p.own_present)
-		foe_mean, foe_max = _summary(p.foe_vec, p.foe_present)
-		if self.pairwise:
-			pair_total = p.pairs_own.sum(axis=(-3, -2)) + p.pairs_foe.sum(axis=(-3, -2))
-			pair_count = p.own_valid.sum(axis=(-2, -1)) + p.foe_valid.sum(axis=(-2, -1))
-			pair_mean = pair_total / jnp.maximum(pair_count, 1.0)[..., None]
-			context = [
-				p.own_active,
-				p.foe_active,
-				own_mean,
-				foe_mean,
-				p.field,
-				p.events_own,
-				p.events_foe,
-				pair_mean,
-			]
+		if self.transformer:
+			field, own_vec, foe_vec, move_vecs = self._attend(p, obs)
+			projected = self.core.project(field)
+			foe_active = _pick(foe_vec, obs.opponent.is_active.astype(jnp.float32))
 		else:
-			context = [
-				p.own_active,
-				p.foe_active,
-				own_mean,
-				own_max,
-				foe_mean,
-				foe_max,
-				p.field,
-				p.events_own,
-				p.events_foe,
-			]
-		context = self.context_norm(act(self.context_proj(jnp.concatenate(context, axis=-1))))
-		projected = self.core.project(context)
+			own_mean, own_max = _summary(p.own_vec, p.own_present)
+			foe_mean, foe_max = _summary(p.foe_vec, p.foe_present)
+			if self.pairwise:
+				pair_total = p.pairs_own.sum(axis=(-3, -2)) + p.pairs_foe.sum(axis=(-3, -2))
+				pair_count = p.own_valid.sum(axis=(-2, -1)) + p.foe_valid.sum(axis=(-2, -1))
+				pair_mean = pair_total / jnp.maximum(pair_count, 1.0)[..., None]
+				context = [
+					p.own_active,
+					p.foe_active,
+					own_mean,
+					foe_mean,
+					p.field,
+					p.events_own,
+					p.events_foe,
+					pair_mean,
+				]
+			else:
+				context = [
+					p.own_active,
+					p.foe_active,
+					own_mean,
+					own_max,
+					foe_mean,
+					foe_max,
+					p.field,
+					p.events_own,
+					p.events_foe,
+				]
+			context = self.context_norm(act(self.context_proj(jnp.concatenate(context, axis=-1))))
+			projected = self.core.project(context)
+			own_vec, move_vecs, foe_active = p.own_vec, p.move_vecs, p.foe_active
 
-		moves = p.move_vecs
+		moves = move_vecs
 		if self.pairwise:
 			moves = jnp.concatenate([moves, p.move_pairs], axis=-1)
 		# Bench actions: the bench slots of the active, in action order.
 		active = jnp.argmax(obs.own.is_active, axis=-1)
 		slots = bench_slots(active)  # [..., 5]
 		seats = (slots[..., None] == jnp.arange(TEAM)).astype(jnp.float32)  # [..., 5, 6]
-		member = jnp.einsum("...km,...md->...kd", seats, p.own_vec)
+		member = jnp.einsum("...km,...md->...kd", seats, own_vec)
 		switches = [member]
 		if self.pairwise:
 			out_count = jnp.maximum(p.own_valid.sum(-1), 1.0)  # [..., 6]
@@ -554,9 +630,51 @@ class RosterNetwork(nn.Module):
 				projected,
 				moves.reshape(lead + (move_count,)),
 				switch_features.reshape(lead + (switch_count,)),
-				p.foe_active,
+				foe_active,
 			],
 			axis=-1,
+		)
+
+	def _attend(self, p: Parts, obs):
+		"""Self-attention over one decision's tokens (the transformer only).
+
+		The tokens are, in order: the field, the six own members, the six foe members, the own
+		active's four move slots and the two events (TOKENS in all). A key is masked when it is an
+		unseen foe member or an empty move slot, except that slot zero stays a key while it is
+		legal, so that a request with no move content keeps a token. Masked tokens are zero throughout.
+		Returns the final field token [..., d], the own and the foe member tokens [..., 6, d] and the
+		own active's move tokens [..., 4, d].
+		"""
+		lead = obs.turn.shape
+		legal = obs.legal_actions[..., :MOVE_SLOTS].astype(bool)
+		move_valid = p.move_valid | ((jnp.arange(MOVE_SLOTS) == 0) & legal)
+		field_valid = jnp.ones(lead + (1,), bool)
+		event_valid = jnp.ones(lead + (2,), bool)
+		valid = jnp.concatenate(
+			[field_valid, p.own_present, p.foe_present, move_valid, event_valid], axis=-1
+		)
+		tokens = jnp.concatenate(
+			[
+				p.field[..., None, :],
+				p.own_vec,
+				p.foe_vec,
+				p.move_vecs,
+				p.events_own[..., None, :],
+				p.events_foe[..., None, :],
+			],
+			axis=-2,
+		)
+		x = _masked(tokens, valid)
+		for block in self.blocks:
+			x = block(x, valid)
+		x = _masked(self.final_norm(x), valid)
+		own_end = 1 + TEAM
+		foe_end = own_end + TEAM
+		return (
+			x[..., 0, :],
+			x[..., 1:own_end, :],
+			x[..., own_end:foe_end, :],
+			x[..., foe_end : foe_end + MOVE_SLOTS, :],
 		)
 
 	def step_full(self, carry, projected, legal):
@@ -594,9 +712,14 @@ class RosterNetwork(nn.Module):
 		return heads
 
 	def probe_features(self, obs):
-		"""Per own move slot [..., 4, F] for the type probe: the pair (pairwise), or the move and
-		the foe active vectors (control)."""
+		"""Per own move slot [..., 4, F] for the type probe: the pair (pairwise), the move and the
+		foe active vectors (control), or the move token and the foe active token (transformer)."""
 		p = self.parts(obs)
+		if self.transformer:
+			_, _, foe_vec, move_vecs = self._attend(p, obs)
+			foe = _pick(foe_vec, obs.opponent.is_active.astype(jnp.float32))
+			foe = jnp.broadcast_to(foe[..., None, :], move_vecs.shape)
+			return jnp.concatenate([move_vecs, foe], axis=-1)
 		if self.pairwise:
 			return p.move_pairs
 		foe = jnp.broadcast_to(p.foe_active[..., None, :], p.move_vecs.shape)

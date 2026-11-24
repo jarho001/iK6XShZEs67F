@@ -225,3 +225,27 @@ def test_a_pool_turns_over_within_a_battle_or_the_config_is_refused():
 	assert league_config("env.max_steps=400").env.max_steps == 400
 	with pytest.raises(ConfigError, match="may not outlive two insertions"):
 		league_config("env.max_steps=600")
+
+
+def test_the_transformer_is_a_roster_arch_with_attention_sizes():
+	config = load_config(
+		None,
+		[
+			"network.arch=transformer",
+			"network.width=96",
+			"network.attention_blocks=2",
+			"network.attention_heads=4",
+			"network.feed_forward_width=192",
+		],
+	)
+	assert config.network.arch == "transformer"
+	assert config.network.attention_blocks == 2
+	assert config.network.feed_forward_width == 192
+	# The attention sizes are not set by default, so the other archs are unchanged.
+	assert load_config(None).network.attention_blocks == 3
+	with pytest.raises(ConfigError, match="multiple of network.attention_heads"):
+		load_config(None, ["network.arch=transformer", "network.width=10"])
+	with pytest.raises(ConfigError, match="reads no features"):
+		load_config(None, ["network.arch=transformer", "network.features=true"])
+	with pytest.raises(ConfigError, match="must be at least 1"):
+		load_config(None, ["network.arch=transformer", "network.attention_blocks=0"])

@@ -3,13 +3,13 @@
     python -m pokejax.train.probe CHECKPOINT [--out FILE.json] [--battles N] [--steps T] [--seed S]
     python -m pokejax.train.probe --config CONFIG.toml [--out FILE.json]   (the network at initialisation)
 
-The probe plays the checkpoint's greedy policy against max-damage. At every decision where the learner
-must move, it computes for each own active move slot the network's per-move feature (roster networks:
-probe_features, the move-defender pair for the pairwise network, the move and the defender vectors for
-the control) from the same observation under two parameter sets: the checkpoint's and a random
-initialisation's. The label is the chart multiplier of the move's type against the defender's shown
-types, in six classes {0, 1/4, 1/2, 1, 2, 4}. The chart is used only here, for labels; the network never
-reads it.
+The probe plays the checkpoint's greedy policy against max-damage. At every decision where the
+learner must move, it computes for each own active move slot the network's per-move feature (roster
+networks: probe_features, the move-defender pair for the pairwise network, the move and the defender
+vectors for the control, the move and the defender tokens for the transformer) from the same
+observation under two parameter sets: the checkpoint's and a random initialisation's. The label is
+the chart multiplier of the move's type against the defender's shown types, in six classes {0, 1/4,
+1/2, 1, 2, 4}. The chart is used only here, for labels; the network never reads it.
 
 Rows are ordinary damaging moves of a fixed type (no status or fixed-damage moves, and not Hidden Power,
 Natural Gift, Judgment, Weather Ball, Multi-Attack, Techno Blast or Revelation Dance) against defenders
@@ -343,7 +343,8 @@ def run_probe(
 	"""The probe of a checkpoint (or, without one, of the network at initialisation) as a report."""
 	if config.network.arch == "dense":
 		raise ProbeError(
-			"the type probe reads the roster networks: network.arch = control or pairwise"
+			"the type probe reads the roster networks: network.arch = control, pairwise or "
+			"transformer"
 		)
 	tables = load_tables()
 	env = Env(EnvConfig(batch_size=battles, max_steps=config.env.max_steps, observe="both"), pool)

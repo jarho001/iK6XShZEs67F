@@ -111,3 +111,37 @@ def test_skipping_the_reset_changes_the_replay(league_trainer, rollout):
 
 	values = np.asarray(jax.jit(without_reset)(learner.params, obs, start))
 	assert np.abs(values - np.asarray(_lane_chunks(league_trainer, traj.value))).max() > 1e-4
+
+
+# The recurrent roster transformer at test size, with the four auxiliary losses on.
+TRANSFORMER = (
+	"network.arch=transformer",
+	"network.width=8",
+	"network.feed_forward_width=12",
+	"network.core_width=16",
+	"network.activation=silu",
+	"network.species_embedding=4",
+	"network.type_embedding=3",
+	"auxiliary.next_action=0.05",
+	"auxiliary.item=0.01",
+	"auxiliary.ability=0.01",
+	"auxiliary.moves=0.03",
+)
+
+
+@pytest.fixture(scope="module")
+def transformer_trainer(tables, tmp_path_factory, cpu_only):
+	"""A league trainer with the recurrent roster transformer, on the CPU."""
+	from train_support import league_config, on_cpu, write_pool
+
+	from pokejax.train.ppo import Trainer
+
+	with on_cpu():
+		config = league_config(*TRANSFORMER)
+		return Trainer(config, write_pool(tmp_path_factory.mktemp("transformer"), tables))
+
+
+def test_chunk_replay_with_the_transformer(transformer_trainer, cpu_only):
+	learner = transformer_trainer.init()
+	_, traj = transformer_trainer.rollout(learner.params, learner.pool, learner.league)
+	check_replay(transformer_trainer, learner, jax.device_get(traj))

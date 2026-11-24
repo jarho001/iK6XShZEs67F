@@ -12,11 +12,13 @@ A file has these tables, and every key is optional (the defaults are the ones be
 - [rollout]: batch_size (parallel battles), rollout_length (steps per update),
   sequence_length (steps per minibatch chunk; must divide rollout_length)
 - [env]: max_steps (environment steps before a battle is truncated), shaping, shaping_coef
-- [network]: core (gru or lstm), activation, core_width, trunk_width, member_width and the
-  embedding sizes; features (public damage and matchup inputs, pokejax/train/features.py),
-  feature_set (full, dex or dex-no-matchup: which feature columns enter, see features.py),
-  action_head (dense: one linear layer over the core output; factored: a scorer per action from
-  the core output and that action's features, which needs features) and action_width
+- [network]: core (gru or lstm), activation, core_width, trunk_width, member_width and the embedding
+  sizes; arch (dense, or one of the roster networks control, pairwise and transformer, roster.py:
+  they read no features and need core = gru; transformer also takes attention_blocks,
+  attention_heads and feed_forward_width); features (public damage and matchup inputs,
+  pokejax/train/features.py), feature_set (full, dex or dex-no-matchup: which feature columns enter,
+  see features.py), action_head (dense: one linear layer over the core output; factored: a scorer
+  per action from the core output and that action's features, which needs features) and action_width
 - [ppo]: epochs, minibatches, learning_rate, learning_rate_end, lr_schedule (constant, linear or
   cosine), decay_updates (0: run.updates at the first start, kept on resume), gamma, gae_lambda, clip, value_clip (0 turns value clipping off), value_coef,
   entropy_coef, max_grad_norm, adam_eps
@@ -42,7 +44,7 @@ from pokejax.policy_names import POLICY_NAMES
 
 CORE_KINDS = ("gru", "lstm")
 ACTIVATIONS = ("relu", "tanh", "gelu", "silu")
-ARCHITECTURES = ("dense", "control", "pairwise")
+ARCHITECTURES = ("dense", "control", "pairwise", "transformer")
 ACTION_HEADS = ("dense", "factored")
 FEATURE_SETS = ("full", "dex", "dex-no-matchup")
 LR_SCHEDULES = ("constant", "linear", "cosine")
@@ -170,6 +172,9 @@ class NetworkSection:
 	pair_width: int = 64
 	interaction_width: int = 8
 	context_width: int = 128
+	attention_blocks: int = 3  # arch = transformer: self-attention blocks over the tokens
+	attention_heads: int = 4
+	feed_forward_width: int = 192
 
 	def __post_init__(self):
 		_check_choice(self.core, CORE_KINDS, "network.core")
@@ -183,6 +188,11 @@ class NetworkSection:
 			)
 			_check(
 				self.core == "gru", "network.arch = control or pairwise needs network.core = gru"
+			)
+		if self.arch == "transformer":
+			_check(
+				self.width % self.attention_heads == 0,
+				"network.width must be a multiple of network.attention_heads",
 			)
 		_check_choice(self.action_head, ACTION_HEADS, "network.action_head")
 		_check(
@@ -210,6 +220,9 @@ class NetworkSection:
 			"pair_width",
 			"interaction_width",
 			"context_width",
+			"attention_blocks",
+			"attention_heads",
+			"feed_forward_width",
 		):
 			_check_int(getattr(self, name), 1, f"network.{name}")
 

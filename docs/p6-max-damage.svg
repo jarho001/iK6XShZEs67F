@@ -14,10 +14,13 @@
 <text x="266.0" y="58" font-size="12" class="primary">p6-p2</text>
 <line x1="324.0" y1="54" x2="342.0" y2="54" class="line k3"/>
 <circle cx="333.0" cy="54" r="4" class="f3 ring"/>
-<text x="350.0" y="58" font-size="12" class="primary">selfplay</text>
-<line x1="429.6" y1="54" x2="447.6" y2="54" class="line k4"/>
-<circle cx="438.6" cy="54" r="4" class="f4 ring"/>
-<text x="455.6" y="58" font-size="12" class="primary">rtx3060ti</text>
+<text x="350.0" y="58" font-size="12" class="primary">p6-t1</text>
+<line x1="408.0" y1="54" x2="426.0" y2="54" class="line k4"/>
+<circle cx="417.0" cy="54" r="4" class="f4 ring"/>
+<text x="434.0" y="58" font-size="12" class="primary">selfplay</text>
+<line x1="513.6" y1="54" x2="531.6" y2="54" class="line k5"/>
+<circle cx="522.6" cy="54" r="4" class="f5 ring"/>
+<text x="539.6" y="58" font-size="12" class="primary">rtx3060ti</text>
 <line x1="72" y1="382.0" x2="700" y2="382.0" class="grid"/>
 <text x="64" y="386.0" font-size="11" text-anchor="end" class="secondary">0%</text>
 <line x1="72" y1="348.7" x2="700" y2="348.7" class="grid"/>
@@ -87,44 +90,51 @@
 <circle cx="229.0" cy="109.2" r="4" class="f2 ring"><title>p6-p2, update 1,000: 81.84% against max-damage (sampled, 1,024 battles, 95% CI 79.36 to 84.08)</title></circle>
 <circle cx="244.7" cy="112.8" r="4" class="f2 ring"><title>p6-p2, update 1,100: 80.76% against max-damage (sampled, 1,024 battles, 95% CI 78.23 to 83.06)</title></circle>
 <circle cx="260.4" cy="107.6" r="4" class="f2 ring"><title>p6-p2, update 1,200: 82.32% against max-damage (sampled, 1,024 battles, 95% CI 79.87 to 84.54)</title></circle>
-<polyline points="87.7,342.3 103.4,348.1 119.1,332.8 134.8,314.0 150.5,302.6 166.2,291.8 181.9,290.5 197.6,293.1 213.3,282.7 229.0,287.6 244.7,286.3 260.4,284.3 276.1,285.6 291.8,284.3 307.5,283.0 323.2,284.7 338.9,282.4 354.6,271.3 370.3,280.8 386.0,270.3 401.7,276.9 417.4,273.9" class="line k3"/>
-<circle cx="87.7" cy="342.3" r="4" class="f3 ring"><title>selfplay, update 100: 11.91% against max-damage (sampled, 1,024 battles, 95% CI 10.07 to 14.04)</title></circle>
-<circle cx="103.4" cy="348.1" r="4" class="f3 ring"><title>selfplay, update 200: 10.16% against max-damage (sampled, 1,024 battles, 95% CI 8.45 to 12.16)</title></circle>
-<circle cx="119.1" cy="332.8" r="4" class="f3 ring"><title>selfplay, update 300: 14.75% against max-damage (sampled, 1,024 battles, 95% CI 12.71 to 17.05)</title></circle>
-<circle cx="134.8" cy="314.0" r="4" class="f3 ring"><title>selfplay, update 400: 20.41% against max-damage (sampled, 1,024 battles, 95% CI 18.05 to 22.99)</title></circle>
-<circle cx="150.5" cy="302.6" r="4" class="f3 ring"><title>selfplay, update 500: 23.83% against max-damage (sampled, 1,024 battles, 95% CI 21.32 to 26.53)</title></circle>
-<circle cx="166.2" cy="291.8" r="4" class="f3 ring"><title>selfplay, update 600: 27.05% against max-damage (sampled, 1,024 battles, 95% CI 24.42 to 29.85)</title></circle>
-<circle cx="181.9" cy="290.5" r="4" class="f3 ring"><title>selfplay, update 700: 27.44% against max-damage (sampled, 1,024 battles, 95% CI 24.80 to 30.25)</title></circle>
-<circle cx="197.6" cy="293.1" r="4" class="f3 ring"><title>selfplay, update 800: 26.66% against max-damage (sampled, 1,024 battles, 95% CI 24.04 to 29.45)</title></circle>
-<circle cx="213.3" cy="282.7" r="4" class="f3 ring"><title>selfplay, update 900: 29.79% against max-damage (sampled, 1,024 battles, 95% CI 27.06 to 32.66)</title></circle>
-<circle cx="229.0" cy="287.6" r="4" class="f3 ring"><title>selfplay, update 1,000: 28.32% against max-damage (sampled, 1,024 battles, 95% CI 25.65 to 31.16)</title></circle>
-<circle cx="244.7" cy="286.3" r="4" class="f3 ring"><title>selfplay, update 1,100: 28.71% against max-damage (sampled, 1,024 battles, 95% CI 26.02 to 31.56)</title></circle>
-<circle cx="260.4" cy="284.3" r="4" class="f3 ring"><title>selfplay, update 1,200: 29.30% against max-damage (sampled, 1,024 battles, 95% CI 26.59 to 32.16)</title></circle>
-<circle cx="276.1" cy="285.6" r="4" class="f3 ring"><title>selfplay, update 1,300: 28.91% against max-damage (sampled, 1,024 battles, 95% CI 26.21 to 31.76)</title></circle>
-<circle cx="291.8" cy="284.3" r="4" class="f3 ring"><title>selfplay, update 1,400: 29.30% against max-damage (sampled, 1,024 battles, 95% CI 26.59 to 32.16)</title></circle>
-<circle cx="307.5" cy="283.0" r="4" class="f3 ring"><title>selfplay, update 1,500: 29.69% against max-damage (sampled, 1,024 battles, 95% CI 26.97 to 32.56)</title></circle>
-<circle cx="323.2" cy="284.7" r="4" class="f3 ring"><title>selfplay, update 1,600: 29.20% against max-damage (sampled, 1,024 battles, 95% CI 26.50 to 32.06)</title></circle>
-<circle cx="338.9" cy="282.4" r="4" class="f3 ring"><title>selfplay, update 1,700: 29.88% against max-damage (sampled, 1,024 battles, 95% CI 27.16 to 32.76)</title></circle>
-<circle cx="354.6" cy="271.3" r="4" class="f3 ring"><title>selfplay, update 1,800: 33.20% against max-damage (sampled, 1,024 battles, 95% CI 30.39 to 36.15)</title></circle>
-<circle cx="370.3" cy="280.8" r="4" class="f3 ring"><title>selfplay, update 1,900: 30.37% against max-damage (sampled, 1,024 battles, 95% CI 27.63 to 33.26)</title></circle>
-<circle cx="386.0" cy="270.3" r="4" class="f3 ring"><title>selfplay, update 2,000: 33.50% against max-damage (sampled, 1,024 battles, 95% CI 30.67 to 36.44)</title></circle>
-<circle cx="401.7" cy="276.9" r="4" class="f3 ring"><title>selfplay, update 2,100: 31.54% against max-damage (sampled, 1,024 battles, 95% CI 28.77 to 34.45)</title></circle>
-<circle cx="417.4" cy="273.9" r="4" class="f3 ring"><title>selfplay, update 2,200: 32.42% against max-damage (sampled, 1,024 battles, 95% CI 29.63 to 35.35)</title></circle>
-<polyline points="111.2,168.1 150.5,156.7 189.8,153.5 229.0,149.6 268.2,155.8 307.5,142.4 346.8,143.4 386.0,146.6 425.2,140.5 464.5,134.3 503.8,137.2 543.0,131.7 582.2,130.7 621.5,128.7 660.8,129.4 700.0,126.1" class="line k4"/>
-<circle cx="111.2" cy="168.1" r="4" class="f4 ring"><title>rtx3060ti, update 250: 64.16% against max-damage (sampled, 1,024 battles, 95% CI 61.18 to 67.04)</title></circle>
-<circle cx="150.5" cy="156.7" r="4" class="f4 ring"><title>rtx3060ti, update 500: 67.58% against max-damage (sampled, 1,024 battles, 95% CI 64.65 to 70.37)</title></circle>
-<circle cx="189.8" cy="153.5" r="4" class="f4 ring"><title>rtx3060ti, update 750: 68.55% against max-damage (sampled, 1,024 battles, 95% CI 65.65 to 71.32)</title></circle>
-<circle cx="229.0" cy="149.6" r="4" class="f4 ring"><title>rtx3060ti, update 1,000: 69.73% against max-damage (sampled, 1,024 battles, 95% CI 66.84 to 72.46)</title></circle>
-<circle cx="268.2" cy="155.8" r="4" class="f4 ring"><title>rtx3060ti, update 1,250: 67.87% against max-damage (sampled, 1,024 battles, 95% CI 64.95 to 70.66)</title></circle>
-<circle cx="307.5" cy="142.4" r="4" class="f4 ring"><title>rtx3060ti, update 1,500: 71.88% against max-damage (sampled, 1,024 battles, 95% CI 69.04 to 74.54)</title></circle>
-<circle cx="346.8" cy="143.4" r="4" class="f4 ring"><title>rtx3060ti, update 1,750: 71.58% against max-damage (sampled, 1,024 battles, 95% CI 68.74 to 74.26)</title></circle>
-<circle cx="386.0" cy="146.6" r="4" class="f4 ring"><title>rtx3060ti, update 2,000: 70.61% against max-damage (sampled, 1,024 battles, 95% CI 67.74 to 73.31)</title></circle>
-<circle cx="425.2" cy="140.5" r="4" class="f4 ring"><title>rtx3060ti, update 2,250: 72.46% against max-damage (sampled, 1,024 battles, 95% CI 69.64 to 75.11)</title></circle>
-<circle cx="464.5" cy="134.3" r="4" class="f4 ring"><title>rtx3060ti, update 2,500: 74.32% against max-damage (sampled, 1,024 battles, 95% CI 71.55 to 76.90)</title></circle>
-<circle cx="503.8" cy="137.2" r="4" class="f4 ring"><title>rtx3060ti, update 2,750: 73.44% against max-damage (sampled, 1,024 battles, 95% CI 70.65 to 76.05)</title></circle>
-<circle cx="543.0" cy="131.7" r="4" class="f4 ring"><title>rtx3060ti, update 3,000: 75.10% against max-damage (sampled, 1,024 battles, 95% CI 72.36 to 77.65)</title></circle>
-<circle cx="582.2" cy="130.7" r="4" class="f4 ring"><title>rtx3060ti, update 3,250: 75.39% against max-damage (sampled, 1,024 battles, 95% CI 72.66 to 77.93)</title></circle>
-<circle cx="621.5" cy="128.7" r="4" class="f4 ring"><title>rtx3060ti, update 3,500: 75.98% against max-damage (sampled, 1,024 battles, 95% CI 73.27 to 78.49)</title></circle>
-<circle cx="660.8" cy="129.4" r="4" class="f4 ring"><title>rtx3060ti, update 3,750: 75.78% against max-damage (sampled, 1,024 battles, 95% CI 73.06 to 78.31)</title></circle>
-<circle cx="700.0" cy="126.1" r="4" class="f4 ring"><title>rtx3060ti, update 4,000: 76.76% against max-damage (sampled, 1,024 battles, 95% CI 74.07 to 79.24)</title></circle>
+<polyline points="87.7,301.6 103.4,288.6 119.1,277.5 134.8,266.1 150.5,244.3 166.2,252.8" class="line k3"/>
+<circle cx="87.7" cy="301.6" r="4" class="f3 ring"><title>p6-t1, update 100: 24.12% against max-damage (sampled, 1,024 battles, 95% CI 21.60 to 26.84)</title></circle>
+<circle cx="103.4" cy="288.6" r="4" class="f3 ring"><title>p6-t1, update 200: 28.03% against max-damage (sampled, 1,024 battles, 95% CI 25.36 to 30.86)</title></circle>
+<circle cx="119.1" cy="277.5" r="4" class="f3 ring"><title>p6-t1, update 300: 31.35% against max-damage (sampled, 1,024 battles, 95% CI 28.58 to 34.25)</title></circle>
+<circle cx="134.8" cy="266.1" r="4" class="f3 ring"><title>p6-t1, update 400: 34.77% against max-damage (sampled, 1,024 battles, 95% CI 31.91 to 37.73)</title></circle>
+<circle cx="150.5" cy="244.3" r="4" class="f3 ring"><title>p6-t1, update 500: 41.31% against max-damage (sampled, 1,024 battles, 95% CI 38.33 to 44.35)</title></circle>
+<circle cx="166.2" cy="252.8" r="4" class="f3 ring"><title>p6-t1, update 600: 38.77% against max-damage (sampled, 1,024 battles, 95% CI 35.83 to 41.79)</title></circle>
+<polyline points="87.7,342.3 103.4,348.1 119.1,332.8 134.8,314.0 150.5,302.6 166.2,291.8 181.9,290.5 197.6,293.1 213.3,282.7 229.0,287.6 244.7,286.3 260.4,284.3 276.1,285.6 291.8,284.3 307.5,283.0 323.2,284.7 338.9,282.4 354.6,271.3 370.3,280.8 386.0,270.3 401.7,276.9 417.4,273.9" class="line k4"/>
+<circle cx="87.7" cy="342.3" r="4" class="f4 ring"><title>selfplay, update 100: 11.91% against max-damage (sampled, 1,024 battles, 95% CI 10.07 to 14.04)</title></circle>
+<circle cx="103.4" cy="348.1" r="4" class="f4 ring"><title>selfplay, update 200: 10.16% against max-damage (sampled, 1,024 battles, 95% CI 8.45 to 12.16)</title></circle>
+<circle cx="119.1" cy="332.8" r="4" class="f4 ring"><title>selfplay, update 300: 14.75% against max-damage (sampled, 1,024 battles, 95% CI 12.71 to 17.05)</title></circle>
+<circle cx="134.8" cy="314.0" r="4" class="f4 ring"><title>selfplay, update 400: 20.41% against max-damage (sampled, 1,024 battles, 95% CI 18.05 to 22.99)</title></circle>
+<circle cx="150.5" cy="302.6" r="4" class="f4 ring"><title>selfplay, update 500: 23.83% against max-damage (sampled, 1,024 battles, 95% CI 21.32 to 26.53)</title></circle>
+<circle cx="166.2" cy="291.8" r="4" class="f4 ring"><title>selfplay, update 600: 27.05% against max-damage (sampled, 1,024 battles, 95% CI 24.42 to 29.85)</title></circle>
+<circle cx="181.9" cy="290.5" r="4" class="f4 ring"><title>selfplay, update 700: 27.44% against max-damage (sampled, 1,024 battles, 95% CI 24.80 to 30.25)</title></circle>
+<circle cx="197.6" cy="293.1" r="4" class="f4 ring"><title>selfplay, update 800: 26.66% against max-damage (sampled, 1,024 battles, 95% CI 24.04 to 29.45)</title></circle>
+<circle cx="213.3" cy="282.7" r="4" class="f4 ring"><title>selfplay, update 900: 29.79% against max-damage (sampled, 1,024 battles, 95% CI 27.06 to 32.66)</title></circle>
+<circle cx="229.0" cy="287.6" r="4" class="f4 ring"><title>selfplay, update 1,000: 28.32% against max-damage (sampled, 1,024 battles, 95% CI 25.65 to 31.16)</title></circle>
+<circle cx="244.7" cy="286.3" r="4" class="f4 ring"><title>selfplay, update 1,100: 28.71% against max-damage (sampled, 1,024 battles, 95% CI 26.02 to 31.56)</title></circle>
+<circle cx="260.4" cy="284.3" r="4" class="f4 ring"><title>selfplay, update 1,200: 29.30% against max-damage (sampled, 1,024 battles, 95% CI 26.59 to 32.16)</title></circle>
+<circle cx="276.1" cy="285.6" r="4" class="f4 ring"><title>selfplay, update 1,300: 28.91% against max-damage (sampled, 1,024 battles, 95% CI 26.21 to 31.76)</title></circle>
+<circle cx="291.8" cy="284.3" r="4" class="f4 ring"><title>selfplay, update 1,400: 29.30% against max-damage (sampled, 1,024 battles, 95% CI 26.59 to 32.16)</title></circle>
+<circle cx="307.5" cy="283.0" r="4" class="f4 ring"><title>selfplay, update 1,500: 29.69% against max-damage (sampled, 1,024 battles, 95% CI 26.97 to 32.56)</title></circle>
+<circle cx="323.2" cy="284.7" r="4" class="f4 ring"><title>selfplay, update 1,600: 29.20% against max-damage (sampled, 1,024 battles, 95% CI 26.50 to 32.06)</title></circle>
+<circle cx="338.9" cy="282.4" r="4" class="f4 ring"><title>selfplay, update 1,700: 29.88% against max-damage (sampled, 1,024 battles, 95% CI 27.16 to 32.76)</title></circle>
+<circle cx="354.6" cy="271.3" r="4" class="f4 ring"><title>selfplay, update 1,800: 33.20% against max-damage (sampled, 1,024 battles, 95% CI 30.39 to 36.15)</title></circle>
+<circle cx="370.3" cy="280.8" r="4" class="f4 ring"><title>selfplay, update 1,900: 30.37% against max-damage (sampled, 1,024 battles, 95% CI 27.63 to 33.26)</title></circle>
+<circle cx="386.0" cy="270.3" r="4" class="f4 ring"><title>selfplay, update 2,000: 33.50% against max-damage (sampled, 1,024 battles, 95% CI 30.67 to 36.44)</title></circle>
+<circle cx="401.7" cy="276.9" r="4" class="f4 ring"><title>selfplay, update 2,100: 31.54% against max-damage (sampled, 1,024 battles, 95% CI 28.77 to 34.45)</title></circle>
+<circle cx="417.4" cy="273.9" r="4" class="f4 ring"><title>selfplay, update 2,200: 32.42% against max-damage (sampled, 1,024 battles, 95% CI 29.63 to 35.35)</title></circle>
+<polyline points="111.2,168.1 150.5,156.7 189.8,153.5 229.0,149.6 268.2,155.8 307.5,142.4 346.8,143.4 386.0,146.6 425.2,140.5 464.5,134.3 503.8,137.2 543.0,131.7 582.2,130.7 621.5,128.7 660.8,129.4 700.0,126.1" class="line k5"/>
+<circle cx="111.2" cy="168.1" r="4" class="f5 ring"><title>rtx3060ti, update 250: 64.16% against max-damage (sampled, 1,024 battles, 95% CI 61.18 to 67.04)</title></circle>
+<circle cx="150.5" cy="156.7" r="4" class="f5 ring"><title>rtx3060ti, update 500: 67.58% against max-damage (sampled, 1,024 battles, 95% CI 64.65 to 70.37)</title></circle>
+<circle cx="189.8" cy="153.5" r="4" class="f5 ring"><title>rtx3060ti, update 750: 68.55% against max-damage (sampled, 1,024 battles, 95% CI 65.65 to 71.32)</title></circle>
+<circle cx="229.0" cy="149.6" r="4" class="f5 ring"><title>rtx3060ti, update 1,000: 69.73% against max-damage (sampled, 1,024 battles, 95% CI 66.84 to 72.46)</title></circle>
+<circle cx="268.2" cy="155.8" r="4" class="f5 ring"><title>rtx3060ti, update 1,250: 67.87% against max-damage (sampled, 1,024 battles, 95% CI 64.95 to 70.66)</title></circle>
+<circle cx="307.5" cy="142.4" r="4" class="f5 ring"><title>rtx3060ti, update 1,500: 71.88% against max-damage (sampled, 1,024 battles, 95% CI 69.04 to 74.54)</title></circle>
+<circle cx="346.8" cy="143.4" r="4" class="f5 ring"><title>rtx3060ti, update 1,750: 71.58% against max-damage (sampled, 1,024 battles, 95% CI 68.74 to 74.26)</title></circle>
+<circle cx="386.0" cy="146.6" r="4" class="f5 ring"><title>rtx3060ti, update 2,000: 70.61% against max-damage (sampled, 1,024 battles, 95% CI 67.74 to 73.31)</title></circle>
+<circle cx="425.2" cy="140.5" r="4" class="f5 ring"><title>rtx3060ti, update 2,250: 72.46% against max-damage (sampled, 1,024 battles, 95% CI 69.64 to 75.11)</title></circle>
+<circle cx="464.5" cy="134.3" r="4" class="f5 ring"><title>rtx3060ti, update 2,500: 74.32% against max-damage (sampled, 1,024 battles, 95% CI 71.55 to 76.90)</title></circle>
+<circle cx="503.8" cy="137.2" r="4" class="f5 ring"><title>rtx3060ti, update 2,750: 73.44% against max-damage (sampled, 1,024 battles, 95% CI 70.65 to 76.05)</title></circle>
+<circle cx="543.0" cy="131.7" r="4" class="f5 ring"><title>rtx3060ti, update 3,000: 75.10% against max-damage (sampled, 1,024 battles, 95% CI 72.36 to 77.65)</title></circle>
+<circle cx="582.2" cy="130.7" r="4" class="f5 ring"><title>rtx3060ti, update 3,250: 75.39% against max-damage (sampled, 1,024 battles, 95% CI 72.66 to 77.93)</title></circle>
+<circle cx="621.5" cy="128.7" r="4" class="f5 ring"><title>rtx3060ti, update 3,500: 75.98% against max-damage (sampled, 1,024 battles, 95% CI 73.27 to 78.49)</title></circle>
+<circle cx="660.8" cy="129.4" r="4" class="f5 ring"><title>rtx3060ti, update 3,750: 75.78% against max-damage (sampled, 1,024 battles, 95% CI 73.06 to 78.31)</title></circle>
+<circle cx="700.0" cy="126.1" r="4" class="f5 ring"><title>rtx3060ti, update 4,000: 76.76% against max-damage (sampled, 1,024 battles, 95% CI 74.07 to 79.24)</title></circle>
 </svg>
