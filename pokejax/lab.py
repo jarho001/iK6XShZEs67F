@@ -1,25 +1,28 @@
 """The lab kit's steps: what lab/run.sh runs, one step per `python -m pokejax.lab step NAME`.
 
 Steps, in order: preflight (the GPUs and JAX, first minute), facts (the system), bench (the engine and
-the environment per GPU), sweep (the training sizing grid per GPU), contention (one GPU alone and both
-at once), train (a timed run of configs/rtx6000.toml per GPU) and pack (summary.md and the archive).
+the environment per GPU; only with LAB_BENCH=1), sweep (each arm's training for a few updates at
+several batch sizes, one process per GPU), train (each arm on a GPU for a time budget, with kept
+checkpoints at doubling step counts), panel (every kept checkpoint on the fixed panel, and the cross-play
+matrix of the final checkpoints), and pack (summary.md, the training curves and the archive).
 `python -m pokejax.lab is-done NAME` exits 0 when a step has its done marker.
 
 Outputs go to LAB_DIR (default work/lab): results/*.jsonl (one JSON line per measurement), logs/,
-runs/ (the training run directories), preflight/, facts.json, pip-freeze.txt, progress.log (one JSON
-line per event) and done/NAME.json (the marker of a finished step). A step is complete when all its
-measurements are in its results; rerunning skips complete steps and the measurements already
-recorded. The time budget (LAB_HOURS) is set by make_plan: when the sweep starts it may run for
-SWEEP_SHARE of the time left after the contention and pack reserves, and the training ends before the
-pack reserve. The sweep and the training shrink to fit; the other steps have fixed sizes.
+runs/ (the training run directories), panel/ (the panel and cross-play reports), preflight/, facts.json,
+pip-freeze.txt, progress.log (one JSON line per event) and done/NAME.json (the marker of a finished
+step). A step is complete when all its measurements are in its results; rerunning skips complete steps
+and the measurements already recorded. The time budget (LAB_HOURS) is set by make_plan: when the sweep
+starts it may run for SWEEP_SHARE of the time left, and the training ends before the pack reserve. The
+panel's share of the training window is planned from the number of checkpoints each run keeps (plan_runs).
+The sweep and the training shrink to fit; the other steps have fixed sizes.
 
-A contention run or a training probe that runs out of device memory is repeated with half the batch
-(rollout.batch_size), down to BATCH_FLOOR (4,096); every attempt is recorded, and the batch a run used is
-in its plan (see run_with_fallback).
+A training probe that runs out of device memory is repeated with half the batch (rollout.batch_size),
+down to TRAIN_FLOOR; every attempt is recorded, and the batch a run used is in its plan (run_with_fallback).
 
-Environment (set by lab/run.sh): LAB_HOURS (3), LAB_SMOKE (0, every step at minimal size),
-LAB_DIR (work/lab), LAB_START (epoch seconds when this run started), LAB_TEAM_POOL
-(work/teams/gen5-teams.npz).
+Environment (set by lab/run.sh): LAB_HOURS (3), LAB_SMOKE (0, every step at minimal size), LAB_DIR
+(work/lab), LAB_START (epoch seconds when this run started), LAB_TEAM_POOL (work/teams/gen5-teams.npz),
+LAB_ARMS (comma-separated configuration files; default configs/p7-pairwise.toml and
+configs/p7-pairwise-wide.toml), LAB_TRAIN_CONFIG (one configuration on every GPU), LAB_BENCH (0).
 """
 
 import argparse
@@ -28,6 +31,7 @@ import hashlib
 import importlib.metadata
 import io
 import json
+import math
 import os
 import platform
 import re
@@ -45,9 +49,11 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from pokejax import lab_report
+from pokejax.policy_names import POLICY_NAMES
 from pokejax.records import (
 	ENVIRONMENT_DEFAULTS,
 	append_record,
+	checkpoint_label,
 	read_records,
 	run_measurement,
 	shard,
@@ -58,17 +64,19 @@ from pokejax.train.config import ConfigError, load_config
 # The same path as pokejax.env.DEFAULT_POOL. Importing pokejax.env (or anything that imports the
 # engine) initializes the JAX backend, and the orchestrator must run when no GPU works.
 DEFAULT_POOL = Path("work/teams/gen5-teams.npz")
-STEPS = ("preflight", "facts", "bench", "sweep", "contention", "train", "pack")
-GPU_STEPS = ("bench", "sweep", "contention", "train")
+STEPS = ("preflight", "facts", "bench", "sweep", "train", "panel", "pack")
+GPU_STEPS = ("bench", "sweep", "train", "panel")
 PREFLIGHT_FAILED = 3  # exit status of a failed preflight (lab/run.sh stops the GPU steps)
 PARTIAL_EXIT = 4  # a step that ran but is not complete yet (a rerun continues it)
-SWEEP_SHARE = 0.55  # of the time left once the sweep starts, less the reserves below
-CONTENTION_RESERVE_SECONDS = 600.0
+SWEEP_SHARE = 0.55  # of the time left once the sweep starts, less the pack reserve
 PACK_RESERVE_SECONDS = 300.0
 STARTUP_SECONDS = 60.0  # process start, tables and pool before a training run's first update
 OVERHEAD = 1.25  # per update: evaluations and checkpoints on top of the rollout and the learner
+# The arms of a run when LAB_ARMS and LAB_TRAIN_CONFIG are not set: the pairwise network at 4,096 rows
+# (configs/p7-pairwise.toml) and its wide variant (configs/p7-pairwise-wide.toml). The first arm is the
+# base arm: its sweep also measures SWEEP_BASE_BATCH.
+DEFAULT_ARMS = (Path("configs/p7-pairwise.toml"), Path("configs/p7-pairwise-wide.toml"))
 SELFPLAY_CONFIG = Path("configs/selfplay.toml")
-RTX_CONFIG = Path("configs/rtx6000.toml")
 BENCH_BATCHES = (4096, 16384, 65536, 131072)
 # The steps per scan and the repetitions of pokejax.bench's defaults, so that the lab's numbers compare
 # with the README's (test_lab checks the equality). Each item compiles cold; the rollouts dominate
@@ -76,11 +84,19 @@ BENCH_BATCHES = (4096, 16384, 65536, 131072)
 BENCH_STEPS, BENCH_REPETITIONS, BENCH_TIMEOUT = 256, 3, 1800
 SMOKE_BENCH_BATCHES, SMOKE_BENCH_STEPS, SMOKE_BENCH_REPETITIONS = (4096,), 16, 1
 SMOKE_BENCH_MODES = (("engine", None, False), ("env", None, True), ("env", "heuristics", False))
-SWEEP_UPDATES, SMOKE_SWEEP_UPDATES = 3, 1
-SMOKE_SWEEP_GRID = "batch=1024 rollout=64 width=1 core=gru"
-CONTENTION_UPDATES, SMOKE_CONTENTION_UPDATES = 8, 2
+# The sweep: each arm's training run for SWEEP_UPDATES updates at each batch size (one process per
+# GPU). Rows are the only size that changes; the base arm also runs SWEEP_BASE_BATCH, where OOM is a result.
+SWEEP_BATCHES = (1024, 2048, 4096, 8192)
+SWEEP_BASE_BATCH = 16384
+SWEEP_UPDATES = 20
+SMOKE_SWEEP_BATCHES = (512,)
+SMOKE_SWEEP_UPDATES = 2
 PROBE_UPDATES, SMOKE_PROBE_UPDATES = 3, 1
-SMOKE_TRAIN_UPDATES = 3
+TRAIN_FLOOR = 1024  # a training probe halves its rows on out of memory, down to this many
+# The smoke run on one RTX 3060 Ti: the pairwise update needs a 4.1 GiB block at 1,024 rows, which
+# that card refuses (WSL2), so the smoke probes start at 512 rows and fall to 128.
+SMOKE_TRAIN_BATCH, SMOKE_TRAIN_FLOOR = 512, 128
+SMOKE_TRAIN_UPDATES = 4
 SMOKE_TRAIN_SETTINGS = (
 	"evaluation.batch=512",
 	"evaluation.battles=512",
@@ -89,8 +105,34 @@ SMOKE_TRAIN_SETTINGS = (
 	"evaluation.greedy=false",
 )
 TRAIN_TIMEOUT_SLACK = 900.0
-EVALUATIONS_PER_RUN = 6
-CHECKPOINTS_PER_RUN = 4
+EVALUATIONS_PER_RUN = 12  # evaluation every twelfth of the run's updates (1,024 battles each)
+KEEP_BASE_STEPS = (
+	30_000_000  # kept checkpoints at 30M, 60M, 120M, ... environment steps, and the last
+)
+PLAN_ITERATIONS = 5  # the update counts and the panel reserve are fitted together this many times
+# The panel (pokejax.train.panel) and the cross-play matrix (pokejax.train.crossplay). Measured on the
+# RTX 3060 Ti with a Phase 7 checkpoint and the two references (lab/README.md): 262 s for 1,024 setups per
+# opponent and 269 s for 2,048, so 0.52 ms per battle (6.3 s for twelve batches of 1,024 battles) and about
+# 256 s per panel process for its start and compiles. A cross-play pair compiles its own runner (about
+# 50 s each in the smoke run). The training leaves PANEL_SAFETY times that estimate for the GPU that
+# runs the most panel work.
+PANEL_BATTLES, FINAL_PANEL_BATTLES, PANEL_BATCH = 2048, 4096, 1024
+MODE_NAMES = ("sampled", "greedy")  # the two action modes of every evaluation
+CROSSPLAY_DRAWS, CROSSPLAY_BATCH = 2048, 1024
+SMOKE_PANEL_BATTLES, SMOKE_FINAL_PANEL_BATTLES, SMOKE_PANEL_BATCH = 512, 512, 512
+SMOKE_CROSSPLAY_DRAWS, SMOKE_CROSSPLAY_BATCH = 256, 512
+PANEL_SECONDS_PER_BATTLE = 0.0006
+PANEL_JOB_SECONDS = 300.0  # a panel process: start, compiles and the reports
+CROSSPLAY_PAIR_SECONDS = 60.0  # a cross-play pair: its own compile
+PANEL_SAFETY = 2.0
+PANEL_TIMEOUT_SECONDS = 3600.0
+PLOT_OPPONENTS = ("max-damage", "heuristics")
+# The two Phase 6 reference checkpoints on every panel: the P2 network at 40M steps and the Phase 6
+# run's 480M checkpoint. lab/make-kit.sh copies them into the kit; the paths are relative to the kit.
+REFERENCE_CHECKPOINTS = (
+	("ref-P2-40M", Path("work/reference-checkpoints/p6-p2-40M/checkpoint.npz")),
+	("ref-P6-480M", Path("work/reference-checkpoints/p6-long-480M/checkpoint.npz")),
+)
 MINIMUM_DRIVER = {"cuda13": 580, "cuda12": 525, "cuda12-driver550": 525}
 PACKAGES = (
 	"jax",
@@ -118,7 +160,8 @@ class Settings:
 	smoke: bool
 	start: float
 	team_pool: Path
-	train_config: Path
+	arms: tuple[Path, ...]
+	bench: bool
 
 	@property
 	def results(self) -> Path:
@@ -140,6 +183,10 @@ class Settings:
 	def done_dir(self) -> Path:
 		return self.lab_dir / "done"
 
+	@property
+	def panel_dir(self) -> Path:
+		return self.lab_dir / "panel"
+
 
 @dataclass(frozen=True)
 class Plan:
@@ -159,13 +206,13 @@ class StepResult:
 def make_plan(hours: float, start: float, now: float) -> Plan:
 	"""The deadlines of the budget, from the run's start and the time now.
 
-	The sweep may start cells until SWEEP_SHARE of the time left (less the contention and pack
-	reserves) has passed. The training ends before the pack reserve, which is at most a tenth of
-	the budget. Contention has a fixed size and runs between the two.
+	The sweep may start cells until SWEEP_SHARE of the time left has passed. The training ends before
+	the pack reserve, which is at most a tenth of the budget. The panel's share of the training window
+	is planned by the training step (it depends on how many checkpoints each run keeps).
 	"""
 	end = start + hours * 3600.0
 	pack = min(PACK_RESERVE_SECONDS, 0.1 * hours * 3600.0)
-	left = max(0.0, end - now - CONTENTION_RESERVE_SECONDS - pack)
+	left = max(0.0, end - now - pack)
 	return Plan(start, end, now + SWEEP_SHARE * left, end - pack)
 
 
@@ -176,6 +223,17 @@ def plan_updates(update_seconds: float, seconds: float, overhead: float = OVERHE
 	return max(1, int(seconds / (update_seconds * overhead)))
 
 
+def arms_from_env(environ: Mapping[str, str]) -> tuple[Path, ...]:
+	"""LAB_ARMS (comma-separated configuration files); else LAB_TRAIN_CONFIG (one configuration, on
+	every GPU, as before); else DEFAULT_ARMS."""
+	if environ.get("LAB_ARMS", "").strip():
+		parts = [part.strip() for part in environ["LAB_ARMS"].split(",")]
+		return tuple(Path(part) for part in parts if part)
+	if environ.get("LAB_TRAIN_CONFIG", "").strip():
+		return (Path(environ["LAB_TRAIN_CONFIG"].strip()),)
+	return DEFAULT_ARMS
+
+
 def settings_from_env(environ: Mapping[str, str] | None = None) -> Settings:
 	environ = os.environ if environ is None else environ
 	return Settings(
@@ -184,7 +242,8 @@ def settings_from_env(environ: Mapping[str, str] | None = None) -> Settings:
 		smoke=environ.get("LAB_SMOKE", "0") == "1",
 		start=float(environ.get("LAB_START", time.time())),
 		team_pool=Path(environ.get("LAB_TEAM_POOL", str(DEFAULT_POOL))),
-		train_config=Path(environ.get("LAB_TRAIN_CONFIG", str(RTX_CONFIG))),
+		arms=arms_from_env(environ),
+		bench=environ.get("LAB_BENCH", "0") == "1",
 	)
 
 
@@ -595,8 +654,11 @@ def step_facts(settings: Settings) -> StepResult:
 		"lab_hours": settings.hours,
 		"smoke": settings.smoke,
 		"xla_settings": xla_settings(),
-		"train_config": str(settings.train_config),
-		"train_config_sha256": _sha256(settings.train_config),
+		"arms": [str(arm) for arm in settings.arms],
+		"arm_sha256": {str(arm): _sha256(arm) for arm in settings.arms},
+		"lab_bench": settings.bench,
+		"panel_seconds_per_battle": PANEL_SECONDS_PER_BATTLE,
+		"panel_safety": PANEL_SAFETY,
 		"gpus": _gpus_or_none(settings),
 	}
 	(settings.lab_dir / "facts.json").write_text(
@@ -758,61 +820,8 @@ def step_bench(settings: Settings) -> StepResult:
 	return StepResult("complete" if not missing else "partial", tuple(notes))
 
 
-# Sweep.
-
-
-def step_sweep(settings: Settings) -> StepResult:
-	gpus = load_gpus(settings)
-	from pokejax.sizing import DEFAULT_GRID, cell_config, grid_cells, parse_grid, run_sweep
-
-	plan = make_plan(settings.hours, settings.start, time.time())
-	grid = SMOKE_SWEEP_GRID if settings.smoke else DEFAULT_GRID
-	updates = SMOKE_SWEEP_UPDATES if settings.smoke else SWEEP_UPDATES
-	cells = grid_cells(parse_grid(grid), load_config(SELFPLAY_CONFIG))
-	for cell in cells:
-		cell_config(SELFPLAY_CONFIG, cell)
-	log_progress(
-		settings,
-		"sweep",
-		"deadline",
-		seconds_from_now=round(plan.sweep_deadline - time.time()),
-		cells=len(cells),
-	)
-	_run_parallel(
-		[
-			partial(
-				run_sweep,
-				shard(cells, position, len(gpus)),
-				config_path=SELFPLAY_CONFIG,
-				team_pool=settings.team_pool,
-				updates=updates,
-				out=settings.results / f"sweep-gpu{gpu['index']}.jsonl",
-				gpu=int(gpu["index"]),
-				deadline=plan.sweep_deadline,
-				log_dir=settings.logs,
-				log=lambda text: log_progress(settings, "sweep", "cell", text=text),
-			)
-			for position, gpu in enumerate(gpus)
-		]
-	)
-	recorded = {
-		record.get("key")
-		for path in settings.results.glob("sweep-gpu*.jsonl")
-		for record in read_records(path)
-	}
-	left = [cell.key for cell in cells if cell.key not in recorded]
-	notes = [f"{len(cells) - len(left)} of {len(cells)} cells recorded (failed ones count)"]
-	if left:
-		notes.append(f"{len(left)} cells not measured yet (deadline or failure)")
-		return StepResult("partial", tuple(notes))
-	return StepResult("complete", tuple(notes))
-
-
-# Contention.
-
-
-# The batch fallback: a training probe or a contention run that runs out of device memory is repeated
-# with half the batch (rollout.batch_size), down to BATCH_FLOOR. Every attempt is recorded.
+# The batch fallback: a training probe that runs out of device memory is repeated with half the batch
+# (rollout.batch_size), down to the floor of the caller. Every attempt is recorded.
 BATCH_FLOOR = 4096
 BATCH_LINE = re.compile(r"^batch_size = \d+[ 	]*(#.*)?$", re.MULTILINE)
 
@@ -875,229 +884,370 @@ def write_batch_config(base: Path, batch: int, dest: Path) -> Path:
 	return dest
 
 
-def _latest_by_phase(records: Sequence[Mapping[str, Any]]) -> dict[tuple, Mapping[str, Any]]:
-	"""The last record of each (phase, GPU): a failed attempt is replaced by a later one."""
-	return {(record.get("phase"), record.get("gpu")): record for record in records}
+# Sweep.
 
 
-def _phase_done(latest: Mapping[tuple, Mapping[str, Any]], phase: str, gpus: Sequence[int]) -> bool:
-	return all(latest.get((phase, gpu), {}).get("status") == "ok" for gpu in gpus)
+def sweep_cells(arm: Path, batches: Sequence[int]) -> list:
+	"""The sizing cells of one arm: its own rollout and core, at each batch size of `batches`."""
+	from pokejax.sizing import cell_config, grid_cells, parse_grid
+
+	base = load_config(arm)
+	cells = grid_cells(parse_grid("batch=" + ",".join(str(size) for size in batches)), base)
+	for cell in cells:  # a size the arm rejects fails here, before any GPU time is spent
+		cell_config(arm, cell)
+	return cells
 
 
-def _append_contention(out: Path, record: dict[str, Any], **fields: Any) -> dict[str, Any]:
-	record.update(kind="contention", **fields)
-	append_record(out, record)
-	return record
+def sweep_jobs(arms: Sequence[Path], smoke: bool) -> list[tuple[Path, tuple[int, ...]]]:
+	"""Each distinct arm with its batch sizes. The first arm (the base arm) also runs SWEEP_BASE_BATCH."""
+	batches = SMOKE_SWEEP_BATCHES if smoke else SWEEP_BATCHES
+	jobs = []
+	for index, arm in enumerate(arms):
+		sizes = batches + (SWEEP_BASE_BATCH,) if index == 0 and not smoke else batches
+		jobs.append((arm, tuple(sizes)))
+	return jobs
 
 
-def _contention_config(settings: Settings, batch: int) -> Path:
-	return write_batch_config(
-		settings.train_config, batch, settings.runs / "contention" / f"config-batch{batch}.toml"
+def _sweep_arms_on_gpu(settings: Settings, gpu: int, jobs, updates: int, deadline: float) -> None:
+	from pokejax.sizing import run_sweep
+
+	for arm, sizes in jobs:
+		run_sweep(
+			sweep_cells(arm, sizes),
+			config_path=arm,
+			team_pool=settings.team_pool,
+			updates=updates,
+			out=settings.results / f"sweep-{arm.stem}.jsonl",
+			gpu=gpu,
+			deadline=deadline,
+			log_dir=settings.logs / f"sweep-{arm.stem}",
+			log=lambda text: log_progress(settings, "sweep", "cell", text=text),
+		)
+
+
+def step_sweep(settings: Settings) -> StepResult:
+	gpus = [int(gpu["index"]) for gpu in load_gpus(settings)]
+	runs = assign_runs(settings.arms, gpus)
+	gpu_of: dict[Path, int] = {}
+	for run in runs:  # an arm is measured once, on the first GPU that trains it
+		gpu_of.setdefault(run.arm, run.gpu)
+	jobs = sweep_jobs(list(gpu_of), settings.smoke)
+	updates = SMOKE_SWEEP_UPDATES if settings.smoke else SWEEP_UPDATES
+	plan = make_plan(settings.hours, settings.start, time.time())
+	log_progress(
+		settings,
+		"sweep",
+		"deadline",
+		seconds_from_now=round(plan.sweep_deadline - time.time()),
+		arms=[str(arm) for arm, _ in jobs],
 	)
-
-
-def _alone_attempt(settings: Settings, out: Path, gpu: int, updates: int, batch: int) -> dict:
-	from pokejax.sizing import run_cell_process
-
-	record = run_cell_process(
-		key=f"contention-alone-batch{batch}",
-		cell=None,
-		config_path=_contention_config(settings, batch),
-		team_pool=settings.team_pool,
-		updates=updates,
-		gpu=gpu,
-		log_path=settings.logs / f"contention-alone-gpu{gpu}-batch{batch}.log",
-	)
-	return _append_contention(out, record, phase="alone", gpus=[gpu], batch_size=batch)
-
-
-def _both_attempt(
-	settings: Settings, out: Path, gpus: Sequence[int], updates: int, batch: int
-) -> dict[str, Any]:
-	"""Both GPUs at once at batch: the attempt fails when either run does, and is retried at half."""
-	from pokejax.sizing import run_cell_process
-
-	config = _contention_config(settings, batch)  # written once, before the two runs read it
-	records = _run_parallel(
+	per_gpu: dict[int, list] = {gpu: [] for gpu in gpus}
+	for arm, sizes in jobs:
+		per_gpu[gpu_of[arm]].append((arm, sizes))
+	_run_parallel(
 		[
-			partial(
-				run_cell_process,
-				key=f"contention-both-gpu{gpu}-batch{batch}",
-				cell=None,
-				config_path=config,
-				team_pool=settings.team_pool,
-				updates=updates,
-				gpu=gpu,
-				log_path=settings.logs / f"contention-both-gpu{gpu}-batch{batch}.log",
-			)
-			for gpu in gpus
+			partial(_sweep_arms_on_gpu, settings, gpu, items, updates, plan.sweep_deadline)
+			for gpu, items in per_gpu.items()
+			if items
 		]
 	)
-	for record in records:
-		_append_contention(out, record, phase="both", gpus=list(gpus), batch_size=batch)
-	return _combined(records)
-
-
-def _combined(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-	"""One record for runs in parallel: ok when all are, else the first failure (out of memory first)."""
-	failed = [record for record in records if record.get("status") != "ok"]
-	if not failed:
-		return {"status": "ok", "error_class": None, "error": None}
-	first = next((record for record in failed if is_out_of_memory(record)), failed[0])
-	return {
-		"status": "failed",
-		"error_class": first.get("error_class"),
-		"error": first.get("error"),
-	}
-
-
-def _fallback_note(label: str, fallback: Fallback) -> str:
-	status = "ok" if fallback.record.get("status") == "ok" else "failed"
-	attempts = lab_report.attempts_text(fallback.attempts)
-	return f"{label} {status} at batch {fallback.batch_size} ({attempts})"
-
-
-def step_contention(settings: Settings) -> StepResult:
-	gpus = [int(gpu["index"]) for gpu in load_gpus(settings)]
-	updates = SMOKE_CONTENTION_UPDATES if settings.smoke else CONTENTION_UPDATES
-	out = settings.results / "contention.jsonl"
-	start = load_config(settings.train_config).rollout.batch_size
-	latest = _latest_by_phase(read_records(out))
-	notes: list[str] = []
-	alone_ok = _phase_done(latest, "alone", gpus[:1])
-	alone_batch = start
-	if alone_ok:
-		alone_batch = int(latest[("alone", gpus[0])].get("batch_size") or start)
-	else:
-		fallback = run_with_fallback(
-			partial(_alone_attempt, settings, out, gpus[0], updates), start
-		)
-		alone_ok = fallback.record.get("status") == "ok"
-		alone_batch = fallback.batch_size
-		notes.append(_fallback_note("alone", fallback))
-	if len(gpus) < 2:
-		if ("both", None) not in latest:
-			append_record(
-				out,
-				{
-					"kind": "contention",
-					"phase": "both",
-					"status": "skipped",
-					"error": "needs two GPUs; this host has one",
-					"gpus": gpus,
-				},
-			)
-	elif alone_ok and not _phase_done(latest, "both", gpus[:2]):
-		both_attempt = partial(_both_attempt, settings, out, gpus[:2], updates)
-		fallback = run_with_fallback(both_attempt, alone_batch)
-		notes.append(_fallback_note("both", fallback))
-	latest = _latest_by_phase(read_records(out))
-	failed = [
-		key for key, record in latest.items() if record.get("status") not in ("ok", "skipped")
-	]
-	if failed:
-		return StepResult("partial", (f"contention failed for {len(failed)} run(s)", *notes))
-	complete = alone_ok and (("both", None) in latest or _phase_done(latest, "both", gpus[:2]))
-	return StepResult("complete" if complete else "partial", tuple(notes))
+	total = 0
+	left: list[str] = []
+	for arm, sizes in jobs:
+		recorded = {
+			r.get("key") for r in read_records(settings.results / f"sweep-{arm.stem}.jsonl")
+		}
+		for cell in sweep_cells(arm, sizes):
+			total += 1
+			if cell.key not in recorded:
+				left.append(f"{arm.stem} {cell.key}")
+	notes = [f"{total - len(left)} of {total} cells recorded (failed ones count)"]
+	if left:
+		notes.append(f"{len(left)} cells not measured yet (deadline or failure)")
+		return StepResult("partial", tuple(notes))
+	return StepResult("complete", tuple(notes))
 
 
 # Training.
 
 
-def _train_probe(
-	settings: Settings, gpu: int, run_dir: Path, deadline: float
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-	"""The plan of a training run from a probe of its configuration, or the failure when no batch fits.
+@dataclass(frozen=True)
+class Run:
+	"""One training run: an arm's configuration on one GPU. Its directory is named for both."""
 
-	The probe runs at each batch of the ladder until one runs. The plan names that batch and the
-	config file of the run directory that holds it.
+	arm: Path
+	gpu: int
+
+	@property
+	def name(self) -> str:
+		return f"{self.arm.stem}-gpu{self.gpu}"
+
+
+def assign_runs(arms: Sequence[Path], gpus: Sequence[int]) -> list[Run]:
+	"""The runs of the arms on the GPUs.
+
+	One configuration runs on every GPU (LAB_TRAIN_CONFIG, or a single LAB_ARMS entry). Several arms
+	go round robin: arm i on GPU i modulo the number of GPUs, so with fewer GPUs than arms the arms of
+	one GPU run one after another, each for an equal share of that GPU's time.
+	"""
+	if not arms or not gpus:
+		raise ValueError("the lab needs at least one arm and one GPU")
+	unique = list(dict.fromkeys(arms))
+	if len(unique) == 1:
+		return [Run(unique[0], gpu) for gpu in gpus]
+	stems = [arm.stem for arm in unique]
+	if len(set(stems)) != len(stems):
+		raise ValueError(f"the arms need distinct file names: {', '.join(stems)}")
+	return [Run(arm, gpus[index % len(gpus)]) for index, arm in enumerate(unique)]
+
+
+def runs_on(runs: Sequence[Run], gpu: int) -> list[Run]:
+	return [run for run in runs if run.gpu == gpu]
+
+
+def unique_arms(runs: Sequence[Run]) -> list[Path]:
+	return list(dict.fromkeys(run.arm for run in runs))
+
+
+def doubling_checkpoints(
+	updates: int, steps_per_update: int, base_steps: int = KEEP_BASE_STEPS
+) -> list[int]:
+	"""The updates whose checkpoints are kept: the first update at or after base_steps, then at each
+	doubling of the environment steps below the last update, and the last update itself."""
+	kept: list[int] = []
+	steps = base_steps
+	while True:
+		update = math.ceil(steps / steps_per_update)
+		if update >= updates:
+			break
+		kept.append(update)
+		steps *= 2
+	kept.append(updates)
+	return kept
+
+
+def panel_battles(kept: int, smoke: bool = False) -> int:
+	"""The battles of one run's panel: each kept checkpoint against each opponent in both modes, and
+	the final checkpoint again at the final size."""
+	opponents = len(POLICY_NAMES) + len(REFERENCE_CHECKPOINTS)
+	size = SMOKE_PANEL_BATTLES if smoke else PANEL_BATTLES
+	final = SMOKE_FINAL_PANEL_BATTLES if smoke else FINAL_PANEL_BATTLES
+	modes = len(MODE_NAMES)
+	return kept * opponents * modes * size + opponents * modes * final
+
+
+def pairs(contestants: int) -> int:
+	"""The unordered pairs of a cross-play matrix (pokejax.train.crossplay plays each once)."""
+	return contestants * (contestants - 1) // 2
+
+
+def crossplay_battles(contestants: int, smoke: bool = False) -> int:
+	"""The games of the cross-play matrix, as battles: each pair plays both modes, 2 games per draw."""
+	draws = SMOKE_CROSSPLAY_DRAWS if smoke else CROSSPLAY_DRAWS
+	return pairs(contestants) * len(MODE_NAMES) * 2 * draws
+
+
+def panel_reserve_seconds(
+	kept_by_run: Mapping[Run, int], gpus: Sequence[int], smoke: bool = False
+) -> float:
+	"""The seconds the training leaves for the panel: the GPU with the most panel work, the cross-play
+	(run on the first GPU) included. Each run has two panel processes (its kept checkpoints, and its
+	final one at the final size); the cross-play has one process and one compile per pair."""
+	fixed = {gpu: 0.0 for gpu in gpus}
+	battles = {gpu: 0 for gpu in gpus}
+	for run, kept in kept_by_run.items():
+		fixed[run.gpu] += 2 * PANEL_JOB_SECONDS
+		battles[run.gpu] += panel_battles(kept, smoke)
+	if gpus:
+		contestants = len(kept_by_run) + len(REFERENCE_CHECKPOINTS)
+		fixed[gpus[0]] += PANEL_JOB_SECONDS + pairs(contestants) * CROSSPLAY_PAIR_SECONDS
+		battles[gpus[0]] += crossplay_battles(contestants, smoke)
+	busiest = max(
+		(fixed[gpu] + battles[gpu] * PANEL_SECONDS_PER_BATTLE for gpu in gpus), default=0.0
+	)
+	return PANEL_SAFETY * busiest
+
+
+def probe_run(settings: Settings, run: Run) -> dict[str, Any]:
+	"""A probe of the run's configuration on its GPU, at the first batch of the ladder that runs.
+
+	A probe that runs is cached in the run directory (probe.json), so a rerun does not repeat it.
 	"""
 	from pokejax.sizing import run_cell_process
 
-	start = load_config(settings.train_config).rollout.batch_size
+	run_dir = settings.runs / run.name
+	cached = run_dir / "probe.json"
+	if cached.exists():
+		return json.loads(cached.read_text(encoding="utf-8"))
+	start = load_config(run.arm).rollout.batch_size
+	floor = TRAIN_FLOOR
+	if settings.smoke:
+		start, floor = min(start, SMOKE_TRAIN_BATCH), SMOKE_TRAIN_FLOOR
 	probe_updates = SMOKE_PROBE_UPDATES if settings.smoke else PROBE_UPDATES
 
 	def attempt(batch: int) -> dict[str, Any]:
-		config = write_batch_config(
-			settings.train_config, batch, run_dir / f"config-batch{batch}.toml"
-		)
+		config = write_batch_config(run.arm, batch, run_dir / f"config-batch{batch}.toml")
 		record = run_cell_process(
-			key=f"train-probe-gpu{gpu}-batch{batch}",
+			key=f"train-probe-{run.name}-batch{batch}",
 			cell=None,
 			config_path=config,
 			team_pool=settings.team_pool,
 			updates=probe_updates,
-			gpu=gpu,
-			log_path=settings.logs / f"train-probe-gpu{gpu}-batch{batch}.log",
+			gpu=run.gpu,
+			log_path=settings.logs / f"train-probe-{run.name}-batch{batch}.log",
 		)
 		append_record(
-			settings.results / "train-probe.jsonl", {"kind": "probe", "batch_size": batch, **record}
+			settings.results / "train-probe.jsonl",
+			{"kind": "probe", "run": run.name, "batch_size": batch, **record},
 		)
 		return record
 
-	fallback = run_with_fallback(attempt, start)
+	fallback = run_with_fallback(attempt, start, floor=floor)
 	probe = fallback.record
+	base = {"run": run.name, "gpu": run.gpu, "batch_size": fallback.batch_size}
 	if probe.get("status") != "ok":
-		failure = {
+		return {
+			**base,
 			"status": "failed",
-			"gpu": gpu,
-			"batch_size": fallback.batch_size,
 			"attempts": fallback.attempts,
 			"error": probe.get("error"),
-			"probe": probe,
 		}
-		return None, failure
-	if settings.smoke:
-		updates = SMOKE_TRAIN_UPDATES
-	else:
-		available = deadline - time.time() - probe["cold_update_seconds"] - STARTUP_SECONDS
-		updates = plan_updates(probe["update_seconds"], available)
-	plan = {
-		"gpu": gpu,
-		"batch_size": fallback.batch_size,
-		"config": str(run_dir / f"config-batch{fallback.batch_size}.toml"),
+	result = {
+		**base,
+		"status": "ok",
 		"attempts": fallback.attempts,
-		"updates": updates,
-		"eval_every": 1 if settings.smoke else max(1, updates // EVALUATIONS_PER_RUN),
-		"checkpoint_every": 1 if settings.smoke else max(1, updates // CHECKPOINTS_PER_RUN),
+		"config": str(run_dir / f"config-batch{fallback.batch_size}.toml"),
+		"steps_per_update": fallback.batch_size * load_config(run.arm).rollout.rollout_length,
 		"probe_update_seconds": probe["update_seconds"],
 		"probe_cold_update_seconds": probe["cold_update_seconds"],
-		"deadline": deadline,
 	}
-	(run_dir / "lab-plan.json").write_text(
-		json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-	)
-	return plan, None
-
-
-def train_one_gpu(settings: Settings, gpu: int, deadline: float) -> dict[str, Any]:
-	"""A timed training run of the training configuration on one GPU, resumed when interrupted.
-
-	The batch is the one of the first probe in the ladder that runs (see _train_probe), and the run
-	uses that batch's config file. A plan that exists is used as it is: a rerun resumes the run.
-	"""
-	run_dir = settings.runs / f"{settings.train_config.stem}-gpu{gpu}"
 	run_dir.mkdir(parents=True, exist_ok=True)
-	plan_path = run_dir / "lab-plan.json"
+	cached.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+	return result
+
+
+def plan_runs(
+	settings: Settings,
+	runs: Sequence[Run],
+	probes: Mapping[str, Mapping[str, Any]],
+	fixed: Mapping[str, Mapping[str, Any]],
+	deadline: float,
+	now: float,
+) -> dict[str, dict[str, Any]]:
+	"""The plan of each run that has a probe and no plan yet.
+
+	A GPU's training window (from now until the deadline, less the panel reserve) is shared equally by
+	the runs on that GPU, one after another. A run's updates fill its share after its cold update and
+	its start-up. Its kept checkpoints follow from its updates, and the panel reserve from the kept
+	checkpoints of every run, so the two are fitted together.
+	"""
+	gpus = sorted({run.gpu for run in runs})
+	reserve = 0.0
+	plans: dict[str, dict[str, Any]] = {}
+	for _ in range(PLAN_ITERATIONS):
+		plans = {}
+		for gpu in gpus:
+			active = [
+				run
+				for run in runs_on(runs, gpu)
+				if run.name not in fixed and probes.get(run.name, {}).get("status") == "ok"
+			]
+			if not active:
+				continue
+			share = max(0.0, deadline - reserve - now) / len(active)
+			for position, run in enumerate(active):
+				probe = probes[run.name]
+				if settings.smoke:
+					updates = SMOKE_TRAIN_UPDATES
+					base_steps = probe["steps_per_update"]  # smoke: a checkpoint at 1, 2, 4 updates
+				else:
+					available = share - probe["probe_cold_update_seconds"] - STARTUP_SECONDS
+					updates = plan_updates(probe["probe_update_seconds"], available)
+					base_steps = KEEP_BASE_STEPS
+				kept = doubling_checkpoints(updates, probe["steps_per_update"], base_steps)
+				plans[run.name] = {
+					"run": run.name,
+					"arm": str(run.arm),
+					"gpu": run.gpu,
+					"batch_size": probe["batch_size"],
+					"attempts": probe["attempts"],
+					"config": probe["config"],
+					"steps_per_update": probe["steps_per_update"],
+					"updates": updates,
+					"decay_updates": updates,
+					"keep": kept,
+					"eval_every": 1 if settings.smoke else max(1, updates // EVALUATIONS_PER_RUN),
+					"probe_update_seconds": probe["probe_update_seconds"],
+					"probe_cold_update_seconds": probe["probe_cold_update_seconds"],
+					"window_seconds": share,
+					"window_end": now + share * (position + 1),
+					"panel_reserve_seconds": None,
+					"planned": iso_now(),
+				}
+		kept_by_run: dict[Run, int] = {}
+		for run in runs:
+			plan = plans.get(run.name) or fixed.get(run.name)
+			if plan is not None:
+				kept_by_run[run] = len(plan["keep"])
+		new_reserve = panel_reserve_seconds(kept_by_run, gpus, settings.smoke)
+		if abs(new_reserve - reserve) < 1.0:
+			reserve = new_reserve
+			break
+		reserve = new_reserve
+	for plan in plans.values():
+		plan["panel_reserve_seconds"] = reserve
+	return plans
+
+
+def _plan_path(settings: Settings, run: Run) -> Path:
+	return settings.runs / run.name / "lab-plan.json"
+
+
+def _read_plan(settings: Settings, run: Run) -> dict[str, Any] | None:
+	path = _plan_path(settings, run)
+	return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+
+def _write_plan(settings: Settings, run: Run, plan: Mapping[str, Any]) -> None:
+	path = _plan_path(settings, run)
+	path.parent.mkdir(parents=True, exist_ok=True)
+	path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _per_gpu(
+	runs: Sequence[Run], gpus: Sequence[int], task: Callable[[Run], Any]
+) -> dict[str, Any]:
+	"""task(run) for every run: the runs of one GPU one after another, the GPUs in parallel."""
+	groups = [runs_on(runs, gpu) for gpu in gpus]
+
+	def group_task(group: Sequence[Run]) -> list[tuple[str, Any]]:
+		return [(run.name, task(run)) for run in group]
+
+	results = _run_parallel([partial(group_task, group) for group in groups if group])
+	return {name: value for group in results for name, value in group}
+
+
+def train_run(settings: Settings, run: Run, plan: Mapping[str, Any]) -> dict[str, Any]:
+	"""A timed training run of one plan on its GPU, resumed when interrupted (same rows, same keep)."""
+	run_dir = settings.runs / run.name
+	run_dir.mkdir(parents=True, exist_ok=True)
 	result_path = run_dir / "result.json"
-	plan = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.exists() else None
-	if result_path.exists() and plan is not None:
+	if result_path.exists():
 		return {
 			"status": "ok",
-			"gpu": gpu,
-			"run_dir": str(run_dir),
+			"gpu": run.gpu,
+			"run": run.name,
 			"note": "already finished",
 			"batch_size": plan.get("batch_size"),
 			"attempts": plan.get("attempts", []),
 		}
-	if plan is None:
-		plan, failure = _train_probe(settings, gpu, run_dir, deadline)
-		if plan is None:
-			return failure or {"status": "failed", "gpu": gpu}
 	resume = (run_dir / "checkpoint.npz").exists()
 	if not resume:  # an interrupted start left no checkpoint: begin the run again
 		for name in ("config.json", "metrics.jsonl"):
 			(run_dir / name).unlink(missing_ok=True)
+		for stale in run_dir.glob("checkpoint-*.npz"):
+			stale.unlink()
+	kept = ",".join(str(update) for update in plan["keep"])
 	command = [
 		sys.executable,
 		"-m",
@@ -1107,31 +1257,35 @@ def train_one_gpu(settings: Settings, gpu: int, deadline: float) -> dict[str, An
 		"--team-pool",
 		str(settings.team_pool),
 		"--run-name",
-		f"{settings.train_config.stem}-gpu{gpu}",
+		run.name,
 		"--run-dir",
 		str(run_dir),
 		"--updates",
 		str(plan["updates"]),
 		"--eval-every",
 		str(plan["eval_every"]),
-		"--checkpoint-every",
-		str(plan["checkpoint_every"]),
+		"--set",
+		f"ppo.decay_updates={plan['decay_updates']}",
+		"--set",
+		f"checkpoint.keep=[{kept}]",
 	]
 	if settings.smoke:
+		command += ["--checkpoint-every", "1"]
 		for setting in SMOKE_TRAIN_SETTINGS:
 			command += ["--set", setting]
 	if resume:
 		command.append("--resume")
-	timeout = max(deadline - time.time(), 60.0) + TRAIN_TIMEOUT_SLACK
+	timeout = max(plan["window_end"] - time.time(), 60.0) + TRAIN_TIMEOUT_SLACK
 	measured = run_measurement(
-		command, gpu=gpu, log_path=settings.logs / f"train-gpu{gpu}.log", timeout=timeout
+		command, gpu=run.gpu, log_path=settings.logs / f"train-{run.name}.log", timeout=timeout
 	)
 	ok = measured["returncode"] == 0 and result_path.exists()
 	return {
 		"status": "ok" if ok else "failed",
-		"gpu": gpu,
+		"gpu": run.gpu,
+		"run": run.name,
 		"run_dir": str(run_dir),
-		"plan": plan,
+		"plan": dict(plan),
 		"batch_size": plan.get("batch_size"),
 		"attempts": plan.get("attempts", []),
 		"resumed": resume,
@@ -1144,22 +1298,215 @@ def train_one_gpu(settings: Settings, gpu: int, deadline: float) -> dict[str, An
 
 def step_train(settings: Settings) -> StepResult:
 	gpus = [int(gpu["index"]) for gpu in load_gpus(settings)]
-	plan = make_plan(settings.hours, settings.start, time.time())
+	runs = assign_runs(settings.arms, gpus)
+	deadline = make_plan(settings.hours, settings.start, time.time()).training_deadline
 	out = settings.results / "train.jsonl"
-	records = _run_parallel(
-		[partial(train_one_gpu, settings, gpu, plan.training_deadline) for gpu in gpus]
-	)
-	for record in records:
-		append_record(out, {"kind": "training", "step": "train", **record})
+	plans = {run.name: _read_plan(settings, run) for run in runs}
+	pending = [run for run in runs if plans[run.name] is None]
+	probes = _per_gpu(pending, gpus, lambda run: probe_run(settings, run))
+	failures = []
+	for run in pending:
+		probe = probes[run.name]
+		if probe["status"] != "ok":
+			failures.append(run.name)
+			append_record(out, {"kind": "training", "step": "train", "gpu": run.gpu, **probe})
+	fixed = {name: plan for name, plan in plans.items() if plan is not None}
+	new_plans = plan_runs(settings, runs, probes, fixed, deadline, time.time())
+	for run in runs:
+		if run.name in new_plans:
+			plans[run.name] = new_plans[run.name]
+			_write_plan(settings, run, new_plans[run.name])
+	trainable = [run for run in runs if plans[run.name] is not None]
+	records = _per_gpu(trainable, gpus, lambda run: train_run(settings, run, plans[run.name]))
+	for run in trainable:
+		append_record(out, {"kind": "training", "step": "train", **records[run.name]})
+		if records[run.name]["status"] != "ok":
+			failures.append(run.name)
 	notes = tuple(
-		f"GPU {record['gpu']}: batch {record.get('batch_size')} "
-		f"({lab_report.attempts_text(record.get('attempts', []))})"
-		for record in records
+		f"{run.name}: batch {plans[run.name]['batch_size']}, {plans[run.name]['updates']} updates, "
+		f"kept {len(plans[run.name]['keep'])} checkpoints ("
+		f"{lab_report.attempts_text(plans[run.name]['attempts'])})"
+		for run in runs
+		if plans[run.name] is not None
 	)
-	failed = [record["gpu"] for record in records if record["status"] != "ok"]
+	if failures:
+		return StepResult(
+			"partial", (f"training failed or not planned: {', '.join(failures)}", *notes)
+		)
+	return StepResult("complete", (f"{len(runs)} training runs finished", *notes))
+
+
+# Panel.
+
+
+@dataclass(frozen=True)
+class Job:
+	"""One measurement of the panel step: a command on one GPU, done when its output file exists."""
+
+	name: str
+	gpu: int
+	command: tuple[str, ...]
+	out: Path
+	timeout: float
+
+
+def run_checkpoints(settings: Settings, run: Run, plan: Mapping[str, Any]) -> list[dict[str, Any]]:
+	"""The kept checkpoints of a run in update order, with their labels, steps and files."""
+	run_dir = settings.runs / run.name
+	return [
+		{
+			"update": update,
+			"steps": update * plan["steps_per_update"],
+			"label": checkpoint_label(run.name, update * plan["steps_per_update"]),
+			"path": run_dir / f"checkpoint-{update}.npz",
+		}
+		for update in plan["keep"]
+	]
+
+
+def panel_command(
+	settings: Settings,
+	candidates: Sequence[tuple[str, Path]],
+	*,
+	battles: int,
+	batch: int,
+	out: Path,
+	differences: Sequence[tuple[str, str]] = (),
+) -> list[str]:
+	command = [sys.executable, "-m", "pokejax.train.panel"]
+	command += [f"{label}={path}" for label, path in candidates]
+	for label, path in REFERENCE_CHECKPOINTS:
+		command += ["--opponent", f"{label}={path}"]
+	command += ["--battles", str(battles), "--batch", str(batch), "--seed", "0"]
+	command += ["--team-pool", str(settings.team_pool), "--out", str(out)]
+	for first, second in differences:
+		command += ["--difference", first, second]
+	return command
+
+
+def crossplay_command(
+	settings: Settings, contestants: Sequence[tuple[str, Path]], out: Path
+) -> list[str]:
+	draws = SMOKE_CROSSPLAY_DRAWS if settings.smoke else CROSSPLAY_DRAWS
+	batch = SMOKE_CROSSPLAY_BATCH if settings.smoke else CROSSPLAY_BATCH
+	command = [sys.executable, "-m", "pokejax.train.crossplay"]
+	command += [f"{label}={path}" for label, path in [*contestants, *REFERENCE_CHECKPOINTS]]
+	command += ["--draws", str(draws), "--batch", str(batch), "--seed", "0"]
+	command += ["--team-pool", str(settings.team_pool), "--out", str(out)]
+	return command
+
+
+def _run_job(settings: Settings, job: Job) -> dict[str, Any]:
+	if job.out.exists():
+		return {"kind": "panel", "step": "panel", "job": job.name, "status": "ok", "note": "done"}
+	job.out.parent.mkdir(parents=True, exist_ok=True)
+	measured = run_measurement(
+		list(job.command),
+		gpu=job.gpu,
+		log_path=settings.logs / f"panel-{job.name}.log",
+		timeout=job.timeout,
+	)
+	ok = measured["returncode"] == 0 and job.out.exists()
+	record = {
+		"kind": "panel",
+		"step": "panel",
+		"job": job.name,
+		"gpu": job.gpu,
+		"status": "ok" if ok else "failed",
+		"returncode": measured["returncode"],
+		"timed_out": measured["timed_out"],
+		"wall_seconds": measured["wall_seconds"],
+		"log": measured["log"],
+		"out": str(job.out),
+	}
+	append_record(settings.results / "panel.jsonl", record)
+	log_progress(settings, "panel", "job", text=f"{job.name} gpu {job.gpu}: {record['status']}")
+	return record
+
+
+def step_panel(settings: Settings) -> StepResult:
+	gpus = [int(gpu["index"]) for gpu in load_gpus(settings)]
+	runs = assign_runs(settings.arms, gpus)
+	missing = [str(path) for _, path in REFERENCE_CHECKPOINTS if not path.exists()]
+	if missing:
+		message = (
+			f"missing reference checkpoint(s): {', '.join(missing)}; lab/make-kit.sh copies "
+			"them into the kit (work/reference-checkpoints)"
+		)
+		return StepResult("failed", (message,), 1)
+	notes: list[str] = []
+	jobs: dict[int, list[Job]] = {gpu: [] for gpu in gpus}
+	finals: list[tuple[str, Path]] = []
+	for run in runs:
+		plan = _read_plan(settings, run)
+		if plan is None or not (settings.runs / run.name / "result.json").exists():
+			notes.append(f"{run.name}: not trained, no panel")
+			continue
+		kept = run_checkpoints(settings, run, plan)
+		if any(not checkpoint["path"].exists() for checkpoint in kept):
+			notes.append(f"{run.name}: a kept checkpoint is missing, no panel")
+			continue
+		candidates = [(checkpoint["label"], checkpoint["path"]) for checkpoint in kept]
+		differences = [(kept[i]["label"], kept[i - 1]["label"]) for i in range(1, len(kept))]
+		battles = SMOKE_PANEL_BATTLES if settings.smoke else PANEL_BATTLES
+		final_battles = SMOKE_FINAL_PANEL_BATTLES if settings.smoke else FINAL_PANEL_BATTLES
+		batch = SMOKE_PANEL_BATCH if settings.smoke else PANEL_BATCH
+		expected = panel_battles(len(kept), settings.smoke)
+		timeout = PANEL_TIMEOUT_SECONDS + 2 * expected * PANEL_SECONDS_PER_BATTLE
+		out = settings.panel_dir / f"{run.name}.json"
+		command = panel_command(
+			settings,
+			candidates,
+			battles=battles,
+			batch=batch,
+			out=out,
+			differences=differences,
+		)
+		jobs[run.gpu].append(Job(run.name, run.gpu, tuple(command), out, timeout))
+		final = kept[-1]
+		final_out = settings.panel_dir / f"{run.name}-final.json"
+		final_command = panel_command(
+			settings,
+			[(final["label"], final["path"])],
+			battles=final_battles,
+			batch=batch,
+			out=final_out,
+		)
+		jobs[run.gpu].append(
+			Job(f"{run.name}-final", run.gpu, tuple(final_command), final_out, timeout)
+		)
+		finals.append((final["label"], final["path"]))
+	if len(finals) + len(REFERENCE_CHECKPOINTS) >= 2:
+		cross_out = settings.panel_dir / "crossplay.json"
+		jobs[gpus[0]].append(
+			Job(
+				"crossplay",
+				gpus[0],
+				tuple(crossplay_command(settings, finals, cross_out)),
+				cross_out,
+				PANEL_TIMEOUT_SECONDS
+				+ 2
+				* crossplay_battles(len(finals) + len(REFERENCE_CHECKPOINTS), settings.smoke)
+				* PANEL_SECONDS_PER_BATTLE,
+			)
+		)
+	if not finals:
+		return StepResult("failed", ("no trained run to evaluate", *notes), 1)
+	results = _per_gpu_jobs(settings, jobs)
+	failed = [record["job"] for record in results if record["status"] != "ok"]
 	if failed:
-		return StepResult("partial", (f"training failed on GPU {failed}", *notes))
-	return StepResult("complete", (f"{len(gpus)} training runs finished", *notes))
+		return StepResult("partial", (f"panel jobs failed: {', '.join(failed)}", *notes))
+	return StepResult("complete", (f"{len(results)} panel jobs done", *notes))
+
+
+def _per_gpu_jobs(settings: Settings, jobs: Mapping[int, Sequence[Job]]) -> list[dict[str, Any]]:
+	groups = [list(items) for items in jobs.values() if items]
+	results = _run_parallel([partial(_run_job_list, settings, group) for group in groups])
+	return [record for group in results for record in group]
+
+
+def _run_job_list(settings: Settings, group: Sequence[Job]) -> list[dict[str, Any]]:
+	return [_run_job(settings, job) for job in group]
 
 
 # Pack.
@@ -1181,7 +1528,51 @@ def _archive_filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
 	return None if info.name.endswith((".tmp", ".old")) else info
 
 
+def make_plots(settings: Settings) -> list[str]:
+	"""The training curves as SVG (pokejax.train.plot): each opponent the runs evaluated, by environment
+	steps and by wall minutes, over every run that wrote evaluations. Returns the names that failed."""
+	run_dirs = [
+		path for path in sorted(settings.runs.glob("*-gpu*")) if (path / "metrics.jsonl").exists()
+	]
+	if not run_dirs:
+		return []
+	evaluated: set[str] | None = None
+	for path in run_dirs:
+		config = _load_json(path / "config.json")
+		names = set(config.get("evaluation", {}).get("opponents", []))
+		evaluated = names if evaluated is None else evaluated & names
+	opponents = [name for name in PLOT_OPPONENTS if name in (evaluated or set())]
+	failed = []
+	for opponent in opponents:
+		for x_mode in ("steps", "minutes"):
+			name = f"{opponent}-by-{x_mode}.svg"
+			command = [
+				sys.executable,
+				"-m",
+				"pokejax.train.plot",
+				*[str(path) for path in run_dirs],
+				"--opponent",
+				opponent,
+				"--x",
+				x_mode,
+				"--out",
+				str(settings.lab_dir / "plots" / name),
+			]
+			completed = _run_quietly(command, timeout=900)
+			if completed.returncode != 0:
+				failed.append(name)
+	return failed
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+	try:
+		return json.loads(path.read_text(encoding="utf-8"))
+	except (OSError, json.JSONDecodeError):
+		return {}
+
+
 def step_pack(settings: Settings) -> StepResult:
+	failed_plots = make_plots(settings)
 	summary = lab_report.summary_markdown(settings.lab_dir)
 	(settings.lab_dir / "summary.md").write_text(summary, encoding="utf-8")
 	archive = archive_name(settings, socket.gethostname())
@@ -1191,7 +1582,10 @@ def step_pack(settings: Settings) -> StepResult:
 		kit = Path("KIT_COMMIT")
 		if kit.exists():
 			tar.add(kit, arcname="KIT_COMMIT")
-	return StepResult("complete", (f"archive {archive}",))
+	notes = (f"archive {archive}",)
+	if failed_plots:
+		return StepResult("partial", (f"figures failed: {', '.join(failed_plots)}", *notes))
+	return StepResult("complete", notes)
 
 
 STEP_FUNCTIONS: dict[str, Callable[[Settings], StepResult]] = {
@@ -1199,8 +1593,8 @@ STEP_FUNCTIONS: dict[str, Callable[[Settings], StepResult]] = {
 	"facts": step_facts,
 	"bench": step_bench,
 	"sweep": step_sweep,
-	"contention": step_contention,
 	"train": step_train,
+	"panel": step_panel,
 	"pack": step_pack,
 }
 

@@ -3,12 +3,22 @@
 Both read only the files a lab run writes, so they can be rebuilt from an archive on any machine.
 """
 
+import itertools
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from pokejax.records import GIB, SWEEP_HEADERS, markdown_table, read_records, sweep_rows
+from pokejax.records import (
+	GIB,
+	SWEEP_HEADERS,
+	checkpoint_label,
+	markdown_table,
+	read_records,
+	sweep_rows,
+)
+
+BASELINE_ORDER = ("random", "random-move", "max-damage", "heuristics")
 
 
 def _yes_no(value: Any) -> str:
@@ -131,7 +141,7 @@ def _steps_table(lab_dir: Path) -> str:
 			continue
 		if event.get("event") in ("complete", "partial", "failed"):
 			last[event.get("step", "")] = event
-	order = ("preflight", "facts", "bench", "sweep", "contention", "train", "pack")
+	order = ("preflight", "facts", "bench", "sweep", "train", "panel", "pack")
 	rows = []
 	for step in sorted(last, key=lambda name: order.index(name) if name in order else 99):
 		event = last[step]
@@ -204,55 +214,6 @@ def attempts_text(attempts: Sequence[Mapping[str, Any]]) -> str:
 	return ", ".join(parts) or "none"
 
 
-def _contention_table(lab_dir: Path) -> tuple[str, str]:
-	records = read_records(lab_dir / "results" / "contention.jsonl")
-	rows = []
-	for record in records:
-		ok = record.get("status") == "ok"
-		rows.append(
-			[
-				str(record.get("phase")),
-				",".join(str(gpu) for gpu in record.get("gpus", []) if gpu is not None),
-				str(record.get("batch_size", "")),
-				f"{record['environment_steps_per_second']:,.0f}" if ok else "",
-				f"{record['update_seconds']:.3f}" if ok else "",
-				f"{record['learner_steps_per_second']:,.0f}" if ok else "",
-				"ok" if ok else str(record.get("status")) + " " + str(record.get("error") or ""),
-			]
-		)
-	table = (
-		markdown_table(
-			["Phase", "GPUs", "Batch", "Env steps/s", "Update s", "Learner steps/s", "Status"], rows
-		)
-		if rows
-		else "(none)"
-	)
-	latest: dict[tuple, Mapping[str, Any]] = {}
-	for record in records:  # the last attempt of each run, as the lab reads them
-		latest[(record.get("phase"), record.get("gpu"))] = record
-	alone = [r for (phase, _), r in latest.items() if phase == "alone" and r.get("status") == "ok"]
-	both = [
-		r for (phase, _), r in latest.items() if phase == "both" and r.get("status") != "skipped"
-	]
-	note = "Slowdown: not measured (needs two GPUs and both runs)."
-	if alone and both and all(r.get("status") == "ok" for r in both):
-		base = alone[0]
-		if all(r.get("batch_size") == base.get("batch_size") for r in both):
-			ratios = [r["update_seconds"] / base["update_seconds"] for r in both]
-			note = (
-				"Update time with both GPUs busy, over the alone run at the same batch: "
-				+ ", ".join(f"{ratio:.2f}x" for ratio in ratios)
-				+ "."
-			)
-		else:
-			batches = ", ".join(str(r.get("batch_size")) for r in both)
-			note = (
-				f"Slowdown: not comparable (alone at batch {base.get('batch_size')}, both at "
-				f"batch {batches})."
-			)
-	return table, note
-
-
 def _training_sections(lab_dir: Path) -> str:
 	parts = []
 	plan_rows, final_rows, curve_rows = [], [], []
@@ -267,7 +228,7 @@ def _training_sections(lab_dir: Path) -> str:
 					str(plan.get("updates")),
 					f"{plan.get('probe_update_seconds', 0):.3f}",
 					str(plan.get("eval_every")),
-					str(plan.get("checkpoint_every")),
+					str(len(plan.get("keep", []))),
 					attempts_text(plan.get("attempts", [])),
 				]
 			)
@@ -327,7 +288,7 @@ def _training_sections(lab_dir: Path) -> str:
 					"Updates",
 					"Probe update s",
 					"Eval every",
-					"Checkpoint every",
+					"Kept checkpoints",
 					"Batch attempts",
 				],
 				plan_rows,
@@ -392,16 +353,243 @@ def _training_sections(lab_dir: Path) -> str:
 	return "\n\n".join(parts) if parts else "(none)"
 
 
+def _sweep_arms_table(lab_dir: Path) -> str:
+	"""The sweep of each arm (results/sweep-<arm>.jsonl): rows, parameters and rates per batch size."""
+	rows = []
+	for path in sorted((lab_dir / "results").glob("sweep-*.jsonl")):
+		arm = path.name[len("sweep-") : -len(".jsonl")]
+		for record in read_records(path):
+			if record.get("kind") != "sweep":
+				continue
+			cell = record.get("cell") or {}
+			ok = record.get("status") == "ok"
+			peak = (record.get("device_memory") or {}).get("peak_bytes_in_use")
+			environment = record.get("environment_steps_per_second")
+			rows.append(
+				[
+					arm,
+					str(cell.get("batch", "")),
+					f"{record['parameters']:,}" if ok else "",
+					f"{environment:,.0f}" if ok and environment is not None else "",
+					f"{record['learner_steps_per_second']:,.0f}" if ok else "",
+					f"{record['update_seconds']:.3f}" if ok else "",
+					f"{record['compile_seconds']:.1f}" if ok else "",
+					f"{peak / GIB:.2f}" if peak is not None else "",
+					"ok" if ok else f"failed ({record.get('error_class') or record.get('error')})",
+				]
+			)
+	rows.sort(key=lambda row: (row[0], int(row[1] or 0)))
+	headers = [
+		"Arm",
+		"Batch",
+		"Parameters",
+		"Env steps/s",
+		"Learner steps/s",
+		"Update s",
+		"Compile s",
+		"Peak GiB",
+		"Status",
+	]
+	return markdown_table(headers, rows) if rows else "(none)"
+
+
+def _plans_table(lab_dir: Path) -> str:
+	rows = []
+	for path in sorted((lab_dir / "runs").glob("*-gpu*/lab-plan.json")):
+		plan = _load(path)
+		if not plan:
+			continue
+		spu = plan.get("steps_per_update", 0)
+		rows.append(
+			[
+				path.parent.name,
+				str(plan.get("gpu", "")),
+				str(plan.get("batch_size", "")),
+				str(plan.get("updates", "")),
+				f"{plan.get('updates', 0) * spu:,}",
+				", ".join(str(update) for update in plan.get("keep", [])),
+				str(plan.get("eval_every", "")),
+				f"{plan.get('window_seconds', 0):,.0f}",
+				f"{plan.get('panel_reserve_seconds') or 0:,.0f}",
+			]
+		)
+	headers = [
+		"Run",
+		"GPU",
+		"Batch",
+		"Updates",
+		"Env steps",
+		"Kept checkpoints (updates)",
+		"Eval every",
+		"Window s",
+		"Panel reserve s",
+	]
+	return markdown_table(headers, rows) if rows else "(none)"
+
+
+def _seconds_at(run_dir: Path, update: int) -> float | None:
+	"""The wall seconds of a run at an update, interpolated between its logged updates."""
+	points = sorted(
+		(record["update"], record["seconds"])
+		for record in read_records(run_dir / "metrics.jsonl")
+		if record.get("kind") == "update"
+	)
+	if not points:
+		return None
+	for (low_update, low_seconds), (high_update, high_seconds) in itertools.pairwise(points):
+		if low_update <= update <= high_update and high_update > low_update:
+			share = (update - low_update) / (high_update - low_update)
+			return low_seconds + share * (high_seconds - low_seconds)
+	return points[-1][1] if update >= points[-1][0] else points[0][1]
+
+
+def _opponent_order(names) -> list[str]:
+	"""The baselines in the order of the lab's tables, then the other opponents by name."""
+	names = list(names)
+	first = [name for name in BASELINE_ORDER if name in names]
+	return first + sorted(name for name in names if name not in BASELINE_ORDER)
+
+
+def _panel_sections(lab_dir: Path) -> str:
+	"""Per run: the panel's table per checkpoint (steps, wall minutes, win rates) and the paired
+	differences between successive kept checkpoints, both action modes."""
+	parts = []
+	for plan_path in sorted((lab_dir / "runs").glob("*-gpu*/lab-plan.json")):
+		run_name = plan_path.parent.name
+		plan = _load(plan_path)
+		panel = _load(lab_dir / "panel" / f"{run_name}.json")
+		if not plan or not panel:
+			continue
+		final = _load(lab_dir / "panel" / f"{run_name}-final.json")
+		opponents = _opponent_order(
+			panel["results"][next(iter(panel["results"]))]["sampled"]["opponents"]
+		)
+		rows = []
+		for update in plan.get("keep", []):
+			steps = update * plan.get("steps_per_update", 0)
+			label = checkpoint_label(run_name, steps)
+			source = final if final and update == plan.get("updates") else panel
+			report = source.get("results", {}).get(label)
+			if report is None:
+				continue
+			sampled, greedy = report["sampled"], report["greedy"]
+			low, high = sampled["panel_ci95"]["ci95"]
+			seconds = _seconds_at(lab_dir / "runs" / run_name, update)
+			rows.append(
+				[
+					label,
+					f"{int(source.get('battles', 0)):,}",
+					f"{steps:,}",
+					f"{seconds / 60:.1f}" if seconds is not None else "",
+				]
+				+ [f"{100 * sampled['opponents'][name]['win_rate']:.2f}" for name in opponents]
+				+ [
+					f"{100 * sampled['panel_mean']:.2f} [{100 * low:.2f}, {100 * high:.2f}]",
+					f"{100 * greedy['panel_mean']:.2f}",
+				]
+			)
+		headers = ["Checkpoint", "Setups", "Steps", "Minutes"] + [
+			name for name in opponents
+		] + ["Panel mean, sampled [95%]", "Panel mean, greedy"]  # fmt: skip
+		parts.append(
+			f"{run_name} (win rate in %, sampled actions unless noted)\n\n"
+			+ markdown_table(headers, rows)
+		)
+		diff_rows = []
+		for entry in panel.get("differences", []):
+			low, high = entry["panel"]["ci95"]
+			cells = [
+				f"{entry['a']} minus {entry['b']}",
+				entry["mode"],
+				f"{100 * entry['panel']['estimate']:+.2f} [{100 * low:+.2f}, {100 * high:+.2f}]",
+			]
+			for name in opponents:
+				detail = entry["opponents"].get(name)
+				cells.append(
+					""
+					if detail is None
+					else f"{100 * detail['estimate']:+.2f} [{100 * detail['ci95'][0]:+.2f}, {100 * detail['ci95'][1]:+.2f}]"
+				)
+			diff_rows.append(cells)
+		if diff_rows:
+			headers = ["Difference", "Mode", "Panel mean [95%]"] + list(opponents)
+			parts.append(
+				f"{run_name}: paired differences between successive kept checkpoints (points)\n\n"
+				+ markdown_table(headers, diff_rows)
+			)
+	return "\n\n".join(parts) if parts else "(none: no panel report yet)"
+
+
+def _crossplay_section(lab_dir: Path) -> str:
+	report = _load(lab_dir / "panel" / "crossplay.json")
+	pairs = report.get("pairs", [])
+	if not pairs:
+		return "(none: no cross-play report yet)"
+	labels = report.get("labels", [])
+	parts = []
+	for mode in ("sampled", "greedy"):
+		cells = {(pair["first"], pair["second"]): pair["modes"][mode] for pair in pairs}
+		rows = []
+		for row_label in labels[:-1]:
+			row = [row_label]
+			for column_label in labels[1:]:
+				cell = cells.get((row_label, column_label))
+				if cell is None or labels.index(column_label) <= labels.index(row_label):
+					row.append("")
+				else:
+					low, high = cell["ci95"]
+					row.append(f"{100 * cell['win_rate']:.2f} [{100 * low:.2f}, {100 * high:.2f}]")
+			rows.append(row)
+		parts.append(
+			f"Win rate of the row checkpoint against the column checkpoint, {mode} actions "
+			"(each pair plays both seats on the same team draws; 95% Wilson interval)\n\n"
+			+ markdown_table(["Row \\ column", *labels[1:]], rows)
+		)
+	detail_rows = []
+	for pair in pairs:
+		row = pair["modes"]["sampled"]
+		paired = row["paired_draws"]
+		detail_rows.append(
+			[
+				f"{pair['first']} against {pair['second']}",
+				f"{100 * row['side0_win_rate']:.2f} / {100 * row['side1_win_rate']:.2f}",
+				f"{100 * paired['estimate']:.2f} [{100 * paired['ci95'][0]:.2f}, {100 * paired['ci95'][1]:.2f}]",
+				f"{row['truncated']}",
+				f"{row['mean_battle_length']:.1f}",
+			]
+		)
+	parts.append(
+		"Sampled actions: side 0 / side 1 win rates, the paired-by-draw interval, truncated battles and "
+		"mean length\n\n"
+		+ markdown_table(
+			["Pair", "Side 0 / side 1 %", "Paired by draw % [95%]", "Truncated", "Mean length"],
+			detail_rows,
+		)
+	)
+	return "\n\n".join(parts)
+
+
+def _figures_section(lab_dir: Path) -> str:
+	names = (
+		sorted(path.name for path in (lab_dir / "plots").glob("*.svg"))
+		if (lab_dir / "plots").exists()
+		else []
+	)
+	if not names:
+		return "(none)"
+	return "\n".join(f"- plots/{name}" for name in names)
+
+
 def summary_markdown(lab_dir: Path) -> str:
 	facts = _load(lab_dir / "facts.json")
 	preflight = _load(lab_dir / "preflight" / "preflight.json")
-	contention_table, contention_note = _contention_table(lab_dir)
 	gpus = facts.get("gpus") or preflight.get("gpus") or []
 	gpu_lines = [
 		f"- GPU {gpu.get('index')}: {gpu.get('name')}, {gpu.get('memory_mib')} MiB, "
 		f"driver {gpu.get('driver')}"
 		for gpu in gpus
 	]
+	bench = "run" if facts.get("lab_bench") else "not run (LAB_BENCH is not 1)"
 	sections = [
 		"# Lab run summary",
 		"",
@@ -420,6 +608,8 @@ def summary_markdown(lab_dir: Path) -> str:
 			f"{facts.get('packages', {}).get('flax', '?')}"
 		),
 		f"- Budget: LAB_HOURS {facts.get('lab_hours', '?')}, smoke {facts.get('smoke', '?')}",
+		f"- Arms: {', '.join(facts.get('arms', [])) or 'unknown'}",
+		f"- Benchmarks: {bench}",
 		f"- Team pool sha256: {facts.get('team_pool_sha256', 'unknown')}",
 		*gpu_lines,
 		"",
@@ -435,19 +625,29 @@ def summary_markdown(lab_dir: Path) -> str:
 		"",
 		_bench_table(lab_dir),
 		"",
-		"## Training sizing sweep (self-play trainer, per GPU)",
+		"## Sweep (each arm, one process per GPU; rows are the only size that changes)",
 		"",
-		_sweep_table(lab_dir),
+		_sweep_arms_table(lab_dir),
 		"",
-		"## Contention (training configuration: alone, then both GPUs at once)",
+		"## Training plans (time budget, kept checkpoints)",
 		"",
-		contention_table,
-		"",
-		contention_note,
+		_plans_table(lab_dir),
 		"",
 		"## Training runs (time budget)",
 		"",
 		_training_sections(lab_dir),
+		"",
+		"## Panel (fixed panel: four baselines and the two references, paired setups)",
+		"",
+		_panel_sections(lab_dir),
+		"",
+		"## Cross-play (the final checkpoints and the two references)",
+		"",
+		_crossplay_section(lab_dir),
+		"",
+		"## Figures",
+		"",
+		_figures_section(lab_dir),
 		"",
 	]
 	return "\n".join(sections)

@@ -239,6 +239,15 @@ SWEEP_HEADERS = (
 )
 
 
+def steps_label(steps: int) -> str:
+	"""Environment steps as a short label: 30.1M, 480.1M, 262K."""
+	return f"{steps / 1e6:.1f}M" if steps >= 1e6 else f"{steps / 1e3:.0f}K"
+
+
+def checkpoint_label(run_name: str, steps: int) -> str:
+	return f"{run_name}@{steps_label(steps)}"
+
+
 def markdown_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
 	lines = ["| " + " | ".join(headers) + " |", "|" + "|".join("---" for _ in headers) + "|"]
 	lines += ["| " + " | ".join(cell.replace("|", "/") for cell in row) + " |" for row in rows]

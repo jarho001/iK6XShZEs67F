@@ -2,7 +2,6 @@
 report and the summary tables, built from synthetic results."""
 
 import json
-import time
 from pathlib import Path
 
 import pytest
@@ -21,7 +20,6 @@ from pokejax.lab import (
 	plan_updates,
 	settings_from_env,
 )
-from pokejax.records import read_records
 from pokejax.train.config import ConfigError, load_config
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,7 +33,8 @@ def _settings(tmp_path: Path, **kwargs) -> Settings:
 		"smoke": False,
 		"start": 1_000_000.0,
 		"team_pool": tmp_path / "pool.npz",
-		"train_config": Path("configs/rtx6000.toml"),
+		"arms": (Path("configs/p7-pairwise.toml"),),
+		"bench": False,
 	}
 	values.update(kwargs)
 	return Settings(**values)
@@ -43,7 +42,7 @@ def _settings(tmp_path: Path, **kwargs) -> Settings:
 
 def test_plan_gives_the_sweep_a_share_of_what_is_left_and_training_the_rest():
 	plan = make_plan(1.0, 1000.0, 1000.0)
-	left = 3600 - 600 - 300  # less the contention and pack reserves
+	left = 3600 - 300  # less the pack reserve
 	assert plan.sweep_deadline == pytest.approx(1000.0 + lab.SWEEP_SHARE * left)
 	assert plan.training_deadline == pytest.approx(1000.0 + 3600 - 300)
 	later = make_plan(1.0, 1000.0, 2000.0)  # a sweep that starts later gets less
@@ -170,74 +169,20 @@ def test_preflight_report_passes_quietly():
 	assert "What to try" not in text
 
 
-def test_summary_tables_from_synthetic_results(tmp_path):
-	lab_dir = tmp_path / "lab"
-	results = lab_dir / "results"
-	results.mkdir(parents=True)
-	bench = {
-		"kind": "bench", "key": "engine-random-noobs-b4096", "gpu": 0, "status": "ok",
-		"batch": 4096, "mode": "engine", "policy": "random", "observation": False,
-		"result": {
-			"steps_per_second": 3.0e6, "battles_per_second": 4.0e4,
-			"compile_seconds": 29.0, "device_memory": {"peak_bytes_in_use": 2**30},
-		},
-	}  # fmt: skip
-	failed = {
-		"kind": "bench", "key": "env-random-obs-b131072", "gpu": 0, "status": "failed",
-		"batch": 131072, "mode": "env", "policy": "random", "observation": True,
-		"error": "RESOURCE_EXHAUSTED", "returncode": 1,
-	}  # fmt: skip
-	(results / "bench-gpu0.jsonl").write_text(json.dumps(bench) + "\n" + json.dumps(failed) + "\n")
-	sweep = {
-		"kind": "sweep", "gpu": 0, "status": "ok", "key": "k",
-		"cell": {"batch": 1024, "rollout": 64, "width": 1, "core": "gru"},
-		"parameters": 1000, "environment_steps_per_second": 2e6,
-		"learner_steps_per_second": 5e4, "update_seconds": 1.0, "compile_seconds": 20.0,
-		"device_memory": {"peak_bytes_in_use": 2**30},
-	}  # fmt: skip
-	(results / "sweep-gpu0.jsonl").write_text(json.dumps(sweep) + "\n")
-	contention = [
-		{"phase": "alone", "gpus": [0], "status": "ok", "environment_steps_per_second": 2e6,
-		 "update_seconds": 2.0, "learner_steps_per_second": 1e5},
-		{"phase": "both", "gpus": [0, 1], "status": "ok", "environment_steps_per_second": 1.9e6,
-		 "update_seconds": 2.2, "learner_steps_per_second": 9e4, "gpu": 0},
-	]  # fmt: skip
-	(results / "contention.jsonl").write_text("".join(json.dumps(c) + "\n" for c in contention))
-	text = lab_report.summary_markdown(lab_dir)
-	assert "## Benchmarks" in text and "3,000,000" in text and "RESOURCE_EXHAUSTED" in text
-	assert "| 0 | 1024 | 64 | 1 | gru |" in text
-	assert "1.10x" in text
-	assert "## Training runs" in text
-
-
-def test_contention_phases_use_the_latest_attempt():
-	records = [
-		{"phase": "alone", "gpu": 0, "status": "failed"},
-		{"phase": "alone", "gpu": 0, "status": "ok"},
-		{"phase": "both", "gpu": 0, "status": "ok"},
-		{"phase": "both", "gpu": 1, "status": "timeout"},
-	]
-	latest = lab._latest_by_phase(records)
-	assert lab._phase_done(latest, "alone", [0])
-	assert lab._phase_done(latest, "both", [0])
-	assert not lab._phase_done(latest, "both", [0, 1])
-	assert not lab._phase_done(latest, "alone", [1])
-
-
 def test_run_step_exit_codes_and_markers(tmp_path, monkeypatch):
 	settings = _settings(tmp_path)
 	results = {
 		"sweep": StepResult("partial", ("3 cells left",)),
-		"contention": StepResult("complete"),
+		"panel": StepResult("complete"),
 		"train": StepResult("failed", ("no run",), 1),
 	}
 	monkeypatch.setattr(
 		lab, "STEP_FUNCTIONS", {name: (lambda s, r=result: r) for name, result in results.items()}
 	)
 	assert lab.run_step(settings, "sweep") == lab.PARTIAL_EXIT
-	assert lab.run_step(settings, "contention") == 0
+	assert lab.run_step(settings, "panel") == 0
 	assert lab.run_step(settings, "train") == 1
-	assert not is_done(settings, "sweep") and is_done(settings, "contention")
+	assert not is_done(settings, "sweep") and is_done(settings, "panel")
 	assert not is_done(settings, "train")
 	events = [
 		json.loads(line) for line in (settings.lab_dir / "progress.log").read_text().splitlines()
@@ -377,136 +322,35 @@ def _gpu_list(settings, count):
 	(settings.preflight_dir / "preflight.json").write_text(json.dumps({"ok": True, "gpus": gpus}))
 
 
-def _fake_cell(limit_for):
-	"""A run_cell_process stand-in: the run is out of memory above the batch limit_for(kwargs) allows."""
-
-	def fake(**kwargs):
-		batch = load_config(kwargs["config_path"]).rollout.batch_size
-		if batch > limit_for(kwargs):
-			return {
-				"status": "failed",
-				"error_class": "oom",
-				"error": "RESOURCE_EXHAUSTED",
-				"gpu": kwargs["gpu"],
-			}
-		return {
-			"status": "ok",
-			"error_class": None,
-			"error": None,
-			"gpu": kwargs["gpu"],
-			"update_seconds": 2.0 if kwargs["key"].startswith("contention-alone") else 2.2,
-			"cold_update_seconds": 9.0,
-			"environment_steps_per_second": 1e6,
-			"learner_steps_per_second": 5e4,
-		}
-
-	return fake
-
-
-def test_contention_falls_back_per_phase_and_keeps_every_attempt(tmp_path, monkeypatch):
-	from pokejax import sizing
-
-	settings = _settings(tmp_path, train_config=RTX_CONFIG)
-	_gpu_list(settings, 2)
-	# GPU 1 runs out of memory above 8,192 rows when both GPUs run; everything else fits 16,384.
-	fake = _fake_cell(
-		lambda kwargs: (
-			8192 if kwargs["gpu"] == 1 and kwargs["key"].startswith("contention-both") else 16384
-		)
-	)
-	monkeypatch.setattr(sizing, "run_cell_process", fake)
-	result = lab.step_contention(settings)
-	assert result.status == "complete"
-	assert "both ok at batch 8192 (16384 oom, 8192 ok)" in result.notes
-	records = read_records(settings.results / "contention.jsonl")
-	assert [(r["phase"], r["gpu"], r["batch_size"], r["status"]) for r in records] == [
-		("alone", 0, 16384, "ok"),
-		("both", 0, 16384, "ok"),
-		("both", 1, 16384, "failed"),
-		("both", 0, 8192, "ok"),
-		("both", 1, 8192, "ok"),
-	]
-	assert (
-		load_config(settings.runs / "contention" / "config-batch8192.toml").rollout.batch_size
-		== 8192
-	)
-	_, note = lab_report._contention_table(settings.lab_dir)
-	assert "not comparable" in note and "alone at batch 16384" in note
-	rerun = lab.step_contention(settings)  # a finished step has nothing left to measure
-	assert (
-		rerun.status == "complete" and len(read_records(settings.results / "contention.jsonl")) == 5
-	)
-
-
-def test_contention_that_never_fits_ends_at_the_floor_and_is_partial(tmp_path, monkeypatch):
-	from pokejax import sizing
-
-	settings = _settings(tmp_path, train_config=RTX_CONFIG)
-	_gpu_list(settings, 2)
-	monkeypatch.setattr(sizing, "run_cell_process", _fake_cell(lambda kwargs: 1024))
-	result = lab.step_contention(settings)
-	assert result.status == "partial"
-	records = read_records(settings.results / "contention.jsonl")
-	assert [r["batch_size"] for r in records] == [16384, 8192, 4096]
-	assert all(r["status"] == "failed" and r["phase"] == "alone" for r in records)
-
-
-def test_training_probe_falls_back_and_the_plan_names_the_batch(tmp_path, monkeypatch):
-	from pokejax import sizing
-
-	settings = _settings(tmp_path, train_config=RTX_CONFIG)
-	monkeypatch.setattr(sizing, "run_cell_process", _fake_cell(lambda kwargs: 8192))
-	commands = []
-
-	def fake_measurement(command, *, gpu, log_path, timeout):
-		commands.append(command)
-		run_dir = Path(command[command.index("--run-dir") + 1])
-		(run_dir / "result.json").write_text("{}", encoding="utf-8")
-		return {"returncode": 0, "timed_out": False, "wall_seconds": 1.0, "log": str(log_path)}
-
-	monkeypatch.setattr(lab, "run_measurement", fake_measurement)
-	record = lab.train_one_gpu(settings, 0, time.time() + 3600.0)
-	assert record["status"] == "ok" and record["batch_size"] == 8192
-	plan = json.loads((Path(record["run_dir"]) / "lab-plan.json").read_text(encoding="utf-8"))
-	assert plan["batch_size"] == 8192 and plan["updates"] >= 1
-	assert [a["status"] for a in plan["attempts"]] == ["failed", "ok"]
-	assert commands[0][commands[0].index("--config") + 1] == plan["config"]
-	assert load_config(Path(plan["config"])).rollout.batch_size == 8192
-	probes = read_records(settings.results / "train-probe.jsonl")
-	assert [p["batch_size"] for p in probes] == [16384, 8192]
-	assert record["attempts"] == plan["attempts"]
-
-
-def test_training_probe_that_never_fits_is_recorded_at_the_floor(tmp_path, monkeypatch):
-	from pokejax import sizing
-
-	settings = _settings(tmp_path, train_config=RTX_CONFIG)
-	monkeypatch.setattr(sizing, "run_cell_process", _fake_cell(lambda kwargs: 1024))
-	monkeypatch.setattr(lab, "run_measurement", lambda *args, **kwargs: pytest.fail("no run"))
-	record = lab.train_one_gpu(settings, 1, time.time() + 3600.0)
-	assert record["status"] == "failed" and record["batch_size"] == 4096
-	assert [a["batch_size"] for a in record["attempts"]] == [16384, 8192, 4096]
-	assert not (settings.runs / f"{RTX_CONFIG.stem}-gpu1" / "lab-plan.json").exists()
-
-
-def test_contention_note_is_empty_of_comparison_without_both_runs(tmp_path):
-	settings = _settings(tmp_path)
-	settings.results.mkdir(parents=True)
-	(settings.results / "contention.jsonl").write_text(
-		json.dumps(
-			{
-				"phase": "alone",
-				"gpu": 0,
-				"gpus": [0],
-				"status": "ok",
-				"batch_size": 8192,
-				"update_seconds": 2.0,
-				"environment_steps_per_second": 1.0,
-				"learner_steps_per_second": 1.0,
-			}
-		)
-		+ "\n",
-		encoding="utf-8",
-	)
-	_, note = lab_report._contention_table(settings.lab_dir)
-	assert note == "Slowdown: not measured (needs two GPUs and both runs)."
+def test_summary_tables_from_synthetic_results(tmp_path):
+	lab_dir = tmp_path / "lab"
+	results = lab_dir / "results"
+	results.mkdir(parents=True)
+	bench = {
+		"kind": "bench", "key": "engine-random-noobs-b4096", "gpu": 0, "status": "ok",
+		"batch": 4096, "mode": "engine", "policy": "random", "observation": False,
+		"result": {
+			"steps_per_second": 3.0e6, "battles_per_second": 4.0e4,
+			"compile_seconds": 29.0, "device_memory": {"peak_bytes_in_use": 2**30},
+		},
+	}  # fmt: skip
+	failed = {
+		"kind": "bench", "key": "env-random-obs-b131072", "gpu": 0, "status": "failed",
+		"batch": 131072, "mode": "env", "policy": "random", "observation": True,
+		"error": "RESOURCE_EXHAUSTED", "returncode": 1,
+	}  # fmt: skip
+	(results / "bench-gpu0.jsonl").write_text(json.dumps(bench) + "\n" + json.dumps(failed) + "\n")
+	sweep = {
+		"kind": "sweep", "gpu": 0, "status": "ok", "key": "k",
+		"cell": {"batch": 1024, "rollout": 64, "width": 1, "core": "gru"},
+		"parameters": 1000, "environment_steps_per_second": 2e6,
+		"learner_steps_per_second": 5e4, "update_seconds": 1.0, "compile_seconds": 20.0,
+		"device_memory": {"peak_bytes_in_use": 2**30},
+	}  # fmt: skip
+	(results / "sweep-gpu0.jsonl").write_text(json.dumps(sweep) + "\n")
+	text = lab_report.summary_markdown(lab_dir)
+	assert "## Benchmarks" in text and "3,000,000" in text and "RESOURCE_EXHAUSTED" in text
+	assert "| gpu0 | 1024 | 2,000" not in text  # the parameters of the synthetic record are absent
+	assert "| gpu0 | 1024 |" in text
+	assert "## Training runs" in text
+	assert "Benchmarks: not run" in text and "## Panel" in text and "## Cross-play" in text

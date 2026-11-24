@@ -1,0 +1,88 @@
+# Phase 6, task 4: the long run of the pairwise network with the four auxiliary losses (P2) to the exit.
+# P2's configuration (work/codex/exp/p6-p2.toml): 512 battle rows, rollout 64, sequence 16, the league of
+# configs/rtx3060ti.toml, the four auxiliary losses, one seed. Only the length and the schedule change:
+# 14,650 updates (512 x 64 = 32,768 environment steps each, about 480M steps), and the learning rate
+# decays linearly from 1e-3 to 1e-4 over the whole run (ppo.decay_updates = 14,650).
+# Kept checkpoints (checkpoint-<update>.npz, never overwritten): 3,662 updates (about 120M steps),
+# 7,325 (X = 240M steps, fixed before the run), 9,767 (two thirds of the run, about 320M) and 14,650
+# (2X, about 480M). checkpoint.every = 250 gives a resumable checkpoint every 250 updates.
+# Evaluation every 500 updates: 1,024 battles against each baseline, sampled and greedy.
+# Run: python -m pokejax.train --config work/codex/exp/p6-long.toml   (resume with --resume)
+
+[run]
+name = "p6-long"
+seed = 0
+updates = 14650
+
+[opponent]
+shares = { selfplay = 0.375, pool = 0.25, random = 0.0625, random-move = 0.0625, max-damage = 0.125, heuristics = 0.125 }
+
+[pool]
+size = 8
+every = 50
+
+[rollout]
+batch_size = 512
+rollout_length = 64
+sequence_length = 16
+
+[env]
+max_steps = 1000
+shaping = false
+shaping_coef = 0.1
+
+[network]
+arch = "pairwise"
+core = "gru"
+activation = "silu"
+core_width = 128
+width = 96
+pair_width = 64
+interaction_width = 8
+context_width = 128
+species_embedding = 24
+move_embedding = 16
+item_embedding = 8
+ability_embedding = 8
+type_embedding = 12
+code_embedding = 4
+features = false
+action_head = "dense"
+
+# Training-only auxiliary losses (weights as in design-sol.md; zero switches a target off).
+[auxiliary]
+next_action = 0.05
+item = 0.01
+ability = 0.01
+moves = 0.03
+
+[ppo]
+epochs = 4
+minibatches = 4
+learning_rate = 1e-3
+learning_rate_end = 1e-4
+lr_schedule = "linear"
+decay_updates = 14650
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+value_clip = 0.2
+value_coef = 0.5
+entropy_coef = 0.01
+max_grad_norm = 0.5
+adam_eps = 1e-5
+
+[logging]
+every = 10
+
+[evaluation]
+every = 500
+battles = 1024
+final_battles = 4096
+batch = 1024
+opponents = ["random", "random-move", "max-damage", "heuristics"]
+greedy = true
+
+[checkpoint]
+every = 250
+keep = [3662, 7325, 9767, 14650]

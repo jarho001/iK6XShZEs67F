@@ -1,0 +1,86 @@
+# Phase 7, task 1: the wide arm of the pairwise network (design-sol.md, section 1, pairwise design): width
+# 192, pair width 96, GRU width 256 and the context layer that feeds the GRU at the same width (256) instead
+# of 96, 64, 128 and 128 in configs/p7-pairwise.toml. The heads read the GRU context and the pair width, so
+# their input widths follow. The interaction width (8) stays. Everything else is configs/p7-pairwise.toml:
+# 4,096 battle rows, the four auxiliary losses, the league and PPO, so the two arms differ only in size.
+# The lab probes this configuration on its GPU and falls back to half the rows when a probe runs out of
+# device memory (4,096, then 2,048, then 1,024).
+# Manual run: python -m pokejax.train --config configs/p7-pairwise-wide.toml
+
+[run]
+name = "p7-pairwise-wide"
+seed = 0
+updates = 4000
+
+[opponent]
+shares = { selfplay = 0.375, pool = 0.25, random = 0.0625, random-move = 0.0625, max-damage = 0.125, heuristics = 0.125 }
+
+[pool]
+size = 8
+every = 50
+
+[rollout]
+batch_size = 4096
+rollout_length = 64
+sequence_length = 16
+
+[env]
+max_steps = 1000
+shaping = false
+shaping_coef = 0.1
+
+[network]
+arch = "pairwise"
+core = "gru"
+activation = "silu"
+core_width = 256
+width = 192
+pair_width = 96
+interaction_width = 8
+context_width = 256
+species_embedding = 24
+move_embedding = 16
+item_embedding = 8
+ability_embedding = 8
+type_embedding = 12
+code_embedding = 4
+features = false
+action_head = "dense"
+
+# Training-only auxiliary losses (weights as in design-sol.md; zero switches a target off).
+[auxiliary]
+next_action = 0.05
+item = 0.01
+ability = 0.01
+moves = 0.03
+
+[ppo]
+epochs = 4
+minibatches = 4
+learning_rate = 1e-3
+learning_rate_end = 1e-4
+lr_schedule = "linear"
+decay_updates = 0
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+value_clip = 0.2
+value_coef = 0.5
+entropy_coef = 0.01
+max_grad_norm = 0.5
+adam_eps = 1e-5
+
+[logging]
+every = 10
+
+[evaluation]
+every = 500
+battles = 1024
+final_battles = 4096
+batch = 1024
+opponents = ["random", "random-move", "max-damage", "heuristics"]
+greedy = true
+
+[checkpoint]
+every = 250
+keep = []
