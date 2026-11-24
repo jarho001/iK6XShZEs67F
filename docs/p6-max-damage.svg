@@ -21,6 +21,9 @@
 <line x1="513.6" y1="54" x2="531.6" y2="54" class="line k5"/>
 <circle cx="522.6" cy="54" r="4" class="f5 ring"/>
 <text x="539.6" y="58" font-size="12" class="primary">rtx3060ti</text>
+<line x1="626.4" y1="54" x2="644.4" y2="54" class="line k6"/>
+<circle cx="635.4" cy="54" r="4" class="f6 ring"/>
+<text x="652.4" y="58" font-size="12" class="primary">p6-t1b</text>
 <line x1="72" y1="382.0" x2="700" y2="382.0" class="grid"/>
 <text x="64" y="386.0" font-size="11" text-anchor="end" class="secondary">0%</text>
 <line x1="72" y1="348.7" x2="700" y2="348.7" class="grid"/>
@@ -137,4 +140,11 @@
 <circle cx="621.5" cy="128.7" r="4" class="f5 ring"><title>rtx3060ti, update 3,500: 75.98% against max-damage (sampled, 1,024 battles, 95% CI 73.27 to 78.49)</title></circle>
 <circle cx="660.8" cy="129.4" r="4" class="f5 ring"><title>rtx3060ti, update 3,750: 75.78% against max-damage (sampled, 1,024 battles, 95% CI 73.06 to 78.31)</title></circle>
 <circle cx="700.0" cy="126.1" r="4" class="f5 ring"><title>rtx3060ti, update 4,000: 76.76% against max-damage (sampled, 1,024 battles, 95% CI 74.07 to 79.24)</title></circle>
+<polyline points="87.7,287.6 103.4,253.7 119.1,228.4 134.8,212.4 150.5,203.6 166.2,182.1" class="line k6"/>
+<circle cx="87.7" cy="287.6" r="4" class="f6 ring"><title>p6-t1b, update 100: 28.32% against max-damage (sampled, 1,024 battles, 95% CI 25.65 to 31.16)</title></circle>
+<circle cx="103.4" cy="253.7" r="4" class="f6 ring"><title>p6-t1b, update 200: 38.48% against max-damage (sampled, 1,024 battles, 95% CI 35.54 to 41.49)</title></circle>
+<circle cx="119.1" cy="228.4" r="4" class="f6 ring"><title>p6-t1b, update 300: 46.09% against max-damage (sampled, 1,024 battles, 95% CI 43.06 to 49.16)</title></circle>
+<circle cx="134.8" cy="212.4" r="4" class="f6 ring"><title>p6-t1b, update 400: 50.88% against max-damage (sampled, 1,024 battles, 95% CI 47.82 to 53.93)</title></circle>
+<circle cx="150.5" cy="203.6" r="4" class="f6 ring"><title>p6-t1b, update 500: 53.52% against max-damage (sampled, 1,024 battles, 95% CI 50.45 to 56.55)</title></circle>
+<circle cx="166.2" cy="182.1" r="4" class="f6 ring"><title>p6-t1b, update 600: 59.96% against max-damage (sampled, 1,024 battles, 95% CI 56.93 to 62.92)</title></circle>
 </svg>

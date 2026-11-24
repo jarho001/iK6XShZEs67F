@@ -461,6 +461,7 @@ multiplier (`python -m pokejax.train.probe`).
 | P1 pairwise | 327,499 | 4.01M | 34k | 2,145 MiB | 28.9 | 73.83 (72.46 to 75.15) | 81.01 (79.78 to 82.18) (83.11) | 80.15 (78.90 to 81.34) (82.62) | 97.36 (96.83 to 97.81) |
 | P2 pairwise + aux | 442,519 | 4.01M | 31.6k | 2,205 MiB | 30.7 | 74.90 (73.55 to 76.21) | 83.40 (82.23 to 84.51) (85.67) | 81.49 (80.28 to 82.65) (83.52) | 97.22 (96.67 to 97.68) |
 | T1 transformer + aux | 523,415 | 10.04M | 14.4k | 1,657 MiB | 28.2 (20M only) | 41.36 (39.86 to 42.87) (43.90) | not run | not run | not run |
+| T1b transformer + aux, learning rate 3e-4 to 3e-5 | 523,415 | 10.04M | 14.3k | 1,656 MiB | 28.3 (20M only) | 62.06 (60.56 to 63.53) (63.89) | not run | not run | not run |
 
 Steps per second are the training rates of the 512-row runs, measured alone on the GPU (the phase
 averages; T1's is its 20M phase). The XLA count is the cost analysis of one lane's policy forward (the
@@ -479,15 +480,16 @@ backward pass, and its move projection covers only the own active's four moves.
 | P2 pairwise + aux, 40M | 0.588 / 0.328 | 0.491 / 0.246 | 0.645 / 0.567 | 0.010 / 0.093 | next action: kind 0.90, identity 0.64; item 0.84; ability 0.96; moves precision 0.35, recall 1.00 |
 | P2 pairwise + aux, 20M | 0.603 / 0.349 | 0.575 / 0.311 | 0.696 / 0.627 | 0.016 / 0.088 | next action: kind 0.88, identity 0.60; item 0.84; ability 0.96; moves precision 0.29, recall 1.00 |
 | T1 transformer + aux, 20M | 0.469 / 0.313 | 0.370 / 0.274 | 0.571 / 0.456 | 0.050 / 0.106 | next action: kind 0.93, identity 0.55; item 0.83; ability 0.96; moves precision 0.29, recall 1.00 |
+| T1b transformer + aux, 20M, learning rate 3e-4 to 3e-5 | 0.551 / 0.302 | 0.451 / 0.300 | 0.705 / 0.431 | 0.039 / 0.101 | next action: kind 0.91, identity 0.58; item 0.83; ability 0.96; moves precision 0.18, recall 1.00 |
 
 The probe fits a regularised linear six-class read-out of the chart multiplier {0, 1/4, 1/2, 1, 2, 4} on the
 frozen move features, with species and move IDs (or dual-type pairings) held out. Immunity recall is high
 for the random networks too (0.45 to 0.64, few rows), so it does not separate the arms. The auxiliary
 figures are training-batch statistics, not held-out ones. The 20M rows use the 20M snapshot of each run.
 
-![Win rate against max-damage over training for the Phase 6 screening arms P0 to P2 and T1 (T1 to 20M), E0 and L2](docs/p6-max-damage.svg)
+![Win rate against max-damage over training for the Phase 6 screening arms P0 to P2, T1 and T1b (both to 20M), E0 and L2](docs/p6-max-damage.svg)
 
-![Win rate against heuristics over training for the Phase 6 screening arms P0 to P2 and T1 (T1 to 20M), E0 and L2](docs/p6-heuristics.svg)
+![Win rate against heuristics over training for the Phase 6 screening arms P0 to P2, T1 and T1b (both to 20M), E0 and L2](docs/p6-heuristics.svg)
 
 T1 stopped at 20M. Against max-damage it scored 41.36% (4,096 battles, 39.86 to 42.87) against P2's 74.90%
 at 20M, 33.5 points behind, which is past the task's stop line of 10 points, so its phase 2, its 40M probe
@@ -499,6 +501,8 @@ recall 0.47 against 0.60, dual pairings 0.37 against 0.58). Per step it costs 2.
 against 31.8k steps per second) and 2.5 times its forward FLOPs (10.0M against 4.0M). The Showdown player runs
 the 20M checkpoint: 256 greedy battles against max-damage gave 46.5% (40.5 to 52.6) with no errors, illegal
 picks or mask mismatches, and first observations identical to within one float ulp.
+
+T1b, the same transformer at learning rate 3e-4 decaying to 3e-5 (one seed), was stopped at 20M by the same rule: 62.06% against max-damage (4,096 battles, 60.56 to 63.53), 12.8 points behind P2's 74.90%, so its phase 2 and its 40M checks were not run. The lower rate removed T1's early instability (approximate KL at update 100: 0.0073, against 0.045 for T1 and 0.0072 for P2), but its gradient norm stayed about 2.5 times P2's.
 
 The pairwise network (P1) beats the control (P0) by 19.6 points against max-damage at 40M steps (81.0% against
 61.4%, one seed each), and its frozen move features carry the chart multiplier far above its random

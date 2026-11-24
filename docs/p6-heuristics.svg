@@ -21,6 +21,9 @@
 <line x1="513.6" y1="54" x2="531.6" y2="54" class="line k5"/>
 <circle cx="522.6" cy="54" r="4" class="f5 ring"/>
 <text x="539.6" y="58" font-size="12" class="primary">rtx3060ti</text>
+<line x1="626.4" y1="54" x2="644.4" y2="54" class="line k6"/>
+<circle cx="635.4" cy="54" r="4" class="f6 ring"/>
+<text x="652.4" y="58" font-size="12" class="primary">p6-t1b</text>
 <line x1="72" y1="382.0" x2="700" y2="382.0" class="grid"/>
 <text x="64" y="386.0" font-size="11" text-anchor="end" class="secondary">0%</text>
 <line x1="72" y1="348.7" x2="700" y2="348.7" class="grid"/>
@@ -137,4 +140,11 @@
 <circle cx="621.5" cy="136.9" r="4" class="f5 ring"><title>rtx3060ti, update 3,500: 73.54% against heuristics (sampled, 1,024 battles, 95% CI 70.75 to 76.15)</title></circle>
 <circle cx="660.8" cy="134.6" r="4" class="f5 ring"><title>rtx3060ti, update 3,750: 74.22% against heuristics (sampled, 1,024 battles, 95% CI 71.45 to 76.80)</title></circle>
 <circle cx="700.0" cy="129.7" r="4" class="f5 ring"><title>rtx3060ti, update 4,000: 75.68% against heuristics (sampled, 1,024 battles, 95% CI 72.96 to 78.21)</title></circle>
+<polyline points="87.7,288.2 103.4,261.2 119.1,235.5 134.8,215.0 150.5,208.8 166.2,189.9" class="line k6"/>
+<circle cx="87.7" cy="288.2" r="4" class="f6 ring"><title>p6-t1b, update 100: 28.12% against heuristics (sampled, 1,024 battles, 95% CI 25.46 to 30.96)</title></circle>
+<circle cx="103.4" cy="261.2" r="4" class="f6 ring"><title>p6-t1b, update 200: 36.23% against heuristics (sampled, 1,024 battles, 95% CI 33.34 to 39.22)</title></circle>
+<circle cx="119.1" cy="235.5" r="4" class="f6 ring"><title>p6-t1b, update 300: 43.95% against heuristics (sampled, 1,024 battles, 95% CI 40.93 to 47.00)</title></circle>
+<circle cx="134.8" cy="215.0" r="4" class="f6 ring"><title>p6-t1b, update 400: 50.10% against heuristics (sampled, 1,024 battles, 95% CI 47.04 to 53.15)</title></circle>
+<circle cx="150.5" cy="208.8" r="4" class="f6 ring"><title>p6-t1b, update 500: 51.95% against heuristics (sampled, 1,024 battles, 95% CI 48.89 to 55.00)</title></circle>
+<circle cx="166.2" cy="189.9" r="4" class="f6 ring"><title>p6-t1b, update 600: 57.62% against heuristics (sampled, 1,024 battles, 95% CI 54.57 to 60.61)</title></circle>
 </svg>
