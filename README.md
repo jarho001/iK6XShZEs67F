@@ -182,7 +182,7 @@ observations; cold compile under 60 s: pass.
 
 After the Phase 6 review fixes the engine alone runs 2,831,828 and 2,857,718 steps/s (two runs),
 below the 3,000,000 target: the Flame Body fix resolves multi-hit moves twice, about 5%. Training
-is limited by the learner (about 78k steps/s), so this does not slow training.
+is limited by the learner (about 78k steps/s), so this does not slow training. The owner accepted this 2.84M steps/s engine rate after the review fixes.
 
 Observation (tasks 1 and 2). `observe` shows what one player can know at a decision point: the
 own team in full, the opponent as revealed, both actives' public volatiles, weather, hazards, Trick
@@ -437,3 +437,51 @@ every battle matches the engine's leaf for leaf (floats within 1 ulp: XLA divide
 a reciprocal). Showdown is ahead by +0.35 points on average (6 of 8 rows positive, none negative);
 individually only random/sampled is significant (p = 0.003). On the GPU the same comparison gave a
 largest gap of 1.51 points. Showdown battles run at about 45 per second in one Node process.
+
+### Phase 6 screening
+
+Question: does a network that reads only the public observation and the dex, with the pairwise
+interaction of each move against each defender, learn the type chart and play better than a control
+with the same inputs and no pair module, and do the auxiliary losses on hidden state help? Three arms,
+one seed each, with the league and schedule of the chosen Phase 4 run: P0 is the control (per-action
+scorers, no pair module), P1 the pairwise network, P2 the pairwise network with four auxiliary losses
+(next action 0.05, hidden item 0.01, ability 0.01, moves 0.03). All use 512 battle rows (1,024 do not fit
+the pairwise update on the 3060 Ti), 64-step rollouts, a learning rate from 1e-3 to 1e-4 over 1,221
+updates (about 40M environment steps), evaluations every 100 updates with 1,024 battles, and final
+evaluations with 4,096 battles per row. The configurations are `work/codex/exp/p6-p0.toml` to `p6-p2.toml`;
+the run directories `work/runs/p6-p0` to `p6-p2` (outside git). The type probe reads each arm's frozen
+move features and reports macro recall of the chart multiplier (`python -m pokejax.train.probe`).
+
+| Arm | Parameters | XLA FLOPs per forward | Steps/s | Peak device memory | Training minutes | Max-damage, 20M (sampled) | Max-damage, 40M sampled (greedy) | Heuristics, 40M sampled (greedy) | Random-move, 40M sampled |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| P0 control | 307,659 | 1.43M | 58k | 886 MiB | 20.1 | 45.39 (43.87 to 46.91) | 61.40 (59.90 to 62.88) (63.09) | 59.35 (57.84 to 60.85) (60.96) | 92.53 (91.68 to 93.30) |
+| P1 pairwise | 327,499 | 4.01M | 34k | 2,145 MiB | 28.9 | 73.83 (72.46 to 75.15) | 81.01 (79.78 to 82.18) (83.11) | 80.15 (78.90 to 81.34) (82.62) | 97.36 (96.83 to 97.81) |
+| P2 pairwise + aux | 442,519 | 4.01M | 31.6k | 2,205 MiB | 30.7 | 74.90 (73.55 to 76.21) | 83.40 (82.23 to 84.51) (85.67) | 81.49 (80.28 to 82.65) (83.52) | 97.22 (96.67 to 97.68) |
+
+Steps per second are the training rates of the 512-row runs, measured alone on the GPU (the phase
+averages). The XLA count is the cost analysis of one lane's policy forward (the design's arithmetic count
+of the pairwise network is 3.75M). Training minutes are the training time of both phases, without
+evaluations and checkpoints.
+
+| Arm | Probe at 40M, macro recall, species and moves (trained / random init) | Probe at 40M, dual pairings | Immunity recall (trained / random init) | Resisted and super-effective confusions (trained / random init) | Auxiliary heads, training batches (last 10 logged updates) |
+|---|---:|---:|---:|---:|---|
+| P0 control | 0.431 / 0.366 | 0.355 / 0.285 | 0.556 / 0.446 | 0.106 / 0.109 | - |
+| P1 pairwise | 0.630 / 0.342 | 0.540 / 0.263 | 0.635 / 0.642 | 0.007 / 0.086 | - |
+| P2 pairwise + aux | 0.588 / 0.328 | 0.491 / 0.246 | 0.645 / 0.567 | 0.010 / 0.093 | next action: kind 0.90, identity 0.64; item 0.84; ability 0.96; moves precision 0.35, recall 1.00 |
+
+The probe fits a regularised linear six-class read-out of the chart multiplier {0, 1/4, 1/2, 1, 2, 4} on the
+frozen move features, with species and move IDs (or dual-type pairings) held out. Immunity recall is high
+for the random networks too (0.45 to 0.64, few rows), so it does not separate the arms. The auxiliary
+figures are training-batch statistics, not held-out ones.
+
+![Win rate against max-damage over training for the Phase 6 screening arms, E0 and L2](docs/p6-max-damage.svg)
+
+![Win rate against heuristics over training for the Phase 6 screening arms, E0 and L2](docs/p6-heuristics.svg)
+
+The pairwise network (P1) beats the control (P0) by 19.6 points against max-damage at 40M steps (81.0% against
+61.4%, one seed each), and its frozen move features carry the chart multiplier far above its random
+initialisation (macro recall 0.63 against 0.34), where the control's do not (0.43 against 0.37). The four
+auxiliary losses (P2) add 2.4 points against max-damage and 1.3 against heuristics, with intervals that only just stop overlapping
+(82.2 to 84.5 against 79.8 to 82.2) on max-damage, but they do not improve the chart read-out. P0 was still rising at 40M (56.7, 57.0 and 61.7
+against max-damage at updates 1,000, 1,100 and 1,200), P1 rose 3.8 points over those three evaluations but
+was flat over the last two, and P2 was flat (81.8, 80.8 and 82.3).

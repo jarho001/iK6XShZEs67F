@@ -41,7 +41,8 @@ from typing import Any, get_origin
 from pokejax.policy_names import POLICY_NAMES
 
 CORE_KINDS = ("gru", "lstm")
-ACTIVATIONS = ("relu", "tanh", "gelu")
+ACTIVATIONS = ("relu", "tanh", "gelu", "silu")
+ARCHITECTURES = ("dense", "control", "pairwise")
 ACTION_HEADS = ("dense", "factored")
 FEATURE_SETS = ("full", "dex", "dex-no-matchup")
 LR_SCHEDULES = ("constant", "linear", "cosine")
@@ -164,10 +165,25 @@ class NetworkSection:
 	feature_set: str = "full"
 	action_head: str = "dense"
 	action_width: int = 64
+	arch: str = "dense"
+	width: int = 96
+	pair_width: int = 64
+	interaction_width: int = 8
+	context_width: int = 128
 
 	def __post_init__(self):
 		_check_choice(self.core, CORE_KINDS, "network.core")
 		_check_choice(self.activation, ACTIVATIONS, "network.activation")
+		_check_choice(self.arch, ARCHITECTURES, "network.arch")
+		if self.arch != "dense":
+			_check(
+				not self.features and self.action_head == "dense",
+				"network.arch = control or pairwise reads no features: set network.features = false "
+				"and leave network.action_head at dense",
+			)
+			_check(
+				self.core == "gru", "network.arch = control or pairwise needs network.core = gru"
+			)
 		_check_choice(self.action_head, ACTION_HEADS, "network.action_head")
 		_check(
 			self.features or self.action_head == "dense",
@@ -190,8 +206,33 @@ class NetworkSection:
 			"ability_embedding",
 			"type_embedding",
 			"code_embedding",
+			"width",
+			"pair_width",
+			"interaction_width",
+			"context_width",
 		):
 			_check_int(getattr(self, name), 1, f"network.{name}")
+
+
+AUXILIARY_TARGETS = ("next_action", "item", "ability", "moves")
+
+
+@dataclass(frozen=True)
+class AuxiliarySection:
+	"""Weights of the training-only auxiliary losses (auxiliary.py); zero switches a target off."""
+
+	next_action: float = 0.0
+	item: float = 0.0
+	ability: float = 0.0
+	moves: float = 0.0
+
+	def __post_init__(self):
+		for name in AUXILIARY_TARGETS:
+			_check_float(getattr(self, name), 0.0, None, f"auxiliary.{name}")
+
+	@property
+	def enabled(self) -> bool:
+		return any(getattr(self, name) > 0 for name in AUXILIARY_TARGETS)
 
 
 @dataclass(frozen=True)
@@ -282,6 +323,7 @@ SECTIONS = {
 	"rollout": RolloutSection,
 	"env": EnvSection,
 	"network": NetworkSection,
+	"auxiliary": AuxiliarySection,
 	"ppo": PPOSection,
 	"logging": LoggingSection,
 	"evaluation": EvaluationSection,
@@ -319,12 +361,17 @@ class TrainConfig:
 	rollout: RolloutSection = RolloutSection()
 	env: EnvSection = EnvSection()
 	network: NetworkSection = NetworkSection()
+	auxiliary: AuxiliarySection = AuxiliarySection()
 	ppo: PPOSection = PPOSection()
 	logging: LoggingSection = LoggingSection()
 	evaluation: EvaluationSection = EvaluationSection()
 	checkpoint: CheckpointSection = CheckpointSection()
 
 	def __post_init__(self):
+		_check(
+			not self.auxiliary.enabled or self.network.arch != "dense",
+			"auxiliary losses need network.arch = control or pairwise",
+		)
 		rows = group_rows(self.opponent, self.rollout.batch_size)
 		selfplay = rows.get("selfplay", 0)
 		lanes = 2 * selfplay + self.rollout.batch_size - selfplay

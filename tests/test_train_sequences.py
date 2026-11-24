@@ -60,7 +60,7 @@ def check_replay(trainer, learner, traj):
 	obs = jax.tree.map(lambda x: _lane_chunks(trainer, x), traj.obs)
 	start = _chunk_starts(trainer, traj.hidden)
 	advance = _lane_chunks(trainer, traj.advance)
-	logits, values = jax.jit(trainer._replay)(
+	logits, values, _, _ = jax.jit(trainer._replay)(
 		learner.params, obs, _lane_chunks(trainer, ended), advance, start
 	)
 	log_probs = np.asarray(jax.nn.log_softmax(np.asarray(logits)))

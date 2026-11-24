@@ -38,6 +38,7 @@ insertion never changes a battle in progress. The config keeps pool.size * pool.
 rollout.rollout_length at least env.max_steps, so no battle outlives two insertions into its member.
 """
 
+import functools
 from collections.abc import Callable, Mapping
 from typing import Any, NamedTuple
 
@@ -46,11 +47,16 @@ import jax.numpy as jnp
 import numpy as np
 
 from pokejax.baselines import POLICY_NAMES, RandomPolicy
+from pokejax.engine.actions import MOVE_ACTIONS, bench_slots, block_switches
 from pokejax.engine.observation import Observation, observe
-from pokejax.engine.state import NUM_SIDES
+from pokejax.engine.state import ILLUSION_SLOT, MOVE, NUM_SIDES, SWITCH, TRANSFORMED
 from pokejax.env import Env, EnvState
+from pokejax.tables import load_tables
 from pokejax.train.config import GROUP_ORDER, NetworkSection
 from pokejax.train.network import PokePolicy, initial_carry, reset_carry
+
+# The rank an unseen opposing member has in the switch targets (six seen ranks come first).
+UNSEEN_RANK = 6
 
 
 def take(tree, index):
@@ -144,6 +150,36 @@ class LeagueState(NamedTuple):
 	key: jax.Array
 
 
+class AuxLabels(NamedTuple):
+	"""Training targets of one lane's decision, read from the battle before the step.
+
+	They never enter the observation, the policy, the value or the carry (auxiliary.py uses them).
+	next_kind: int8 [L], the opposing side's action kind (0 move, 1 switch), -1 when no label applies
+	(no decision with a real choice, or a held, refused or illegal decision on either side).
+	next_move: int16 [L], the move ID of a move action (0 for a switch).
+	next_rank: int8 [L], the public rank of a switch's target (0 to 5 seen, 6 unseen).
+	identity: bool [L], identity targets may be used (no Illusion holder on the opposing roster).
+	private: bool [L], the opposing active is live, undisguised and untransformed.
+	item and ability: int16 [L], the opposing active's current held item and ability.
+	moves: int16 [L, 4], the opposing active's four move IDs (its hidden ones are the targets).
+	"""
+
+	next_kind: jax.Array
+	next_move: jax.Array
+	next_rank: jax.Array
+	identity: jax.Array
+	private: jax.Array
+	item: jax.Array
+	ability: jax.Array
+	moves: jax.Array
+
+
+@functools.cache
+def _illusion_ability() -> int:
+	"""The ability ID of Illusion in the engine's ability table (the host table's index)."""
+	return load_tables().abilities.index["illusion"]
+
+
 class Transition(NamedTuple):
 	"""One step: lane fields are [L, ...], row fields [B, ...] and seat fields [B, 2, ...]."""
 
@@ -166,6 +202,7 @@ class Transition(NamedTuple):
 	turns: jax.Array  # int32 [B]
 	illegal: jax.Array  # bool [B, 2]
 	rejected: jax.Array  # bool [B, 2]
+	aux: Any = None  # AuxLabels of the lanes (None unless the league builds labels)
 
 
 class League:
@@ -184,6 +221,7 @@ class League:
 		network: NetworkSection,
 		pool_size: int,
 		policies: Mapping[str, Callable],
+		labels: bool = False,
 	):
 		if env.config.batch_size != layout.batch:
 			raise ValueError(
@@ -201,6 +239,7 @@ class League:
 		self.pool_size = pool_size
 		self.policies = dict(policies)
 		self.tables = env.tables
+		self.labels = labels
 
 	# Observations.
 
@@ -304,6 +343,67 @@ class League:
 			actions = actions.at[layout.opponent_rows, seats].set(opponent_actions)
 		return actions
 
+	# Training labels.
+
+	def aux_labels(self, state: LeagueState, actions) -> AuxLabels:
+		"""The auxiliary targets of each learner lane, read from the battle before the step.
+
+		The opposing side's action comes from the assembled actions of this step; its kind is labelled
+		only when it is a decision with a real choice (two or more engine-legal actions). Identity
+		targets are dropped on rosters with an Illusion holder, where the protocol's public ranks may not
+		match the true members. The item, ability and moves are the opposing active's, on a live
+		active that is neither disguised nor transformed.
+		"""
+		layout = self.layout
+		battles = layout.lane_state(state.env.state)
+		lanes = jnp.arange(layout.lanes)
+		seats = layout.lane_seats(state.learner)
+		foe = 1 - seats
+		action = actions[layout.lane_rows, foe]
+		request = battles.request[lanes, foe]
+		active = battles.active[lanes, foe].astype(jnp.int32)
+		legal = block_switches(layout.lanes_of(state.env.base), layout.lanes_of(state.env.blocked))
+		real_choice = legal[lanes, foe].sum(-1) >= 2
+		decision = ((request == MOVE) | (request == SWITCH)) & real_choice
+		is_move = action < MOVE_ACTIONS
+		kind = jnp.where(decision, jnp.where(is_move, 0, 1), -1)
+		move_ids = battles.moves[lanes, foe, active].astype(jnp.int32)
+		move = move_ids[lanes, jnp.clip(action, 0, MOVE_ACTIONS - 1)]
+		slots = bench_slots(active)
+		slot = slots[lanes, jnp.clip(action - MOVE_ACTIONS, 0, slots.shape[-1] - 1)]
+		seen = battles.seen_order[lanes, foe, slot].astype(jnp.int32)
+		rank = jnp.where(seen > 0, seen - 1, UNSEEN_RANK)
+		illusion = jnp.any(battles.ability_base[lanes, foe] == _illusion_ability(), axis=-1)
+		disguised = battles.volatiles[lanes, foe, ILLUSION_SLOT] > 0
+		transformed = battles.volatiles[lanes, foe, TRANSFORMED] > 0
+		alive = battles.hp[lanes, foe, active] > 0
+		return AuxLabels(
+			next_kind=kind.astype(jnp.int8),
+			next_move=jnp.where(kind == 0, move, 0).astype(jnp.int16),
+			next_rank=jnp.where(kind == 1, rank, 0).astype(jnp.int8),
+			identity=~illusion,
+			private=alive & ~disguised & ~transformed & ~illusion,
+			item=battles.item[lanes, foe, active].astype(jnp.int16),
+			ability=battles.ability[lanes, foe, active].astype(jnp.int16),
+			moves=move_ids.astype(jnp.int16),
+		)
+
+	def finish_labels(self, labels: AuxLabels, state: LeagueState, outcome) -> AuxLabels:
+		"""Drop the next-action label where either side's action was held, refused or illegal, and the
+		private targets where the lane's own action was held (its observation repeats)."""
+		layout = self.layout
+		touched = (
+			layout.lanes_of(state.env.has_held)
+			| layout.lanes_of(outcome["illegal"])
+			| layout.lanes_of(outcome["rejected"])
+		).any(axis=-1)
+		seats = layout.lane_seats(state.learner)
+		own_held = state.env.has_held[layout.lane_rows, seats]
+		return labels._replace(
+			next_kind=jnp.where(touched, -1, labels.next_kind).astype(jnp.int8),
+			private=labels.private & ~own_held,
+		)
+
 	# Steps.
 
 	def _advance(self, state: LeagueState, actions, after, pool_after):
@@ -375,7 +475,10 @@ class League:
 		seats = self.layout.lane_seats(state.learner)
 		held = state.env.has_held[self.layout.lane_rows, seats]
 		after = select_lanes(held, state.hidden, after)
+		labels = self.aux_labels(state, actions) if self.labels else None
 		next_state, outcome = self._advance(state, actions, after, pool_after)
+		if labels is not None:
+			labels = self.finish_labels(labels, state, outcome)
 		transition = Transition(
 			obs=state.obs,
 			hidden=state.hidden,
@@ -384,6 +487,7 @@ class League:
 			log_prob=log_prob,
 			value=value,
 			after=after,
+			aux=labels,
 			**outcome,
 		)
 		return next_state, transition

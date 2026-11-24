@@ -36,7 +36,7 @@ from pokejax.engine.actions import NUM_ACTIONS
 from pokejax.engine.events import CANT_FOCUS_PUNCH, EFFECT_SUPER, ENTRY_REPLACEMENT, ORDER_SECOND
 from pokejax.engine.state import NUM_WEATHERS, STATUS_NAMES, TEAM_SLOTS
 from pokejax.tables import Tables
-from pokejax.train.config import NetworkSection
+from pokejax.train.config import AuxiliarySection, NetworkSection
 from pokejax.train.features import (
 	BENCH_COUNT,
 	MOVE_COUNT,
@@ -49,7 +49,7 @@ from pokejax.train.features import (
 ILLEGAL_LOGIT = -1e9
 # Stand-in for a missing member in a max over the team (never the largest value).
 MISSING_MEMBER = -1e9
-ACTIVATIONS = {"relu": nn.relu, "tanh": nn.tanh, "gelu": nn.gelu}
+ACTIVATIONS = {"relu": nn.relu, "tanh": nn.tanh, "gelu": nn.gelu, "silu": nn.silu}
 
 # The observation fields that feed the network, by group (observation.py names them).
 OWN_MEMBER_SCALARS = ("level", "hp", "fainted", "is_active")
@@ -263,9 +263,17 @@ class PokePolicy(nn.Module):
 
 	vocab: Vocabulary
 	network: NetworkSection
+	auxiliary_targets: AuxiliarySection = AuxiliarySection()
 
 	def setup(self):
 		n, v = self.network, self.vocab
+		if n.arch != "dense":
+			# The roster networks (roster.py) have their own parameters; imported here, as roster.py
+			# builds on this module.
+			from pokejax.train.roster import RosterNetwork
+
+			self.roster = RosterNetwork(v, n, self.auxiliary_targets)
+			return
 		self.species = nn.Embed(v.species, n.species_embedding)
 		self.moves = nn.Embed(v.moves, n.move_embedding)
 		self.items = nn.Embed(v.items, n.item_embedding)
@@ -308,6 +316,8 @@ class PokePolicy(nn.Module):
 
 		Feed-forward throughout, so a replay runs it over all of a chunk's steps at once.
 		"""
+		if self.network.arch != "dense":
+			return self.roster.encode(obs)
 		n = self.network
 		act = ACTIVATIONS[n.activation]
 		lead = obs.turn.shape
@@ -379,6 +389,13 @@ class PokePolicy(nn.Module):
 		With the factored head, projected also carries each action's features (encode) after the
 		core's inputs; the policy logits are the move scorer's (4) and the switch scorer's (5).
 		"""
+		carry, logits, value, _ = self.step_full(carry, projected, legal)
+		return carry, logits, value
+
+	def step_full(self, carry, projected, legal):
+		"""step, and the core's output (normalised by the roster networks) as a fourth value."""
+		if self.network.arch != "dense":
+			return self.roster.step_full(carry, projected, legal)
 		n = self.network
 		if n.action_head == "factored":
 			move_width, switch_width, _ = feature_widths(n.feature_set)
@@ -397,10 +414,35 @@ class PokePolicy(nn.Module):
 			carry, out = self.core.recur(carry, projected)
 			logits = self.policy(out)
 		logits = jnp.where(legal, logits, ILLEGAL_LOGIT)
-		return carry, logits, self.value(out)[..., 0]
+		return carry, logits, self.value(out)[..., 0], out
 
 	def __call__(self, obs, carry):
 		return self.step(carry, self.encode(obs), obs.legal_actions)
+
+	@property
+	def aux_width(self) -> int:
+		"""Width of the foe active vector that ends each roster encoding (0 for the dense network)."""
+		return self.network.width if self.network.arch != "dense" else 0
+
+	def full(self, obs, carry):
+		"""Policy, value and the auxiliary heads' outputs (a dict; empty when none is enabled).
+
+		Initialising with this method creates every parameter the training uses.
+		"""
+		projected = self.encode(obs)
+		carry, logits, value, out = self.step_full(carry, projected, obs.legal_actions)
+		heads = {}
+		if self.network.arch != "dense" and self.auxiliary_targets.enabled:
+			heads = self.roster.auxiliary(out, projected[..., -self.aux_width :])
+		return carry, logits, value, heads
+
+	def auxiliary(self, out, foe):
+		"""The auxiliary heads over the normalised core output out and the foe active vector foe."""
+		return self.roster.auxiliary(out, foe)
+
+	def probe_features(self, obs):
+		"""The type probe's per-move features (roster networks only): [..., 4, F]."""
+		return self.roster.probe_features(obs)
 
 
 def _active(side, flags, move_fields, moves, lead):

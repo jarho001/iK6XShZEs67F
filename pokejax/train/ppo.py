@@ -39,6 +39,7 @@ from pokejax.baselines import make_policy
 from pokejax.engine.observation import Observation
 from pokejax.env import DEFAULT_POOL, Env, EnvConfig
 from pokejax.tables import load_tables
+from pokejax.train.auxiliary import auxiliary_terms, finalize_auxiliary
 from pokejax.train.checkpoint import pool_digest
 from pokejax.train.config import PPOSection, TrainConfig
 from pokejax.train.evaluation import summarize_battles
@@ -72,6 +73,7 @@ class Steps(NamedTuple):
 	actor: jax.Array  # float32, 1 for a counted decision with a real choice (policy and entropy)
 	advance: jax.Array  # bool, the lane's carry advanced at this step (False where held)
 	ended: jax.Array  # bool, the battle ended at this step (the carry resets after it)
+	aux: Any = None  # AuxLabels of the lane's decision (None unless the auxiliary losses are on)
 
 
 class Chunks(NamedTuple):
@@ -179,7 +181,9 @@ class Trainer:
 		self.layout = Layout(config.groups)
 		# The digest a checkpoint of this run carries (checkpoint.pool_digest): resumes need the same pool.
 		self.team_digest = pool_digest(self.env.pool, self.env.team_indices)
-		self.model = PokePolicy(vocabulary(self.tables), config.network)
+		self.model = PokePolicy(vocabulary(self.tables), config.network, config.auxiliary)
+		self.auxiliary = config.auxiliary.enabled
+		self.aux_width = self.model.aux_width
 		policies = {
 			name: make_policy(name, self.env.tables, self.tables)
 			for name in self.layout.baseline_names
@@ -191,6 +195,7 @@ class Trainer:
 			config.network,
 			config.pool.size,
 			policies,
+			labels=self.auxiliary,
 		)
 		decay = p.decay_updates or config.run.updates
 		gradient_steps = decay * p.epochs * p.minibatches
@@ -210,7 +215,8 @@ class Trainer:
 	def _init_state(self, key) -> LearnerState:
 		key, init_key, reset_key = jax.random.split(key, 3)
 		league = self.league.reset(reset_key)._replace(key=key)
-		params = self.model.init(init_key, league.obs, league.hidden)["params"]
+		init_method = PokePolicy.full if self.auxiliary else None
+		params = self.model.init(init_key, league.obs, league.hidden, method=init_method)["params"]
 		return LearnerState(
 			params=params,
 			opt_state=self.tx.init(params),
@@ -257,20 +263,24 @@ class Trainer:
 
 		def step(hidden, xs):
 			step_features, step_legal, step_ended, step_advance = xs
-			after, logits, value = self.model.apply(
-				{"params": params}, hidden, step_features, step_legal, method=PokePolicy.step
+			after, logits, value, out = self.model.apply(
+				{"params": params}, hidden, step_features, step_legal, method=PokePolicy.step_full
 			)
 			kept = select_lanes(step_advance, after, hidden)
-			return reset_carry(kept, step_ended), (logits, value)
+			return reset_carry(kept, step_ended), (logits, value, out)
 
-		_, (logits, values) = jax.lax.scan(
+		_, (logits, values, outs) = jax.lax.scan(
 			step, start, (features, obs.legal_actions, ended, advance)
 		)
-		return logits, values
+		# The auxiliary heads read the foe active vector, the last aux_width entries of each encoding.
+		foe = features[..., features.shape[-1] - self.aux_width :] if self.aux_width else None
+		return logits, values, outs, foe
 
 	def _loss(self, params, steps: Steps, start):
 		p = self.config.ppo
-		logits, values = self._replay(params, steps.obs, steps.ended, steps.advance, start)
+		logits, values, outs, foe = self._replay(
+			params, steps.obs, steps.ended, steps.advance, start
+		)
 		log_probs = jax.nn.log_softmax(logits)
 		chosen = jnp.take_along_axis(log_probs, steps.action[..., None], axis=-1)[..., 0]
 		# The critic learns from every counted decision; the policy only from those with a choice,
@@ -303,6 +313,19 @@ class Trainer:
 			"approx_kl": (actor * (ratio - 1 - log_ratio)).sum() / actor_total,
 			"clip_fraction": (actor * (jnp.abs(ratio - 1) > p.clip)).sum() / actor_total,
 		}
+		if self.auxiliary and steps.aux is not None:
+			flat = lambda x: x.reshape((-1,) + x.shape[2:])
+			heads = self.model.apply(
+				{"params": params}, flat(outs), flat(foe), method=PokePolicy.auxiliary
+			)
+			aux_loss, aux_metrics = auxiliary_terms(
+				heads,
+				jax.tree.map(flat, steps.aux),
+				jax.tree.map(flat, steps.obs),
+				self.config.auxiliary,
+			)
+			loss = loss + aux_loss
+			metrics.update(aux_metrics)
 		return loss, metrics
 
 	def _learn(self, params, opt_state, chunks: Chunks, key):
@@ -396,8 +419,8 @@ class Trainer:
 			return self.model.apply({"params": learner.params}, obs, hidden)
 
 		_, _, last_value = apply(league.obs, league.hidden)
-		_, _, final_value = apply(merge_leading(traj.final_obs, 2), merge_leading(traj.after, 2))
-		final_value = final_value.reshape(length, lanes)
+
+		final_value = self.final_values(learner.params, traj)
 		terminated = layout.lanes_in_time(traj.terminated)
 		truncated = layout.lanes_in_time(traj.truncated)
 		advantage, returns = gae(
@@ -428,6 +451,7 @@ class Trainer:
 			actor=chunked(actor),
 			advance=chunked(traj.advance),
 			ended=chunked(terminated | truncated),
+			aux=jax.tree.map(chunked, traj.aux),
 		)
 		start = jax.tree.map(
 			lambda x: x[::sequence].reshape((chunks_per_row * lanes,) + x.shape[2:]), traj.hidden
@@ -437,6 +461,7 @@ class Trainer:
 			learner.params, learner.opt_state, Chunks(steps, start), shuffle_key
 		)
 		metrics.update(self._rollout_metrics(traj, returns, weight))
+		metrics = finalize_auxiliary(metrics)
 		update = learner.update + 1
 		metrics["learning_rate"] = self.schedule(learner.update * p.epochs * p.minibatches)
 		pool, fresh, inserts = self._insert(
@@ -445,6 +470,29 @@ class Trainer:
 		league = league._replace(key=key, pool_fresh=fresh)
 		learner = LearnerState(params, opt_state, league, pool, inserts, update)
 		return learner, metrics
+
+	def final_values(self, params, traj: Transition):
+		"""The value of each step's pre-reset observation [T, L], read only where a battle was truncated.
+
+		gae uses these values only at truncated steps, so a rollout with no truncated battle skips the
+		network over every final observation and returns zeros.
+		"""
+		length, lanes = traj.action.shape
+
+		def truncation_values():
+			def one_step(xs):
+				obs, hidden = xs
+				_, _, values = self.model.apply({"params": params}, obs, hidden)
+				return values
+
+			# One step at a time: the pair features of a whole rollout's final observations would not fit.
+			return jax.lax.map(one_step, (traj.final_obs, traj.after))
+
+		return jax.lax.cond(
+			traj.truncated.any(),
+			truncation_values,
+			lambda: jnp.zeros((length, lanes), jnp.float32),
+		)
 
 	def update(self, learner: LearnerState):
 		"""One update (rollout, GAE and the epochs), jitted; returns the new state and metrics."""
