@@ -473,21 +473,51 @@ Tasks, in order:
    arm, README results, the choice of the model for the external test.
 3. The external test (ladder or published bots), when the owner decides.
 
-## Later: forward search
+## Forward search (branch `search`)
 
-The owner wants forward search on top of the trained policy eventually. It is
-not part of Phases 0 to 6, but nothing built before then may block it:
+Search on top of the trained policy at decision time, developed on the
+`search` branch beside Phase 7. Design: work/codex/search-design.md
+(outside git). The engine stays a pure function of state and actions and
+every random outcome goes through the forced-outcome hook, so a search can
+copy a state and advance it many times in one `vmap` batch.
 
-- `step` stays a pure function of state and actions, so any state can be
-  copied and advanced many times in one `vmap` batch.
-- The forced-outcome hook from the Contract must cover every random outcome,
-  because search will use it to choose chance outcomes.
-- The Phase 5 Showdown player should be written so that it can later rebuild a
-  full engine state, not only an observation.
+Rules:
+- The deployed searcher sees only what its player sees: its own requests,
+  the protocol and its own choices. Hidden opponent values are sampled from
+  a belief built from the random team generator's sets and the evidence of
+  the battle; the true state is used only in tests and clearly marked
+  diagnostic arms, never in a strength claim.
+- Every result compares search with the raw policy of the same checkpoint
+  on paired setups (same teams, seats and seeds).
 
-Search itself will additionally need a sampler for the opponent's unrevealed
-information and a policy for limiting chance branching (sampling, or bucketed
-damage rolls).
+Tasks, in order:
+
+1. Search transition and signal test: a search step without auto-reset
+   (held choices, refusals, forced switches, terminal states), batched
+   copies, value backup; a one-decision rollout search on the true state
+   (diagnostic oracle) against the raw policy, to see whether the value
+   network can rank actions at all; timings on the 3060 Ti.
+2. Belief and rebuild: a set catalogue from the pinned generator, hard and
+   soft evidence from the battle, Illusion, a particle bank per battle and
+   full engine states rebuilt from the player's view; the rollout search
+   (Method 1) on rebuilt states, evaluated in the engine.
+3. Showdown: rebuild from the live protocol stream in the bridge, the same
+   search on pinned local Showdown, and the search-minus-raw gain compared
+   across simulators.
+4. Matrix game (Method 2), then information-set MCTS (Method 3) only if the
+   results call for deeper search.
+5. External test: Foul Play (pinned) on local Showdown. The ladder only
+   with the owner's explicit approval.
+
+Exit for the first deployable searcher (tasks 1 to 3):
+- at least 52% head-to-head against the raw checkpoint over 8,192 games
+  (4,096 paired setups, both seats), with the paired 95% lower bound above
+  50%, in the engine and on local Showdown;
+- no material loss against max-damage and heuristics (at most 1 point
+  below the raw policy, 4,096 battles each);
+- decision time: a soft target of 250 ms at the 95th percentile on the
+  3060 Ti, like the engine throughput gate: aimed for, and adjustable by
+  the owner after optimisation attempts.
 
 ## Working rules
 
