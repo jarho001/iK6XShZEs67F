@@ -1,7 +1,7 @@
 """Win-rate curves of training runs, as SVG (or HTML around the same SVG).
 
 	python -m pokejax.train.plot RUN_DIR... [--opponent NAME] [--policy sampled|greedy]
-		[--x updates|minutes] [--training] [--title TEXT] --out FILE.svg|FILE.html
+		[--x updates|minutes|steps] [--training] [--title TEXT] --out FILE.svg|FILE.html
 
 Each run directory is one that pokejax.train.run writes. Its metrics.jsonl gives:
 
@@ -14,6 +14,8 @@ Each run directory is one that pokejax.train.run writes. Its metrics.jsonl gives
 - with --x minutes, the update records' cumulative "seconds" (wall time, including the periodic
   evaluations and checkpoints), interpolated at the evaluation points. A resumed run's clock starts
   again at the resumption, so its later times continue from the last time before it.
+- with --x steps, the update records' env_steps (environment steps, comparable across runs with
+  different batch sizes), interpolated at the evaluation points in the same way.
 
 One line per run, in the order the directories are given: run i takes colour slot i of the
 reference palette (the dataviz skill's palette.md), so a run keeps its colour across figures. A
@@ -217,11 +219,16 @@ def run_series(run_dir: Path, *, opponent: str, policy: str, x_mode: str, traini
 	rows = [record for record in records if record["kind"] == "update"]
 	if x_mode == "minutes" and not rows:
 		raise PlotError(f"{run_dir} has no update records, so no wall time")
+	if x_mode == "steps" and any("env_steps" not in row for row in rows):
+		raise PlotError(f"{run_dir} has update records without env_steps")
 	updates, minutes = _clock(rows)
+	steps = np.array([row.get("env_steps", 0) for row in rows], dtype=float)
 
 	def position(update: float) -> float:
 		if x_mode == "updates":
 			return float(update)
+		if x_mode == "steps":
+			return float(np.interp(update, updates, steps))
 		return float(np.interp(update, updates, minutes))
 
 	evaluation = []
@@ -239,7 +246,10 @@ def run_series(run_dir: Path, *, opponent: str, policy: str, x_mode: str, traini
 		result = results[0]
 		rate = 100 * result["win_rate"]
 		low, high = (100 * bound for bound in result["ci95"])
-		when = f"update {update:,}" if x_mode == "updates" else f"{position(update):.1f} min"
+		when = {
+			"updates": f"update {update:,}",
+			"steps": f"{position(update) / 1e6:.1f}M steps",
+		}.get(x_mode, f"{position(update):.1f} min")
 		tooltip = (
 			f"{name}, {when}: {rate:.2f}% against {opponent} ({policy}, "
 			f"{result['battles']:,} battles, 95% CI {low:.2f} to {high:.2f})"
@@ -344,7 +354,7 @@ def render(series: list[Series], *, title: str, x_label: str, x_mode: str) -> st
 		),
 	]
 	for value in _ticks(x_low, x_high, x_step):
-		label = f"{value:,.0f}" if x_mode == "updates" else f"{value:g}"
+		label = {"updates": f"{value:,.0f}", "steps": f"{value / 1e6:g}M"}.get(x_mode, f"{value:g}")
 		parts.append(
 			f'<text x="{X(value):.1f}" y="{bottom + 18}" font-size="11" text-anchor="middle" '
 			f'class="secondary">{label}</text>'
@@ -433,9 +443,9 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument(
 		"--x",
 		dest="x_mode",
-		choices=("updates", "minutes"),
+		choices=("updates", "minutes", "steps"),
 		default="updates",
-		help="the horizontal axis (default updates)",
+		help="the horizontal axis: updates, wall minutes or environment steps (default updates)",
 	)
 	parser.add_argument(
 		"--training",
@@ -457,7 +467,11 @@ def main(argv=None) -> int:
 	title = args.title or f"Win rate against {args.opponent} ({args.policy} actions)"
 	if args.training:
 		title += ", with training win rates"
-	x_label = "training update" if args.x_mode == "updates" else "training minutes (wall time)"
+	x_label = {
+		"updates": "training update",
+		"minutes": "training minutes (wall time)",
+		"steps": "environment steps",
+	}[args.x_mode]
 	try:
 		series = [
 			run_series(

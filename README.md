@@ -507,3 +507,136 @@ auxiliary losses (P2) add 2.4 points against max-damage and 1.3 against heuristi
 (82.2 to 84.5 against 79.8 to 82.2) on max-damage, but they do not improve the chart read-out. P0 was still rising at 40M (56.7, 57.0 and 61.7
 against max-damage at updates 1,000, 1,100 and 1,200), P1 rose 3.8 points over those three evaluations but
 was flat over the last two, and P2 was flat (81.8, 80.8 and 82.3).
+
+### Phase 6 results
+
+The Phase 6 exit (ROADMAP.md) is met by the long run of P2, the pairwise network with the four
+auxiliary losses, on one training seed. The run is `work/codex/exp/p6-long.toml` (outside git, run
+directory `work/runs/p6-long`): P2's configuration (512 battle rows of 64 steps, the league of
+`configs/rtx3060ti.toml`, the four auxiliary losses) with 14,650 updates, which is 480,051,200
+environment steps, and a learning rate that decays linearly from 1e-3 to 1e-4 over the whole run. It
+ran alone on the RTX 3060 Ti from 01:29:17 to 05:46:49 UTC on 2026-11-24, once, without a stop or a
+resume. The kept checkpoints (`checkpoint-<update>.npz`, never overwritten, selected by
+`checkpoint.keep`) are at 3,662 updates (119,996,416 steps, "120M"), 7,325 updates (240,025,600
+steps, X = 240M, fixed before the run), 9,767 updates (320,045,056 steps, two thirds of the run, "320M")
+and 14,650 updates (480,051,200 steps, 2X, "480M").
+
+Exit table (4,096 battles per evaluation; sampled actions, greedy in brackets):
+
+| Exit item | Measured | Result |
+|---|---|---|
+| At least 60% against max-damage and heuristics, lower 95% bound above 55% | max-damage 91.09% [90.18, 91.92] (greedy 91.36% [90.46, 92.18]); heuristics 90.23% [89.29, 91.11] (greedy 90.87% [89.95, 91.71]) | pass |
+| At least 55% against its own checkpoint from two thirds of the run | 480M against 320M: 66.39% [65.36, 67.41] sampled, 66.09% [65.06, 67.11] greedy, over 8,192 games (4,096 team draws, each played on both seats) | pass |
+| Still improving: 2X beats X by at least 2 points, positive 95% interval (panel, X = 240M) | panel mean, 480M minus 240M: +6.26 points [+5.65, +6.87] sampled, +5.01 [+4.40, +5.59] greedy | pass |
+| Fits in 12 hours on the 3060 Ti | 15,350 s of training, evaluations and checkpoints included (4 h 16 min); 15,452 s (4 h 17 min 32 s) from launch to the end of the final evaluation | pass |
+| Changing the type chart table does not change the network's inputs | `tests/test_train_roster.py::test_changing_the_type_chart_changes_no_input_of_the_roster_networks` | pass |
+| Phase 5 transfer of the promoted (480M) checkpoint: within 3 points per baseline, at least 4,000 battles each | largest gap 1.00 points (heuristics, sampled: engine 90.23%, Showdown 89.23%); 4,096 battles per row and simulator, 0 errors, all eight rows within 3 points | pass |
+
+The final evaluation of the 480M checkpoint, written by the run (`pokejax.train.evaluation` with
+Wilson intervals, `work/runs/p6-long/result.json`):
+
+| Opponent | Sampled | Greedy |
+|---|---:|---:|
+| random | 99.88 [99.71, 99.95] | 99.80 [99.62, 99.90] |
+| random-move | 98.75 [98.37, 99.05] | 98.71 [98.31, 99.01] |
+| max-damage | 91.09 [90.18, 91.92] | 91.36 [90.46, 92.18] |
+| heuristics | 90.23 [89.29, 91.11] | 90.87 [89.95, 91.71] |
+
+Head-to-head, 480M against 320M (`python -m pokejax.train.headtohead`): each of 4,096 team draws is
+played twice, once with each network on each side, so 8,192 games per action mode. Sampled: 66.39%
+[65.36, 67.41], with 66.97% when 480M is on side 0 and 65.82% on side 1; the paired bootstrap over the
+draws gives [65.44, 67.35]. Greedy: 66.09% [65.06, 67.11]. Mean battle length is 41.7 steps.
+
+Panel (`python -m pokejax.train.panel`): each checkpoint plays the same 4,096 battle setups against each
+opponent (team pairs, sides and engine keys drawn once from the seed), against the four baselines and
+the two fixed 40M checkpoints (P1 and P2, `work/runs/p6-p1` and `work/runs/p6-p2`). Win rates are
+sampled, in per cent; the panel mean is the equal-weight mean of the six opponents, with a paired
+bootstrap interval over the setups.
+
+| Checkpoint | Random | Random-move | Max-damage | Heuristics | P1 (40M) | P2 (40M) | Panel mean [95%] |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 120M | 99.49 | 96.34 | 84.03 | 83.03 | 53.20 | 51.51 | 77.93 [77.32, 78.51] |
+| 240M (X) | 99.63 | 97.58 | 86.23 | 85.62 | 55.69 | 54.79 | 79.92 [79.39, 80.49] |
+| 480M (2X) | 99.76 | 98.56 | 90.99 | 90.45 | 69.21 | 68.14 | 86.19 [85.69, 86.67] |
+
+The paired difference of the panel means is 480M minus 240M +6.26 points [+5.65, +6.87] (sampled) and
++5.01 [+4.40, +5.59] (greedy); 240M minus 120M is +1.99 [+1.34, +2.64] (sampled). Per opponent (sampled,
+480M minus 240M, paired bootstrap intervals): P1 +13.53 [+11.55, +15.43], P2 +13.35 [+11.50, +15.28],
+heuristics +4.83 [+3.59, +6.05], max-damage +4.76 [+3.56, +6.01], random-move +0.98 [+0.42, +1.51] and
+random +0.12 [-0.10, +0.34], where both checkpoints are near the ceiling.
+
+Phase 5 transfer (`python -m pokejax.showdown.compare --checkpoint work/runs/p6-long/checkpoint-14650.npz
+--battles 4096`, the same team pairs and sides in the engine and in Showdown, Wilson 95% intervals):
+
+| Opponent | Policy | Engine win % | Showdown win % | Difference (points) |
+|---|---|---|---|---:|
+| random | sampled | 99.88 [99.71, 99.95] | 99.80 [99.62, 99.90] | -0.07 |
+| random | greedy | 99.80 [99.62, 99.90] | 99.78 [99.58, 99.88] | -0.02 |
+| random-move | sampled | 98.75 [98.37, 99.05] | 98.68 [98.28, 98.99] | -0.07 |
+| random-move | greedy | 98.71 [98.31, 99.01] | 98.61 [98.20, 98.92] | -0.10 |
+| max-damage | sampled | 91.09 [90.18, 91.92] | 90.21 [89.26, 91.08] | -0.88 |
+| max-damage | greedy | 91.36 [90.46, 92.18] | 91.38 [90.48, 92.20] | +0.02 |
+| heuristics | sampled | 90.23 [89.29, 91.11] | 89.23 [88.25, 90.15] | -1.00 |
+| heuristics | greedy | 90.87 [89.95, 91.71] | 90.94 [90.02, 91.78] | +0.07 |
+
+The first observation of every battle matched the engine's to within one float ulp in all eight rows,
+with no errors. Refused trapped switches are of the same size in both simulators: 109 to 157 per
+4,096 battles in the engine and 118 to 151 in Showdown.
+
+Curve. `docs/p6-long.svg` (against max-damage) and `docs/p6-long-heuristics.svg` (against heuristics)
+show the sampled win rate at each evaluation (1,024 battles, 95% intervals) over environment steps, with
+P2 (`work/runs/p6-p2`) and L2 (`work/runs/rtx3060ti`, the Phase 4 run) for reference:
+
+![Win rate against max-damage over environment steps for the 480M run, P2 and L2](docs/p6-long.svg)
+
+![Win rate against heuristics over environment steps for the 480M run, P2 and L2](docs/p6-long-heuristics.svg)
+
+Against max-damage, the 480M run rose from 73.1% at 16M steps to 77.3% at 33M, 80.6% at 66M, 82.2% at 131M,
+86.1% at 262M, 88.8% at 393M and 90.9% at 459M; the last six evaluations average 89.5% against 86.9% for the
+six before them. Against heuristics the figures are 72.0, 73.5, 80.2, 84.1, 87.4 and 90.7 at the same
+points. At equal steps the run is well ahead of L2 (69.7% against max-damage at 66M steps). It is behind P2
+until about 40M steps: P2 was at 81.8% at 33M and 83.4% at its end (40M), because its learning rate fell to
+1e-4 by then, while this run's was still about 9e-4 at 40M. That is a schedule effect, which this run does
+not separate from the network, and the comparison is not a controlled one.
+
+Training diagnostics over the run (means of the logged updates, every 10 updates):
+
+| Updates | Entropy | Approximate KL | Clip fraction | Explained variance |
+|---|---:|---:|---:|---:|
+| 1 to 1,000 | 0.601 | 0.0099 | 0.089 | 0.619 |
+| 3,001 to 4,000 | 0.453 | 0.0127 | 0.079 | 0.642 |
+| 7,001 to 8,000 | 0.373 | 0.0088 | 0.059 | 0.707 |
+| 11,001 to 12,000 | 0.318 | 0.0038 | 0.031 | 0.692 |
+| 14,001 to 14,650 | 0.266 | 0.0018 | 0.014 | 0.706 |
+
+Entropy fell steadily (the policy became more peaked), the approximate KL and the clip fraction fell with
+the learning rate, and the explained variance rose from about 0.6 to about 0.7 and then stayed there. One
+logged update reached an approximate KL of 0.027 (update 5,240), and no value was non-finite. The minimum
+explained variance, -0.11, is at update 1.
+
+Divergence was checked at every evaluation: against max-damage the lowest change over two evaluations
+was -1.27 points (sampled), so the stop rule (a fall of more than 10 points) never applied.
+
+Caveats. One seed, so the intervals describe the evaluation noise of this run only. The periodic
+evaluations use 1,024 battles (about plus or minus 3 points), the final ones 4,096. The
+XLA allocator logged one failed 4 GiB device allocation during the first compile (01:31:28 UTC) and
+the run continued without any other error (the same message appears in the logs of the P2 arm). The
+peak device memory was 2.31 GB.
+
+Test suite. `python -m pytest -q tests --large` on the final code (started 06:28:47 UTC, log
+`work/codex/runs/p6t4-pytest.log`): 762 passed and 1 failed. The failure was
+`tests/test_obs_diff.py::test_large_recording`: the 300-battle recording `work/diff/obs-pool.jsonl.gz`
+(2026-11-21) predated the player-view fields `own.hidden_type` and `own.return_power` of Phase 6
+task 1. Re-recorded with the same command (`node reference/record-battles.cjs --profile pool --views
+--count 300 --seed 1`), it compares with 0 mismatched leaves over 21,826 decision points, and
+`tests/test_obs_diff.py --large` passes (11 tests). `node --test tests/*.cjs`: 76 pass, 0 fail.
+
+Commands (outside git, logs in `work/codex/runs/p6t4-*`):
+
+```bash
+python -m pokejax.train --config work/codex/exp/p6-long.toml
+python -m pokejax.train.headtohead 480M=work/runs/p6-long/checkpoint-14650.npz 320M=work/runs/p6-long/checkpoint-9767.npz --draws 4096 --batch 1024
+python -m pokejax.train.panel 120M=work/runs/p6-long/checkpoint-3662.npz 240M=work/runs/p6-long/checkpoint-7325.npz 480M=work/runs/p6-long/checkpoint-14650.npz --opponent P1=work/runs/p6-p1/checkpoint.npz --opponent P2=work/runs/p6-p2/checkpoint.npz --battles 4096 --batch 1024 --difference 480M 240M --difference 240M 120M
+python -m pokejax.showdown.compare --checkpoint work/runs/p6-long/checkpoint-14650.npz --battles 4096
+python -m pokejax.train.plot work/runs/p6-long work/runs/p6-p2 work/runs/rtx3060ti --opponent max-damage --x steps --out docs/p6-long.svg
+```

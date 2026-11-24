@@ -8,7 +8,8 @@ A run directory (default work/runs/<name>, outside git) holds:
   final_evaluation (at the end, with evaluation.final_battles);
 - checkpoint.npz: the learner (parameters, optimizer state, battles and keys, the pool and its
   insertion count, the update count) and the configuration; written every checkpoint.every updates
-  and at the end;
+  and at the end; checkpoint.keep names updates whose checkpoints are also kept as
+  checkpoint-<update>.npz (never overwritten);
 - result.json: the summary of the finished run.
 """
 
@@ -55,6 +56,15 @@ def _truncate_metrics(path: Path, last_update: int) -> None:
 		if record and record["kind"] != "final_evaluation" and record["update"] <= last_update:
 			kept.append(line)
 	path.write_text("".join(line + "\n" for line in kept), encoding="utf-8")
+
+
+def _keep_checkpoint(run_dir: Path, update: int, learner, config, team_digest, log) -> None:
+	"""Keep the learner of this update as checkpoint-<update>.npz; an existing kept file stays."""
+	path = run_dir / f"checkpoint-{update}.npz"
+	if path.exists():
+		return
+	save_checkpoint(path, learner, config, team_digest)
+	log(f"kept {path.name} at update {update}")
 
 
 def _peak_memory() -> int | None:
@@ -150,6 +160,8 @@ def run_training(
 				log(_evaluation_line(update, results, config.evaluation.battles))
 			if config.checkpoint.every and update % config.checkpoint.every == 0:
 				save_checkpoint(checkpoint_path, learner, config, trainer.team_digest)
+			if update in config.checkpoint.keep:
+				_keep_checkpoint(run_dir, update, learner, config, trainer.team_digest, log)
 		training_seconds = time.perf_counter() - start_time
 		save_checkpoint(checkpoint_path, learner, config, trainer.team_digest)
 

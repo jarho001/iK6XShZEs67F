@@ -249,3 +249,16 @@ def test_the_transformer_is_a_roster_arch_with_attention_sizes():
 		load_config(None, ["network.arch=transformer", "network.features=true"])
 	with pytest.raises(ConfigError, match="must be at least 1"):
 		load_config(None, ["network.arch=transformer", "network.attention_blocks=0"])
+
+
+def test_checkpoint_keep_lists_updates_and_is_refused_when_invalid():
+	config = load_config(None, ["checkpoint.keep=[3662, 7325, 9767, 14650]"])
+	assert config.checkpoint.keep == (3662, 7325, 9767, 14650)
+	assert TrainConfig.from_dict(config.to_dict()) == config
+	assert load_config(None).checkpoint.keep == ()
+	with pytest.raises(ConfigError, match="must not repeat an update"):
+		load_config(None, ["checkpoint.keep=[10, 10]"])
+	with pytest.raises(ConfigError, match="checkpoint.keep must be at least 1"):
+		load_config(None, ["checkpoint.keep=[0]"])
+	with pytest.raises(ConfigError, match="must be an integer"):
+		load_config(None, ["checkpoint.keep=[1.5]"])

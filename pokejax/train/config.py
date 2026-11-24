@@ -26,7 +26,8 @@ A file has these tables, and every key is optional (the defaults are the ones be
 - [evaluation]: every (updates between evaluations, 0 for none), battles, final_battles, batch
   (battles per evaluation call; battles and final_battles must be multiples of it, and batch must
   be even), opponents (baselines by name) and greedy (also evaluate the argmax actions)
-- [checkpoint]: every (updates between checkpoints, 0 for only the final one)
+- [checkpoint]: every (updates between checkpoints, 0 for only the final one), keep (updates whose
+  checkpoints are also kept as checkpoint-<update>.npz, never overwritten)
 
 Unknown tables and keys are errors. Overrides are `section.key=value`, with the value read as
 TOML (a string needs no quotes).
@@ -38,7 +39,7 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, get_origin
+from typing import Any, get_args, get_origin
 
 from pokejax.policy_names import POLICY_NAMES
 
@@ -324,9 +325,15 @@ class EvaluationSection:
 @dataclass(frozen=True)
 class CheckpointSection:
 	every: int = 100
+	# Updates whose checkpoints are also kept as checkpoint-<update>.npz in the run directory. A kept
+	# file is never overwritten: a resumed run that reaches its update again leaves it as it is.
+	keep: tuple[int, ...] = ()
 
 	def __post_init__(self):
 		_check_int(self.every, 0, "checkpoint.every")
+		for update in self.keep:
+			_check_int(update, 1, "checkpoint.keep")
+		_check(len(set(self.keep)) == len(self.keep), "checkpoint.keep must not repeat an update")
 
 
 SECTIONS = {
@@ -474,7 +481,10 @@ def _coerce(value, kind, name: str):
 		return {str(key): _coerce(item, float, f"{name}.{key}") for key, item in value.items()}
 	if origin is tuple:
 		_check(isinstance(value, (list, tuple)), f"{name} must be a list")
-		return tuple(_coerce(item, str, f"{name}[{index}]") for index, item in enumerate(value))
+		item_kind = get_args(kind)[0]
+		return tuple(
+			_coerce(item, item_kind, f"{name}[{index}]") for index, item in enumerate(value)
+		)
 	raise TypeError(f"unsupported field type for {name}: {kind}")
 
 

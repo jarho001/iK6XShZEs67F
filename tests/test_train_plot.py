@@ -32,8 +32,12 @@ def evaluation(update, rate):
 	return {"kind": "evaluation", "update": update, "results": results}
 
 
-def write_run(directory, name, rate, updates=range(10, 201, 10)):
-	"""A run directory with update records (six seconds per update) and evaluations at 100, 200."""
+def write_run(directory, name, rate, updates=range(10, 201, 10), env_steps=True):
+	"""A run directory with update records (six seconds per update) and evaluations at 100, 200.
+
+	Each update is 32,768 environment steps, as in the training runs (env_steps), unless env_steps is
+	false.
+	"""
 	directory.mkdir(parents=True)
 	(directory / "config.json").write_text(json.dumps({"run": {"name": name}}), encoding="utf-8")
 	rows = [
@@ -46,6 +50,9 @@ def write_run(directory, name, rate, updates=range(10, 201, 10)):
 		}
 		for update in updates
 	]
+	if env_steps:
+		for row in rows:
+			row["env_steps"] = 32768 * row["update"]
 	rows += [evaluation(100, rate), evaluation(200, rate + 0.05)]
 	text = "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
 	(directory / "metrics.jsonl").write_text(text, encoding="utf-8")
@@ -113,6 +120,22 @@ def test_minutes_axis_and_the_tooltips_of_the_greedy_policy(tmp_path):
 	)
 	assert [round(x, 6) for x, _, _ in series.evaluation] == [10.0, 20.0]
 	assert "10.0 min" in series.evaluation[0][2] and "greedy" in series.evaluation[0][2]
+
+
+def test_steps_axis_places_the_evaluations_at_their_environment_steps(tmp_path):
+	run = write_run(tmp_path / "exp", "exp", 0.7)
+	series = run_series(
+		run, opponent="max-damage", policy="sampled", x_mode="steps", training=False
+	)
+	assert [round(x) for x, _, _ in series.evaluation] == [100 * 32768, 200 * 32768]
+	assert "3.3M steps" in series.evaluation[0][2]
+	out = tmp_path / "steps.svg"
+	assert main([str(run), "--x", "steps", "--out", str(out)]) == 0
+	texts = [element.text for element in ET.parse(out).getroot().iter(NS + "text")]
+	assert "environment steps" in texts and "2M" in texts and "8M" in texts
+	without = write_run(tmp_path / "old", "old", 0.7, env_steps=False)
+	with pytest.raises(PlotError, match="without env_steps"):
+		run_series(without, opponent="max-damage", policy="sampled", x_mode="steps", training=False)
 
 
 def test_html_output_wraps_the_same_figure(tmp_path):

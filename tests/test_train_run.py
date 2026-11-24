@@ -6,10 +6,11 @@ the update again, which is too much for the default suite.
 
 import json
 
+import numpy as np
 import pytest
 from train_support import league_config, tiny_config, write_pool
 
-from pokejax.train.run import RunError, run_training
+from pokejax.train.run import RunError, _keep_checkpoint, run_training
 
 pytestmark = [pytest.mark.xdist_group("train"), pytest.mark.usefixtures("cpu_only")]
 
@@ -114,3 +115,37 @@ def test_a_league_run_reports_every_group_and_each_baseline_and_action_policy(ta
 	]
 	assert any(line.startswith("evaluation at 2 (4 battles each)") for line in lines)
 	assert any(line.startswith("final evaluation at 2") for line in lines)
+
+
+@pytest.mark.large
+def test_kept_checkpoints_are_written_at_their_updates(tables, tmp_path):
+	run_dir = tmp_path / "kept"
+	lines = []
+	run_training(
+		tiny_config(
+			"run.updates=3",
+			"checkpoint.every=0",
+			"checkpoint.keep=[2]",
+			f"run.run_dir={run_dir}",
+			"logging.every=1",
+			"evaluation.every=0",
+		),
+		team_pool=write_pool(tmp_path, tables),
+		log=lines.append,
+	)
+	kept = run_dir / "checkpoint-2.npz"
+	assert kept.exists() and (run_dir / "checkpoint.npz").exists()
+	assert not (run_dir / "checkpoint-3.npz").exists()
+	with np.load(kept, allow_pickle=False) as data:
+		assert int(data[".update"]) == 2
+	with np.load(run_dir / "checkpoint.npz", allow_pickle=False) as data:
+		assert int(data[".update"]) == 3
+	assert "kept checkpoint-2.npz at update 2" in lines
+
+
+def test_a_kept_checkpoint_is_never_overwritten(tmp_path):
+	kept = tmp_path / "checkpoint-2.npz"
+	kept.write_bytes(b"earlier")
+	messages = []
+	_keep_checkpoint(tmp_path, 2, None, None, None, messages.append)
+	assert kept.read_bytes() == b"earlier" and messages == []
