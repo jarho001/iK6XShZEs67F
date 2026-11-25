@@ -154,6 +154,7 @@ function newSide(index) {
 function newMember(name) {
 	return {
 		name, species: '', baseSpecies: '', level: 100, hp: 0, maxhp: 0, status: '', stats: null,
+		sleepOrigin: -1,
 		moves: [], hiddenTypes: [], returnPowers: [], pp: [], maxpp: [], baseAbility: '', ability: '',
 		item: '', consumed: false,
 		knockedOff: false, itemRevealed: false, itemPublic: '', revealed: new Set(),
@@ -182,6 +183,8 @@ class PlayerView {
 		this.buffered = [];
 		this.turn = 0;
 		this.ended = false;
+		this.endedYawn = null;
+		this.justEndedYawn = null;
 		this.weather = 0;
 		this.weatherAge = 0;
 		this.trickRoom = false;
@@ -210,7 +213,8 @@ class PlayerView {
 		const cut = line.indexOf('|', 1);
 		const command = cut < 0 ? line.slice(1) : line.slice(1, cut);
 		if (command === 'request') return this.receiveRequest(line.slice(cut + 1));
-		if (command === 'error') return;
+		// Server timer and chat lines do not advance a battle decision or a retry.
+		if (['error', 't:', 'inactive', 'inactiveoff', 'c', 'c:', 'chat', 'j', 'l', 'n'].includes(command)) return;
 		const parts = line.split('|');
 		if (this.me === null) this.buffered.push(parts);
 		else this.protocol(parts);
@@ -514,6 +518,9 @@ class PlayerView {
 		this.stepLines++;
 		this.record(parts);
 		const command = parts[1];
+		this.justEndedYawn = this.endedYawn || null;
+		this.endedYawn = command === '-end' && effectName(parts[3]) === 'Yawn'
+			? this.memberFor(parseRef(parts[2])) : null;
 		this.ownTracker?.before(parts);
 		const handler = HANDLERS[command];
 		if (handler) handler.call(this, parts);
@@ -797,7 +804,19 @@ const HANDLERS = {
 
 	'-status'(parts) {
 		const member = this.memberFor(parseRef(parts[2]));
-		if (member) member.status = parts[3];
+		if (member) {
+			member.status = parts[3];
+			if (parts[3] === 'slp') {
+				const from = tagValue(parts, 'from');
+				const source = parseRef(tagValue(parts, 'of') || '');
+				const target = parseRef(parts[2]);
+				member.sleepOrigin = from === 'move: Rest' ? 0
+					: from === 'move: Yawn' || this.justEndedYawn === member ? 1
+					: source ? Number(source.side !== target.side)
+						: (!from || from?.startsWith('move: ') && toID(from.slice(6)) === this.step.currentMove)
+							&& this.step.current !== null && this.step.current !== target.side ? 1 : -1;
+			} else member.sleepOrigin = -1;
+		}
 	},
 
 	'-curestatus'(parts) {

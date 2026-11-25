@@ -501,7 +501,11 @@ test('a refused switch is remembered the same way by a view that gets the lines 
 	game.battle.sendUpdates();
 	assert.equal(game.views[0].trapHolds(), true);
 	const live = new PlayerView();
-	for (const chunk of game.chunks[0]) for (const line of chunk.split('\n')) live.receive(line);
+	for (const chunk of game.chunks[0]) {
+		live.receive('|inactive|Time left: 300 sec this turn');
+		live.receive('|t:|123456');
+		for (const line of chunk.split('\n')) live.receive(line);
+	}
 	assert.deepEqual(live.observation(), game.views[0].observation());
 	assert.equal(live.trapHolds(), true);
 });
@@ -521,4 +525,30 @@ test('the own request names Hidden Power\'s type and Return\'s power, and the vi
 	assert.deepEqual(own.hidden_type[1], [0, 0, 0, 0]);
 	// The foe's request is not the learner's: its Hidden Power and Return are not in the observation.
 	assert.equal('hidden_type' in game.views[0].opponentObservation(), false);
+});
+
+test('sleep source follows Rest and an opposing sleep move in a recorded player stream', () => {
+	const game = play(
+		[member('Mew', ['tackle', 'spore'])],
+		[member('Snorlax', ['rest', 'splash']), member('Pikachu', ['splash'])],
+	);
+	game.choose('move 1', 'move 2');
+	game.choose('move 1', 'move 1');
+	assert.equal(game.views[0].sides[1].members[0].sleepOrigin, 0);
+	game.choose('move 2', 'switch 2');
+	assert.equal(game.views[0].sides[1].members[1].sleepOrigin, 1);
+	const replay = new PlayerView();
+	for (const chunk of game.chunks[0]) replay.receive(chunk);
+	assert.deepEqual(replay.sides[1].members.map(member => member.sleepOrigin), [0, 1]);
+});
+
+test('delayed Yawn sleep keeps its opposing source in the recorded stream', () => {
+	const game = play([member('Mew', ['yawn', 'splash'])], [member('Snorlax', ['splash'])]);
+	game.choose('move 1', 'move 1');
+	game.choose('move 2', 'move 1');
+	assert.equal(game.views[0].sides[1].members[0].status, 'slp');
+	assert.equal(game.views[0].sides[1].members[0].sleepOrigin, 1);
+	const replay = new PlayerView();
+	for (const chunk of game.chunks[0]) replay.receive(chunk);
+	assert.equal(replay.sides[1].members[0].sleepOrigin, 1);
 });

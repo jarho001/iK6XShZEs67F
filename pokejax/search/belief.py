@@ -57,6 +57,18 @@ class Catalogue:
 		)
 		self.weather_moves = {self.move[m] for m in ("sandstorm", "raindance", "sunnyday", "hail")}
 		self.callers = (self.move["sleeptalk"], self.move["naturepower"])
+		self.sleep_moves = {
+			self.move[name]
+			for name in (
+				"spore",
+				"sleeppowder",
+				"sing",
+				"hypnosis",
+				"lovelykiss",
+				"darkvoid",
+				"grasswhistle",
+			)
+		}
 		self.mutable_abilities = {dex.abilities.index[name] for name in ("mummy", "trace")}
 		self.transfer_moves = {self.move[m] for m in ("trick", "switcheroo", "thief", "covet")}
 		self.ability_moves = {
@@ -152,6 +164,8 @@ class History(NamedTuple):
 	last_move: np.ndarray
 	active_turns: np.ndarray
 	status_age: np.ndarray
+	sleep_from_foe: np.ndarray
+	sleep_unknown: np.ndarray
 	last_faint: bool
 	queued_ours: bool
 	transform_source: int
@@ -182,13 +196,15 @@ class Belief:
 		self.last_move = np.zeros(TEAM_SLOTS, np.int16)
 		self.active_turns = np.zeros(TEAM_SLOTS, np.uint8)
 		self.status_age = np.zeros(TEAM_SLOTS, np.int8)
+		# -1 means the public history did not establish the source.
+		self.sleep_origin = np.full(TEAM_SLOTS, -1, np.int8)
 		self.fainted = 0
 		self.last_faint = False
 		self.took_turn = False
 		self.weather_permanent = False
 		self.hazard_order = np.zeros((2, 2), np.int8)
 
-	def update(self, obs, refused=False, propose=True):
+	def update(self, obs, refused=False, propose=True, sleep_origin=None):
 		foe = obs.opponent
 		count = int(np.count_nonzero(~foe.unseen.astype(bool)))
 		active = int(np.argmax(foe.is_active))
@@ -242,6 +258,30 @@ class Belief:
 				)
 		elif self.previous is None:
 			self.active_turns[active] = 1
+		# The event is a compressed public record; only an observed Rest establishes
+		# self-inflicted sleep without relying on the hidden engine state. A directly
+		# observed sleep move also identifies our side as the source.
+		if advanced:
+			new_sleep = (foe.status == SLEEP) & (self.previous.opponent.status != SLEEP)
+			self.sleep_origin[new_sleep] = -1
+			if event_move == c.move["rest"] and obs.events.status[1] == SLEEP:
+				# A phazing move may have replaced the Rest user before this request.
+				rest_user = self.active if obs.events.entered[1] else active
+				self.sleep_origin[rest_user] = 0
+			elif (
+				obs.events.status[1] == SLEEP
+				and (
+					int(obs.events.move[0]) in c.sleep_moves
+					or (self.previous.opponent.yawn and active == self.active)
+				)
+				and not obs.events.entered[1]
+				and foe.status[active] == SLEEP
+			):
+				self.sleep_origin[active] = 1
+		self.sleep_origin[foe.status != SLEEP] = -1
+		if sleep_origin is not None:
+			known = (foe.status == SLEEP) & (np.asarray(sleep_origin) >= 0)
+			self.sleep_origin[known] = np.asarray(sleep_origin)[known]
 		if foe.transformed and (
 			self.previous is None or not self.previous.opponent.transformed or active != self.active
 		):
@@ -312,6 +352,8 @@ class Belief:
 			self.last_move.copy(),
 			self.active_turns.copy(),
 			self.status_age.copy(),
+			self.sleep_origin != 0,
+			(foe.status == SLEEP) & (self.sleep_origin < 0),
 			self.last_faint,
 			queued and not self.took_turn,
 			self.transform_source,

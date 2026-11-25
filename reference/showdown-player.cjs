@@ -225,6 +225,8 @@ class Game {
 		}
 		if (this.trackers[index]) {
 			item.own = this.trackers[index].state(observation);
+			item.sleepOrigins = Array.from({ length: 6 }, (_, i) =>
+				view.sides[1 - index].members[i]?.sleepOrigin ?? -1);
 			item.stream = this.streams[index].splice(0);
 		}
 		if (index === this.learner) this.current.pending = item;

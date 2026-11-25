@@ -11,7 +11,15 @@ import pytest
 
 from pokejax.engine.observation import observe
 from pokejax.engine.reset import reset, teams_from_pool
-from pokejax.engine.state import ILLUSION_SLOT, NONE, ONGOING, SWITCH, TEAM_SLOTS, TURN_RESIDUAL
+from pokejax.engine.state import (
+	ILLUSION_SLOT,
+	NONE,
+	ONGOING,
+	SLEEP,
+	SWITCH,
+	TEAM_SLOTS,
+	TURN_RESIDUAL,
+)
 from pokejax.engine.switching import switch_members
 from pokejax.env import Env, EnvConfig
 from pokejax.search.belief import Belief, Catalogue
@@ -372,3 +380,39 @@ def test_copied_ability_reveal_survives_switch_without_rejecting_ditto(
 	worlds, count, _ = belief.sample(32)
 	assert count == 128
 	assert (catalogue.sets.species[worlds.sets[:, 0]] == ditto).all()
+
+
+def test_sleep_origin_from_public_engine_events(env, catalogue):
+	state = row(jax.jit(env.new_battles)(KEY), 0)
+	obs = jax.device_get(observe(state, 0, env.tables))
+	belief = Belief(catalogue, np.random.default_rng(42))
+	belief.update(obs, propose=False)
+	status = np.array(obs.opponent.status)
+	active = int(np.argmax(obs.opponent.is_active))
+	status[active] = SLEEP
+	moves = np.array(obs.events.move)
+	moves[1] = catalogue.move["rest"]
+	event_status = np.array(obs.events.status)
+	event_status[1] = SLEEP
+	changed = obs._replace(
+		opponent=obs.opponent._replace(status=status),
+		events=obs.events._replace(move=moves, status=event_status),
+	)
+	history = belief.update(changed, propose=False)
+	assert not history.sleep_from_foe[active]
+	assert not history.sleep_unknown[active]
+	other = Belief(catalogue, np.random.default_rng(43))
+	other.update(obs, propose=False)
+	moves[0], moves[1] = catalogue.move["spore"], 0
+	spore = changed._replace(events=changed.events._replace(move=moves))
+	history = other.update(spore, propose=False)
+	assert history.sleep_from_foe[active]
+	assert not history.sleep_unknown[active]
+	yawn = Belief(catalogue, np.random.default_rng(44))
+	yawned = obs._replace(opponent=obs.opponent._replace(yawn=1))
+	yawn.update(yawned, propose=False)
+	moves[0] = 0
+	asleep = changed._replace(events=changed.events._replace(move=moves))
+	history = yawn.update(asleep, propose=False)
+	assert history.sleep_from_foe[active]
+	assert not history.sleep_unknown[active]

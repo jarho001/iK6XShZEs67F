@@ -833,3 +833,54 @@ action in about 27% of decisions.
 Reading: in this one-sided form, with two opponent columns at wide requests, Method 2 loses to
 Method 1 and is not worth running on Showdown. Not tested: a wider column set (the cap may be what
 costs it) and the two-sided private-type version. Method 1 arm C stays the searcher.
+
+### Forward search, task 5: Foul Play on local Showdown
+
+Question: does arm C (unchanged from task 3) gain anything against a strong independent bot?
+
+Setup. Foul Play at commit `8f541f80f91f960603673796559f796b10ccf0fb` with `poke-engine==0.0.48`
+built for Gen 5, in its own venv under `work/` (linker: isolated `ziglang==0.17.1` through
+`work/s5-zig-cc`, no system install). Format `gen5randombattle`, its default 100 ms per sampled
+state, one search worker and one thread; its random-set cache is built from 40,000 pinned
+generator teams, so it does not fetch the live (newer) set data. It runs unmodified through
+`work/s5-foul-play-local.py`, which allows only the local WebSocket and blocks HTTP. Server:
+the pinned Showdown on loopback (`node work/s5-server.cjs`), no login server, outbound
+connections blocked; a server hook gives fixed generated team pairs and battle seeds, so every
+setup is played by all three of our arms in both seats. Our players see only their own player
+stream. Four games at a time (Foul Play on CPU, ours on the 3060 Ti). Runner: `work/s5-run.py`;
+every game, with checkpoint hash, code commit and diff hash, and Foul Play config, is in
+`work/codex/runs/s5-foulplay.jsonl`. The run scripts under `work/` are outside git.
+
+Two fixes in the deployed searcher (arm C's decision rule unchanged):
+- Sleep Clause in rebuilt worlds: the rebuild marked every sleeping opposing member as put to
+  sleep by us, so an opponent asleep from Rest blocked our sleep moves in simulation. The belief
+  now tracks the sleep source (Rest, our sleep move or Yawn) from the engine events and, on
+  Showdown, the protocol `[from]` tags; unknown sources keep the old assumption (0 such cases in
+  the confirmation).
+- A 1 s wall-clock deadline per decision with the raw greedy choice as fallback, and all
+  single-battle rollout shapes compiled before the first game.
+
+Integration (100 setups, 200 games per arm) chose raw greedy as the reference and sized the
+confirmation; 1,296 setups fit in about 6 hours (about 1,960 would have given ±2 points).
+
+Confirmation, 1,296 fresh setups, 2,592 games per arm, 95% bootstrap intervals by setup:
+
+| Arm vs Foul Play | Win % |
+|---|---:|
+| C (search) | 34.8 [33.1, 36.4] |
+| raw sampled | 35.1 [33.4, 36.7] |
+| raw greedy | 35.6 [33.9, 37.4] |
+
+C − greedy: −0.9 [−3.2, +1.5] points; C − sampled: −0.3 [−2.6, +2.0]. Verdict under the owner's
+rule (ROADMAP, task 5): **raw stays the default against Foul Play** (the interval excludes +2).
+
+0 errors, ties and timeouts in 7,776 games; 2 deadline fallbacks; belief or rebuild fallbacks
+in about 1% of C's decisions. Latency p50/p95/p99: C 70/100/135 ms, raw 15/28/38 ms, Foul Play
+238/247/253 ms. Wall time 5.35 hours.
+
+Reading: the search's gain against our own network (59% on Showdown) does not carry over to an
+independent, stronger opponent; it is consistent with task 1's finding that depth-1 search
+mostly best-responds to an opponent model shaped like our network. Raw greedy is not worse than
+raw sampled here. Runner notes: a false alarm on a Ditto lead (Imposter changes the first
+observed species) stopped one earlier attempt; those games were discarded and the integration
+replayed.

@@ -257,7 +257,7 @@ def rebuild(
 		"status": foe.status,
 		"status_counter": status_counter,
 		"sleep_start": jnp.where(slept, 3, 0),
-		"sleep_from_foe": slept,
+		"sleep_from_foe": slept & history.sleep_from_foe,
 		"seen_order": jnp.where(seen, slots + 1, 0),
 		"revealed_moves": revealed,
 		"active": theirs,

@@ -138,7 +138,7 @@ class Evaluation:
 			name: baseline_contestant(name, self.env, tables).seat.policy for name in OPPONENTS[1:]
 		}
 
-	def actor(self, arm, slots, seed):
+	def actor(self, arm, slots, seed, *, deadline_seconds=None, greedy=False):
 		seat = self.player.seat
 		return Actor(
 			seat.model,
@@ -149,6 +149,8 @@ class Evaluation:
 			slots,
 			seed,
 			self.method if arm == "C" else None,
+			deadline_seconds=deadline_seconds,
+			greedy=greedy,
 		)
 
 	def showdown(self, specs, opponent, arm, seed, concurrency, record=None):

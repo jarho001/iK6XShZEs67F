@@ -2,6 +2,7 @@
 
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 import jax
 import jax.numpy as jnp
@@ -48,7 +49,20 @@ def sample(logits, keys):
 class Actor:
 	"""Separate instances retain independent learner and opponent carries."""
 
-	def __init__(self, model, params, network, template, own_dtypes, slots, seed, method=None):
+	def __init__(
+		self,
+		model,
+		params,
+		network,
+		template,
+		own_dtypes,
+		slots,
+		seed,
+		method=None,
+		*,
+		deadline_seconds=None,
+		greedy=False,
+	):
 		self.model, self.params, self.template, self.own_dtypes = (
 			model,
 			params,
@@ -62,9 +76,15 @@ class Actor:
 		self.beliefs = [None] * slots
 		self.slots = slots
 		self.method = method
+		self.greedy = greedy
 		self.stats = Counter()
+		self.deadline_seconds = deadline_seconds
+		self.executor = ThreadPoolExecutor(max_workers=1) if deadline_seconds is not None else None
+		self.pending = None
+		self.search_errors = []
 
 	def act(self, items):
+		started = time.monotonic()
 		count = len(items)
 		padded = items + [items[0]] * (self.slots - count)
 		positions = np.asarray([item["slot"] for item in padded], np.int32)
@@ -82,7 +102,8 @@ class Actor:
 			lambda leaf, new: leaf.at[positions[:count]].set(new[:count]), self.hidden, after
 		)
 		if self.method is None:
-			return np.asarray(sample(logits, keys))[:count]
+			choices = jnp.argmax(logits, axis=-1) if self.greedy else sample(logits, keys)
+			return np.asarray(choices)[:count]
 
 		for item in items:
 			if item["reset"]:
@@ -96,7 +117,8 @@ class Actor:
 		view = stack_views(padded, observation, self.own_dtypes)
 		view.result[count:] = s.TIE
 		previous = np.asarray([item["previous"] for item in padded], np.int32)
-		decision, metrics = self.method.choose(
+		origins = [item.get("sleepOrigins", [-1] * 6) for item in padded]
+		args = (
 			self.params,
 			view,
 			beliefs,
@@ -106,10 +128,43 @@ class Actor:
 			keys,
 			jnp.zeros_like(logits),
 			previous,
-			protocol=True,
 		)
-		action, raw, searched = jax.device_get((decision.action, decision.raw, decision.searched))
+		if self.executor is None:
+			decision, metrics = self.method.choose(*args, protocol=True, sleep_origins=origins)
+			decision = jax.device_get(decision)
+		else:
+			# Only the worker owns the belief histories. A late search may finish,
+			# but its choice is discarded; later observations are queued in order.
+			raw = np.asarray(jnp.argmax(logits, axis=-1), np.int32)
+			if self.pending is not None and self.pending.done():
+				try:
+					self.pending.result()
+				except Exception as error:  # noqa: BLE001 - record late worker failures
+					self.search_errors.append(repr(error))
+					self.stats["search_errors"] += 1
+				self.pending = None
+			if self.pending is not None or time.monotonic() - started >= self.deadline_seconds:
+				update = self.executor.submit(self._update_beliefs, view, beliefs, origins)
+				update.add_done_callback(self._background_error)
+				self.stats.update(deadline_misses=count, deadline_fallbacks=count)
+				return raw[:count]
+			self.pending = self.executor.submit(self._run_search, args, origins)
+			try:
+				remaining = max(0.0, self.deadline_seconds - (time.monotonic() - started))
+				decision, metrics = self.pending.result(timeout=remaining)
+				self.pending = None
+			except TimeoutError:
+				self.stats.update(deadline_misses=count, deadline_fallbacks=count)
+				return raw[:count]
+			except Exception as error:  # noqa: BLE001 - report worker failures and fall back
+				self.search_errors.append(repr(error))
+				self.stats.update(search_errors=1, error_fallbacks=count)
+				self.pending = None
+				return raw[:count]
+		action, raw, searched = decision.action, decision.raw, decision.searched
 		prefix = slice(count)
+		if self.executor is None:
+			self._record_sleep(beliefs[:count])
 		self.stats.update(
 			eligible=int(metrics.eligible[prefix].sum()),
 			no_particle=int(metrics.no_particle[prefix].sum()),
@@ -126,6 +181,42 @@ class Actor:
 			ess=float(metrics.ess[prefix].sum()),
 		)
 		return action[:count]
+
+	def _background_error(self, future):
+		error = future.exception()
+		if error is not None:
+			self.search_errors.append(repr(error))
+			self.stats["search_errors"] += 1
+
+	def _record_sleep(self, beliefs):
+		for belief in beliefs:
+			if belief.previous is None:
+				continue
+			sleeping = belief.previous.opponent.status == s.SLEEP
+			self.stats.update(
+				sleep_unknown=int((sleeping & (belief.sleep_origin < 0)).sum()),
+				sleep_self=int((sleeping & (belief.sleep_origin == 0)).sum()),
+				sleep_foe=int((sleeping & (belief.sleep_origin > 0)).sum()),
+			)
+
+	def _update_beliefs(self, view, beliefs, origins):
+		for i, belief in enumerate(beliefs):
+			obs = jax.tree.map(lambda x, i=i: x[i], view.obs)
+			live = view.result[i] == s.ONGOING
+			belief.update(
+				obs,
+				bool(view.refused[i] or view.has_held[i]),
+				propose=live,
+				sleep_origin=origins[i],
+			)
+			if live and not view.has_held[i] and obs.legal_actions.sum() > 1:
+				belief.sample(self.method.config.worlds)
+		self._record_sleep(beliefs)
+
+	def _run_search(self, args, origins):
+		decision, metrics = self.method.choose(*args, protocol=True, sleep_origins=origins)
+		self._record_sleep(args[2])
+		return jax.device_get((decision, metrics))
 
 
 @jax.jit

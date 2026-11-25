@@ -507,7 +507,15 @@ Tasks, in order:
 4. Matrix game (Method 2), then information-set MCTS (Method 3) only if the
    results call for deeper search.
 5. External test: Foul Play (pinned) on local Showdown. The ladder only
-   with the owner's explicit approval.
+   with the owner's explicit approval. Run before the rest of task 4:
+   Method 2 lost to Method 1 in task 4's first part, and an independent
+   opponent tells more about the searcher than another method tested
+   against our own network. Promotion rule (owner's, fixed in advance):
+   search is promoted for this matchup if search minus the best raw arm
+   (sampled or greedy, chosen on the integration games) is at least
+   +2 points with the paired 95% lower bound above 0; if the interval
+   excludes +2, raw stays the default for this matchup; otherwise
+   inconclusive.
 
 Exit for the first deployable searcher (tasks 1 to 3):
 - at least 52% head-to-head against the raw checkpoint over 8,192 games

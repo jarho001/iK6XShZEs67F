@@ -192,6 +192,7 @@ class Method1:
 		self.tables = tables
 		self.catalogue = catalogue
 		self.config = config
+		self._prewarm_follow = False
 		if catalogue is not None:
 			teams = jax.device_put(catalogue.sets)
 			dex = catalogue
@@ -229,6 +230,7 @@ class Method1:
 		previous_actions,
 		*,
 		protocol=False,
+		sleep_origins=None,
 	):
 		"""Only PlayerView, own recurrent inference, keys and the prior enter deployment."""
 		host_obs, refused, held, result = jax.device_get(
@@ -245,8 +247,11 @@ class Method1:
 		)
 		history_rows = []
 		particle_rows = []
-		for belief, obs, was_refused, winner, search in rows:
-			history_rows.append(belief.update(obs, was_refused, propose=winner == ONGOING))
+		for i, (belief, obs, was_refused, winner, search) in enumerate(rows):
+			origin = None if sleep_origins is None else sleep_origins[i]
+			history_rows.append(
+				belief.update(obs, was_refused, propose=winner == ONGOING, sleep_origin=origin)
+			)
 			particle_rows.append(
 				belief.sample(self.config.worlds) if search else belief.empty(self.config.worlds)
 			)
@@ -294,6 +299,33 @@ class Method1:
 			np.asarray(ess),
 			valid_counts,
 		)
+
+	def prewarm_single(self, params, view, belief, carry, keys):
+		"""Compile the fixed single-battle rollout and waiting-request shapes."""
+		if view.side.size != 1:
+			raise ValueError("This prewarm covers single-battle concurrency only")
+		after, logits, head = infer(self.model, params, view.obs, carry, view.has_held)
+		previous = jnp.zeros(1, jnp.int32)
+		self._prewarm_follow = True
+		try:
+			decision, metrics = self.choose(
+				params,
+				view,
+				[belief],
+				after,
+				logits,
+				head,
+				keys,
+				jnp.zeros_like(logits),
+				previous,
+				protocol=True,
+			)
+			jax.block_until_ready((decision, metrics.valid_worlds))
+			jax.block_until_ready(self._raw(view.obs.legal_actions, logits, jnp.zeros_like(logits)))
+			if not int(np.asarray(metrics.valid_worlds)[0]):
+				raise RuntimeError("Prewarm had no valid rebuilt worlds")
+		finally:
+			self._prewarm_follow = False
 
 	def diagnostic_oracle(self, params, truth, sides, carry, logits, head, keys, noise):
 		"""Explicit diagnostic arm with true opposing state and queued actions."""
@@ -351,6 +383,22 @@ class Method1:
 				self.model, params, successor, lanes.sides, lanes.carry, self.tables
 			)
 			scores = _score(scores, ids, successor, lanes.sides, values, ply, config.gamma)
+			if self._prewarm_follow and ply == 0:
+				# Even a normal root can lead to a pivot or waiting request later.
+				# At single-battle concurrency both compacted widths equal full.
+				warm_lanes, warm_ids = _follow(
+					full,
+					config.replicates,
+					successor,
+					lanes,
+					ids,
+					after,
+					jnp.ones_like(wait),
+					head,
+					ply,
+					full,
+				)
+				jax.block_until_ready((warm_lanes, warm_ids))
 			pending = int(jnp.sum(wait & (ids < full)))
 			if not pending or ply + 1 == config.max_steps:
 				break
