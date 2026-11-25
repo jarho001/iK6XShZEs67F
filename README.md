@@ -699,3 +699,58 @@ this is the failure the design named (a wrong opponent distribution with a criti
 policies). The never-override control equals raw greedy, so the drop is not a plumbing error. The next
 task therefore uses the next-action head at depth 1 by default and keeps baseline matches beside every
 head-to-head selection.
+
+### Forward search, task 2: belief, rebuilt states and Method 1 in the engine
+
+`pokejax/search/belief.py` keeps a per-battle bank of 128 candidate opposing rosters drawn from a
+frequency-weighted set catalogue (the team pool plus 40,000 fresh generator teams, seed 720023),
+constrained by what the player has seen: species, level, revealed moves (with Transform, Sleep Talk
+and called moves kept apart), items and abilities, and Illusion hypotheses. The bank is redrawn from
+the conditional proposal when the evidence changes; there is no reweighting by the auxiliary heads,
+so the bank's weights stay uniform (effective sample size about 128). `rebuild.py` builds a full
+engine state per candidate from the player's view only (our side exactly; the opposing side from
+the candidate with HP, status, boosts, volatiles, field, hazards and spent PP from the observation)
+and keeps a world only if its own observation equals the real one. `method1.py` runs the task 1
+rollout search on 16 such worlds x 2 opponent draws, our real carry, the next-action head as opponent
+model, depth 1. The true state enters only the diagnostic arm O. Tests: every rebuilt world
+reproduces the real observation and mask (24,456 worlds, including switches, pivots, Illusion and
+Transform), unrevealed opposing information does not change decisions, the true team is never ruled
+out; 16 search tests pass.
+
+Evaluation: 480M checkpoint, battles drawn from 16,384 fresh generator teams (seed 720024), paired
+setups, 95% bootstrap intervals by setup (both seats in one cluster for head-to-head).
+
+Pilot (seed 2297; 512 head-to-head games against sampled raw, 512 battles per baseline; raw against
+raw 48.0%):
+
+| Arm | vs raw | vs max-damage, delta | vs heuristics, delta | Overrides |
+|---|---:|---:|---:|---:|
+| A: margin 0 | 53.7% | -2.5 | -2.7 | 49% |
+| B: sampled variant | 49.0% | -0.8 | -0.2 | 1.5% |
+| C: margin 0.02 | 57.2% | +1.4 | +2.5 | 34% |
+| O: true state, diagnostic | 58.6% | -2.1 | -0.6 | 50% |
+
+C was selected: the highest head-to-head among arms within 2 points of raw against both baselines.
+
+Confirmation (seed 2298), arm C:
+
+| Opponent | Games | Search C | Raw sampled | Paired delta, points |
+|---|---:|---:|---:|---:|
+| raw checkpoint (sampled) | 8,192 | 58.4% [57.4, 59.4] | 50.2% [49.2, 51.2] (raw vs raw) | +8.2 [+6.8, +9.6] |
+| max-damage | 4,096 | 92.9% [92.1, 93.7] | 90.4% | +2.5 [+1.4, +3.5] |
+| heuristics | 4,096 | 92.5% [91.7, 93.3] | 89.9% | +2.6 [+1.5, +3.6] |
+
+The diagnostic true-state arm on the first 1,024 setups won 58.8% [56.9, 60.8]; the oracle minus
+rebuilt difference is +0.4 [-2.1, +3.0] points, so the missing information costs little here. The
+search falls back to raw at 0.03% of requests in head-to-head (no consistent candidate) and 0.11%
+against the baselines. Decision time (single battle, belief update and rebuild included, 200 warm
+decisions): 16 x 2 p50 68 ms, p95 77 ms, p99 91 ms; 32 x 2 p50 79 ms, p95 90 ms, p99 100 ms.
+
+Exit bar, engine part: head-to-head 58.4% with lower bound 57.4% (needs >= 52% and > 50%): passes;
+baselines +2.5 and +2.6 points (needs no more than 1 point below raw): passes; p95 77 ms (soft target
+250 ms): passes. The local Showdown part is task 3.
+
+Run: Codex ran the pilot and stopped at its usage limit during the confirmation, which was restarted
+unchanged with `python -m pokejax.search.evaluate confirm work/runs/p6-long/checkpoint-14650.npz
+--out work/codex/runs/s2-signal.jsonl --reuse-controls work/codex/runs/s2-signal.before-restart.jsonl`
+(reusing the finished raw head-to-head control).
