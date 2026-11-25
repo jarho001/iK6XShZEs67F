@@ -91,7 +91,24 @@ def _hp_from_percent(fraction, maximum):
 	).astype(jnp.int16)
 
 
-def rebuild(view, roster, disguise, history, own_previous_action, queue_action, data, tables):
+def _same_leaf(expected, actual, protocol):
+	if protocol and expected.dtype == jnp.float32:
+		# JSON uses a double-precision quotient, while XLA may use a reciprocal.
+		return jnp.all((expected == actual) | (jnp.nextafter(expected, actual) == actual))
+	return jnp.all(expected == actual)
+
+
+def rebuild(
+	view,
+	roster,
+	disguise,
+	history,
+	own_previous_action,
+	queue_action,
+	data,
+	tables,
+	protocol=False,
+):
 	"""A canonical opposing roster (public ranks followed by indistinguishable unseen slots)."""
 	obs, side = view.obs, view.side
 	foe = obs.opponent
@@ -351,7 +368,9 @@ def rebuild(view, roster, disguise, history, own_previous_action, queue_action, 
 		jnp.array(
 			jax.tree.leaves(
 				jax.tree.map(
-					lambda expected, actual: jnp.all(expected == actual), obs, reconstructed
+					lambda expected, actual: _same_leaf(expected, actual, protocol),
+					obs,
+					reconstructed,
 				)
 			)
 		)

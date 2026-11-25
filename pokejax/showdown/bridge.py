@@ -30,6 +30,8 @@ class Bridge:
 		max_steps: int,
 		concurrency: int,
 		record: bool = False,
+		search: bool = False,
+		audit: bool = False,
 	):
 		self.process = subprocess.Popen(
 			["node", str(SCRIPT)],
@@ -48,6 +50,8 @@ class Bridge:
 				"maxSteps": max_steps,
 				"concurrency": concurrency,
 				"record": record,
+				"search": search,
+				"audit": audit,
 			}
 		)
 
@@ -71,7 +75,11 @@ class Bridge:
 			{
 				"type": "actions",
 				"items": [
-					{"slot": item["slot"], "action": int(action)}
+					{
+						"slot": item["slot"],
+						"action": int(action),
+						**({"side": item["side"]} if "side" in item else {}),
+					}
 					for item, action in zip(items, actions, strict=True)
 				],
 			}

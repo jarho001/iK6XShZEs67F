@@ -3,13 +3,14 @@
 
 /* The Showdown player (Phase 5, task 1): a learner side plays Gen 5 random battles in the pinned
  * simulator, and a policy chooses each of its decisions. The policy is in Python (pokejax/showdown);
- * this file is the bridge. The opponent side is one of the four baselines (reference/baselines.cjs).
+ * this file is the bridge. The opponent is a Node baseline or a second Python network actor.
  *
  * Started by pokejax/showdown/bridge.py, which speaks JSON lines on stdin and stdout:
  *
  *   Python -> Node: {"type": "start", "pool": PATH, "battles": [{"index", "teams": [a, b], "learner"}],
- *                    "opponent": NAME, "seed": S, "maxSteps": M, "concurrency": C, "record": BOOL}
- *                   {"type": "actions", "items": [{"slot": s, "action": a}]}   (one per decisions item)
+ *                    "opponent": NAME, "seed": S, "maxSteps": M, "concurrency": C,
+ *                    "record": BOOL, "search": BOOL, "audit": BOOL}
+ *                   {"type": "actions", "items": [{"slot": s, "side": p, "action": a}]}
  *   Node -> Python: {"type": "decisions", "items": [...], "finished": [...], "records": [...]}
  *                   {"type": "done", "finished": [...], "records": [...], "stats": {...}}
  *                   {"type": "fatal", "error": TEXT}
@@ -19,7 +20,9 @@
  * ("move", "switch" or "none": the learner has nothing to choose), legal (9 booleans, the observed
  * mask), observation (reference/player-view.cjs, the learner's view only)}. The answer is an action
  * in pokejax.engine.actions encoding: 0..3 move slots, 4..8 the k-th non-active team slot in
- * ascending order (k = action - 4), and 0 for a side with nothing to choose.
+ * ascending order (k = action - 4), and 0 for a side with nothing to choose. A network opponent
+ * gets its own item for the same slot, with a separate side and held-choice flag. A search
+ * item includes only the receiving side's stream, reconstructed own state and prior action.
  *
  * One battle is a Game. A decision is taken at every point where the battle waits for a choice (a
  * step, as in the engine): the learner's action and the opponent's baseline choice are sent to
@@ -29,8 +32,8 @@
  * as pokejax/env.py does. Each step, refused or not, counts toward the step cap.
  *
  * Node's own record of a battle (the per-battle tracker) keeps both sides' requests, the omniscient
- * protocol and every decision, which is what a state rebuilder for forward search needs
- * (--record in pokejax/showdown).
+ * protocol and both choices. Oracle snapshots are available with record and audit enabled
+ * and are delivered only with the finished battle record.
  */
 
 const fs = require('node:fs');
@@ -42,7 +45,9 @@ const { Battle, extractChannelMessages } = require('./vendor/pokemon-showdown/di
 const { PRNG } = require('./vendor/pokemon-showdown/dist/sim/prng');
 const { PlayerView, loadTables } = require('./player-view.cjs');
 const { Baselines, POLICY_NAMES } = require('./baselines.cjs');
-const { legalChoices } = require('./record-battles.cjs');
+const { legalChoices, snapshot } = require('./record-battles.cjs');
+
+const { OwnState } = require('./search-own-state.cjs');
 
 const root = path.resolve(__dirname, '..');
 const FORMAT = 'gen5randombattle';
@@ -130,11 +135,16 @@ class Game {
 		this.poolIndices = spec.teams;
 		this.teams = spec.teams.map(index => shared.pool[index]);
 		this.shared = shared;
-		this.battleSeed = seedFor(shared.seed, spec.index, 'battle');
+		this.battleSeed = seedFor(shared.seed, spec.seedIndex ?? spec.index, 'battle');
 		this.policy = new PRNG(seedFor(shared.seed, spec.index, 'policy'));
 		this.views = [null, null];
 		this.views[this.learner] = new PlayerView({ tables: shared.tables });
-		if (shared.readsView) this.views[this.opponent] = new PlayerView({ tables: shared.tables });
+		if (shared.readsView || shared.network || shared.audit) this.views[this.opponent] = new PlayerView({ tables: shared.tables });
+		this.trackers = this.views.map((view, side) => view
+			&& (shared.audit || (shared.search && side === this.learner)) ? new OwnState(view) : null);
+		this.streams = [[], []];
+		this.retries = [false, false];
+		this.previous = [0, 0];
 		this.battle = null;
 		this.fixed = null;
 		this.slot = -1;
@@ -172,21 +182,23 @@ class Game {
 			const messages = extractChannelMessages(text, [1, 2]);
 			for (const side of [0, 1]) {
 				if (this.views[side]) this.views[side].receive(messages[side + 1].join('\n'));
+				if (this.trackers[side]) this.streams[side].push(...messages[side + 1]);
 			}
 		} else if (type === 'sideupdate') {
 			const cut = data.indexOf('\n');
 			const side = data.slice(0, cut) === 'p1' ? 0 : 1;
 			if (this.record) this.current.requests.push({ side, text: data.slice(cut + 1) });
 			if (this.views[side]) this.views[side].receive(data.slice(cut + 1));
+			if (this.trackers[side]) this.streams[side].push(data.slice(cut + 1));
 		}
 	}
 
 	// The learner's decision: the observation of its view and the observed mask, checked against the
 	// mask its request describes.
-	decision() {
-		const view = this.views[this.learner];
+	decision(index = this.learner) {
+		const view = this.views[index];
 		const legal = view.legalActions();
-		const side = this.battle.sides[this.learner];
+		const side = this.battle.sides[index];
 		const kind = requestKind(side);
 		const expected = requestMask(view, side.activeRequest || {}, kind);
 		const mask = expected.mask.slice();
@@ -205,14 +217,27 @@ class Game {
 		const observation = view.observation();
 		const item = { request: view.requestKind, legal, observation, refused: this.refusedLast,
 			first: this.decisions === 0, reset: this.fresh };
-		this.current.pending = item;
+		if (this.shared.network || this.trackers[index]) {
+			item.side = index;
+			item.held = kind !== NO_REQUEST && side.isChoiceDone();
+			item.refused = this.shared.network ? this.retries[index] : this.refusedLast;
+			item.previous = this.previous[index];
+		}
+		if (this.trackers[index]) {
+			item.own = this.trackers[index].state(observation);
+			item.stream = this.streams[index].splice(0);
+		}
+		if (index === this.learner) this.current.pending = item;
 		return item;
 	}
 
 	// Plays the learner's action and the opponent's baseline choice as one step. Both sides are asked
 	// what they must choose before either chooses: a commit by the first choice can start the next turn
 	// and give the learner a request it had no decision for.
-	act(action) {
+	act(action, opponentAction) {
+		const before = this.current;
+		this.current = { protocol: [], requests: [] };
+		const oracle = this.shared.audit ? this.audit() : null;
 		const battle = this.battle;
 		const view = this.views[this.learner];
 		const legal = view.legalActions();
@@ -225,46 +250,67 @@ class Game {
 		const learnerSide = battle.sides[this.learner];
 		const foe = battle.sides[this.opponent];
 		const learnerRequest = learnerSide.activeRequest;
-		const askLearner = requestKind(learnerSide) !== NO_REQUEST;
+		const askLearner = requestKind(learnerSide) !== NO_REQUEST && !learnerSide.isChoiceDone();
 		// A choice the opponent made at an earlier refused step is still in place (Showdown keeps it).
 		const askFoe = requestKind(foe) !== NO_REQUEST && !foe.isChoiceDone();
 		let opponentChoiceText = null;
-		if (askFoe) {
-			opponentChoiceText = this.shared.choose(this, this.opponent);
-			if (!battle.choose('p' + (this.opponent + 1), opponentChoiceText)) {
-				return this.fail(foe.choice.error);
-			}
-		}
 		let learnerChoiceText = null;
-		let refused = false;
+		this.retries = [false, false];
+		const choose = (index, text, action) => {
+			const side = battle.sides[index];
+			if (battle.choose('p' + (index + 1), text)) {
+				if (action !== undefined) this.previous[index] = action;
+				return true;
+			}
+			if (!TRAPPED_REFUSAL.test(side.choice.error)) return false;
+			this.retries[index] = true;
+			this.refusals++;
+			return true;
+		};
+		if (askFoe) {
+			opponentChoiceText = this.shared.network
+				? learnerChoice(this.views[this.opponent], foe.activeRequest, opponentAction)
+				: this.shared.choose(this, this.opponent);
+			if (!choose(this.opponent, opponentChoiceText, opponentAction)) return this.fail(foe.choice.error);
+		}
 		if (askLearner) {
 			learnerChoiceText = learnerChoice(view, learnerRequest, chosen);
-			if (!battle.choose('p' + (this.learner + 1), learnerChoiceText)) {
-				if (TRAPPED_REFUSAL.test(learnerSide.choice.error)) {
-					refused = true;
-					this.refusals++;
-				} else {
-					return this.fail(learnerSide.choice.error);
-				}
-			}
+			if (!choose(this.learner, learnerChoiceText, chosen)) return this.fail(learnerSide.choice.error);
 		}
 		this.steps++;
-		this.refusedLast = refused;
-		if (!refused) battle.sendUpdates();
-		this.saveStep(chosen, learnerChoiceText, opponentChoiceText, refused);
+		this.refusedLast = this.retries[this.learner];
+		this.saveStep(before, oracle, chosen, learnerChoiceText, opponentChoiceText, this.refusedLast);
+		if (!this.retries.some(Boolean)) battle.sendUpdates();
 		if (battle.ended) return this.finish();
 		if (this.steps >= this.shared.maxSteps) return this.finish();
 		return null;
 	}
 
-	saveStep(action, learnerText, opponentText, refused) {
+	saveStep(before, oracle, action, learnerText, opponentText, refused) {
 		if (!this.record) return;
-		const pending = this.current.pending || {};
+		const pending = before.pending || {};
 		this.record.steps.push({ observation: pending.observation, legal: pending.legal,
 			request: pending.request, refused: pending.refused, action, learnerChoice: learnerText,
-			opponentChoice: opponentText, refusedChoice: refused, protocol: this.current.protocol,
-			requests: this.current.requests });
-		this.current = { protocol: [], requests: [] };
+			opponentChoice: opponentText, refusedChoice: refused, protocol: before.protocol,
+			requests: before.requests, ...(oracle ? { oracle, views: before.views } : {}) });
+	}
+
+	audit() {
+		const oracle = snapshot(this.battle, this.fixed, null, new Map());
+		oracle.sides.forEach((side, i) => {
+			side.party = this.battle.sides[i].pokemon.map(member => this.fixed[i].indexOf(member));
+			side.members.forEach((member, slot) => {
+				const pokemon = this.fixed[i][slot];
+				Object.assign(member, {
+					stats: pokemon.storedStats, baseStats: pokemon.baseStoredStats,
+					moves: pokemon.moveSlots.map(move => move.id),
+					maxPp: pokemon.moveSlots.map(move => move.maxpp),
+					ivs: pokemon.set.ivs, evs: pokemon.set.evs, level: pokemon.level,
+					activeTurns: pokemon.activeTurns,
+				});
+			});
+		});
+		return structuredClone(oracle);
 	}
 
 	fail(message) {
@@ -288,7 +334,7 @@ class Game {
 		if (this.record) {
 			const record = { type: 'battle', index: this.index, learner: this.learner, teams: this.poolIndices,
 				seed: this.battleSeed, policySeed: seedFor(this.shared.seed, this.index, 'policy'),
-				opponent: this.shared.opponent, result: this.result, steps: this.record.steps };
+				opponent: this.shared.opponent, result: this.result, steps: this.record.steps, tail: this.current };
 			this.result.recordLine = JSON.stringify(record);
 		}
 		battle.destroy();
@@ -302,7 +348,7 @@ class Session {
 		const lock = JSON.parse(fs.readFileSync(path.join(root, 'reference-lock.json'), 'utf8'));
 		const pool = JSON.parse(fs.readFileSync(path.resolve(root, message.pool), 'utf8'));
 		assert.equal(pool.showdownCommit, lock.commit, 'The team pool was made by another Showdown commit');
-		assert(POLICY_NAMES.includes(message.opponent), 'Unknown opponent ' + message.opponent);
+		assert(message.opponent === 'network' || POLICY_NAMES.includes(message.opponent), 'Unknown opponent ' + message.opponent);
 		assert(Number.isInteger(message.concurrency) && message.concurrency > 0);
 		const tables = loadTables();
 		const baselines = new Baselines({ tables });
@@ -310,6 +356,8 @@ class Session {
 		this.shared = {
 			pool: pool.teams, tables, seed: message.seed, maxSteps: message.maxSteps, opponent,
 			readsView: VIEW_POLICIES.has(opponent), record: Boolean(message.record),
+			network: opponent === 'network', search: Boolean(message.search),
+			audit: Boolean(message.audit && message.record),
 			choose: (game, side) => {
 				const battle = game.battle;
 				const choices = legalChoices(battle.sides[side], game.fixed[side]);
@@ -341,10 +389,23 @@ class Session {
 	}
 
 	answer(items) {
-		for (const { slot, action } of items) {
+		const bySlot = new Map();
+		for (const { slot, side, action } of items) {
 			const game = this.slots[slot];
 			if (!game || game.finished) throw new Error('No battle in slot ' + slot);
-			const result = game.act(action);
+			const pair = bySlot.get(slot) || [];
+			pair[side ?? game.learner] = action;
+			bySlot.set(slot, pair);
+		}
+		for (const [slot, actions] of bySlot) {
+			const game = this.slots[slot];
+			if (!game || game.finished) throw new Error('No battle in slot ' + slot);
+			let result;
+			try {
+				result = game.act(actions[game.learner], actions[game.opponent]);
+			} catch (error) {
+				result = game.fail(`Battle ${game.index}, step ${game.steps}: ${error.stack || error}`);
+			}
 			if (result) {
 				this.results.push(result);
 				if (result.recordLine) this.records.push(result.recordLine);
@@ -361,9 +422,14 @@ class Session {
 		for (const game of this.slots) {
 			if (!game) continue;
 			const decision = game.decision();
-			items.push({ slot: game.slot, battle: game.index, reset: game.fresh, first: decision.first,
-				refused: decision.refused, request: decision.request, legal: decision.legal,
-				observation: decision.observation });
+			items.push({ slot: game.slot, battle: game.index, ...decision, learner: true });
+			if (this.shared.network || this.shared.audit) {
+				const opponent = game.decision(game.opponent);
+				if (this.shared.network) {
+					items.push({ slot: game.slot, battle: game.index, ...opponent, learner: false });
+				}
+				if (this.shared.audit) game.current.views = [decision, opponent].sort((a, b) => a.side - b.side);
+			}
 			game.fresh = false;
 			game.decisions++;
 		}

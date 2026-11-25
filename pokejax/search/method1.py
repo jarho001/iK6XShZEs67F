@@ -65,12 +65,14 @@ def _queued(position, side, head, key, tables):
 	)
 
 
-@jax.jit
-def _worlds(views, particles, histories, previous_actions, head, keys, data, tables):
+@partial(jax.jit, static_argnames=("protocol",))
+def _worlds(
+	views, particles, histories, previous_actions, head, keys, data, tables, protocol=False
+):
 	def one(view, particles, history, previous_action, head, key):
 		def make(roster, disguise, key):
 			position, valid = rebuild(
-				view, roster, disguise, history, previous_action, 0, data, tables
+				view, roster, disguise, history, previous_action, 0, data, tables, protocol
 			)
 			return _queued(position, view.side, head, key, tables), valid
 
@@ -214,7 +216,20 @@ class Method1:
 		)
 		return decision, metrics, after
 
-	def choose(self, params, views, beliefs, carry, logits, head, keys, noise, previous_actions):
+	def choose(
+		self,
+		params,
+		views,
+		beliefs,
+		carry,
+		logits,
+		head,
+		keys,
+		noise,
+		previous_actions,
+		*,
+		protocol=False,
+	):
 		"""Only PlayerView, own recurrent inference, keys and the prior enter deployment."""
 		host_obs, refused, held, result = jax.device_get(
 			(views.obs, views.refused, views.has_held, views.result)
@@ -247,7 +262,15 @@ class Method1:
 		particles = jax.tree.map(lambda *x: np.stack(x), *particles)
 		queue_keys = jax.vmap(jax.random.fold_in, in_axes=(0, None))(keys, 19)
 		worlds, valid = _worlds(
-			views, particles, histories, previous_actions, head, queue_keys, self.data, self.tables
+			views,
+			particles,
+			histories,
+			previous_actions,
+			head,
+			queue_keys,
+			self.data,
+			self.tables,
+			protocol,
 		)
 		valid &= jnp.asarray(counts[:, None] > 0)
 		decision, valid_counts = self._choose_worlds(

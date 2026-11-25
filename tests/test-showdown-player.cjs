@@ -268,3 +268,96 @@ test('a session plays several battles in fewer slots, and every decision gets an
 	assert.deepEqual(finished.map(result => result.index).sort(), [0, 1, 2]);
 	assert.ok(finished.every(result => result.errors.length === 0));
 });
+
+test('both network actors get independent views and a held action survives a trap refusal', () => {
+	const teams = [
+		[member('machamp', ['splash']), member('snorlax', ['splash'])],
+		[member('diglett', ['splash'], { ability: 'arenatrap' }), member('mew', ['splash'])],
+	];
+	const game = new Game({ index: 0, learner: 0, teams: [0, 1] }, {
+		pool: teams, tables, seed: 11, maxSteps: 2, network: true, search: true, record: true,
+	});
+	game.start();
+	const first = game.decision(0);
+	assert.deepEqual(first.own.party, [0, 1]);
+	assert.equal(first.legal[4], true);
+	assert.deepEqual(first.stream.filter(line => line.startsWith('|request|')).map(line =>
+		JSON.parse(line.slice(9)).side.id), ['p1']);
+	assert.equal(game.decision(1).own, undefined);
+	game.act(4, 0);
+	const retry = game.decision(0);
+	const waiting = game.decision(1);
+	assert.equal(retry.refused, true);
+	assert.equal(retry.held, false);
+	assert.equal(retry.own.trap_known, true);
+	assert.equal(waiting.held, true);
+	assert.equal(waiting.previous, 0);
+	assert.equal(retry.legal[4], false);
+	const log = game.battle.log;
+	const result = game.act(0, 4); // a held side never replaces its already accepted move
+	assert.equal(result.refusals, 1);
+	assert.deepEqual(result.errors, []);
+	assert.equal(log.filter(line => line.startsWith('|move|p2a: Diglett|Splash')).length, 1);
+});
+
+test('opposing hidden stats, moves, item and bench cannot affect a search input', () => {
+	const own = [member('pikachu', ['splash']), member('mew', ['splash'])];
+	const observe = foe => {
+		const game = new Game({ index: 0, learner: 0, teams: [0, 1] }, {
+			pool: [own, foe], tables, seed: 11, maxSteps: 2, network: true, search: true, record: true,
+		});
+		game.start();
+		const input = () => {
+			const decision = structuredClone(game.decision());
+			decision.stream = decision.stream.filter(line => !line.startsWith('|t:|'));
+			return decision;
+		};
+		const first = input();
+		game.act(0, 0);
+		const second = input();
+		game.battle.destroy();
+		return [first, second];
+	};
+	assert.deepEqual(
+		observe([member('snorlax', ['splash', 'return']), member('gengar', ['shadowball'])]),
+		observe([member('snorlax', ['splash', 'crunch'], { item: 'choiceband', nature: 'adamant' }),
+			member('blissey', ['softboiled'])]),
+	);
+});
+
+test('own Transform keeps its copied stats when the opponent switches away', () => {
+	const teams = [
+		[member('ditto', ['transform'], { ability: 'imposter', gender: 'N' })],
+		[member('charizard', ['splash']), member('snorlax', ['splash'])],
+	];
+	const game = new Game({ index: 0, learner: 0, teams: [0, 1] }, {
+		pool: teams, tables, seed: 11, maxSteps: 2, network: true, search: true,
+	});
+	game.start();
+	const first = game.decision(0);
+	assert.equal(first.observation.own.transformed, 1);
+	game.act(0, 4);
+	const second = game.decision(0);
+	assert.equal(second.observation.own.transformed, 1);
+	assert.deepEqual(second.own.stats, first.own.stats);
+	assert.notDeepEqual(second.observation.opponent.species, first.observation.opponent.species);
+	game.battle.destroy();
+});
+
+test('an own Illusion break preserves request roster identities at identical max HP', () => {
+	const game = battle([
+		[member('zoroark', ['splash'], { ability: 'illusion' }), member('snorlax', ['splash']),
+			member('gengar', ['splash'])],
+		[member('mew', ['thunderbolt', 'splash'])],
+	], { script: () => 'move 1' });
+	const view = game.views[0];
+	game.decision();
+	game.act(4); // switch out, leaving Gengar last in the party
+	game.decision();
+	game.act(4); // switch back into Zoroark, now disguised as the equally healthy Gengar
+	assert.deepEqual(view.sides[0].members.map(pokemon => pokemon.name), ['Zoroark', 'Snorlax', 'Gengar']);
+	assert.equal(view.sides[0].active.name, 'Zoroark');
+	assert.ok(lines(game, '|replace|p1a: Zoroark').length);
+	assert.deepEqual(game.errors, []);
+	game.battle.destroy();
+});

@@ -77,6 +77,7 @@ function loadTables(dataPath = DATA_PATH) {
 		moves: entity(data.moves),
 		abilities: entity(data.abilities),
 		items: entity(data.items),
+		natures: { index: new Map(data.natures.map((row, i) => [row.id, i])) },
 	};
 }
 
@@ -233,6 +234,7 @@ class PlayerView {
 			this.me = me;
 			this.createOwnMembers(request);
 			this.applyRequest(request, 'move');
+			this.ownTracker?.initialize(request);
 			for (const parts of this.buffered) this.protocol(parts);
 			this.buffered = [];
 		} else if (this.me !== me) {
@@ -243,6 +245,7 @@ class PlayerView {
 		this.applyRequest(request, kind);
 		// The entry counts name the two actives: a switch line for either side ends the knowledge.
 		if (refused) this.trapKnown = { own: this.sides[this.me].entries, foe: this.sides[1 - this.me].entries };
+		this.ownTracker?.request(request);
 	}
 
 	// The own side was refused a switch and neither active has changed since, and the foe's active
@@ -511,9 +514,11 @@ class PlayerView {
 		this.stepLines++;
 		this.record(parts);
 		const command = parts[1];
+		this.ownTracker?.before(parts);
 		const handler = HANDLERS[command];
 		if (handler) handler.call(this, parts);
 		this.revealFromTags(parts);
+		this.ownTracker?.protocol(parts);
 	}
 
 	enterMember(side, ref, details, health) {
@@ -658,9 +663,14 @@ const HANDLERS = {
 		// Illusion ends: the active member is shown under its real name and species.
 		const ref = parseRef(parts[2]);
 		const side = this.sides[ref.side];
-		const member = side.active;
+		const own = ref.side === this.me;
+		// A disguise can have the same max HP as its holder. Resolve a replacement
+		// against the private roster without ever renaming one of its identities.
+		const member = own ? side.members.find(candidate => candidate.name === ref.name) || side.active
+			: side.active;
+		side.active = member;
 		const details = parseDetails(parts[3]);
-		member.name = ref.name;
+		if (!own) member.name = ref.name;
 		member.baseSpecies = toID(details.species);
 		member.formeSpecies = '';
 		member.types = null;

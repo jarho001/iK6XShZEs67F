@@ -754,3 +754,49 @@ Run: Codex ran the pilot and stopped at its usage limit during the confirmation,
 unchanged with `python -m pokejax.search.evaluate confirm work/runs/p6-long/checkpoint-14650.npz
 --out work/codex/runs/s2-signal.jsonl --reuse-controls work/codex/runs/s2-signal.before-restart.jsonl`
 (reusing the finished raw head-to-head control).
+
+### Forward search, task 3: the search on pinned local Showdown
+
+The searcher of task 2 (arm C, frozen: 16 rebuilt worlds x 2 opponent draws, next-action head,
+depth 1, margin 0.02) plays through the bridge on the pinned local Showdown. Our own side's engine
+state is built in Node from what the player gets (`reference/search-own-state.cjs`): the first
+request's roster with stable member identities, later requests (HP, PP, status, items, active, party
+order), the protocol (boosts, forms, volatiles, field, reveals) and our own choices; the generator's
+neutral nature and IV/EV spread are derived from the requested stats and typed Hidden Power. The
+bridge gained a network-vs-network mode with separate carries per seat. Oracle snapshots exist only
+in audit records. A forced differential compared every own-state field at 902 decisions in six
+recordings; remaining differences are private timers and metadata (sleep start and origin, Taunt,
+lock and confusion durations, Substitute HP after absorbed hits, copied Transform stats), which can
+affect simulated continuations but not the current request. Rebuilt worlds are compared with
+Showdown's observation and mask allowing one float32 ulp (JSON divides in double precision).
+
+Fresh generator teams (seed 720025), 480M checkpoint, paired setups; intervals as in task 2.
+
+Exit sizes on Showdown:
+
+| Opponent | Games per arm | Search C | Raw sampled | C - raw, points |
+|---|---:|---:|---:|---:|
+| raw checkpoint (sampled) | 8,192 | 59.07% [58.04, 60.10] | 48.93% (raw vs raw) | +10.14 [+8.75, +11.54] |
+| max-damage | 4,096 | 92.43% [91.65, 93.19] | 91.65% | +0.78 [-0.32, +1.81] |
+| heuristics | 4,096 | 91.36% [90.53, 92.24] | 90.87% | +0.49 [-0.68, +1.59] |
+
+Pilot, same 256 setups (512 games) in both simulators, C minus raw in points: head-to-head +7.8
+[+2.5, +13.5] on Showdown and +2.0 [-3.5, +7.6] in the engine (Showdown minus engine +5.9 [-1.6,
++13.5]); max-damage -0.2 and -0.2; heuristics -0.2 and -1.0. The engine pilot is noisy at this
+size; task 2's 8,192-game engine result was +8.2.
+
+Decision latency end to end (Node bridge, protocol parsing, inference, belief update, rebuild,
+reply): one battle p50 76 ms, p95 92 ms, p99 114 ms; 32 concurrent battles p95 157-168 ms. The
+first concurrent cell compiled new rollout shapes (p99 15 s); the timings exclude each cell's
+first round.
+
+Coverage: overrides on 34% of searched head-to-head requests (23-24% against the baselines),
+fallback to raw on 1.4% (0.8-0.9%), 0.7-1.0% of candidate worlds rejected by the observation, mask
+and trap check. 32,768 exit games: 0 battle errors, 0 request-mask mismatches, 0 illegal picks, 1
+step-cap truncation. One attempt of an exit raw cell crashed the bridge on an Illusion break between
+members of equal maximum HP; fixed with a Node regression test, finished cells were kept.
+
+Exit bar on Showdown: head-to-head 59.1% with lower bound 58.0% passes; max-damage +0.8 and
+heuristics +0.5 points (at most 1 point below raw) pass; p95 92 ms single and 168 ms at 32
+concurrent battles (soft target 250 ms) passes. With task 2, the first deployable searcher's exit
+passes in both simulators. Tests: 20 search Python tests, 80 Node tests.
