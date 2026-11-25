@@ -800,3 +800,36 @@ Exit bar on Showdown: head-to-head 59.1% with lower bound 58.0% passes; max-dama
 heuristics +0.5 points (at most 1 point below raw) pass; p95 92 ms single and 168 ms at 32
 concurrent battles (soft target 250 ms) passes. With task 2, the first deployable searcher's exit
 passes in both simulators. Tests: 20 search Python tests, 80 Node tests.
+
+### Forward search, task 4 (first part): the matrix game (Method 2) in the engine
+
+`pokejax/search/method2.py`: on the same rebuilt worlds, real carry and depth-1 backup as Method 1,
+a payoff M_j(a, b) per world for our legal actions against a restricted set of opponent columns (all
+columns at requests with up to two choices, otherwise the top next-action prior plus one random legal
+tail action), two chance draws per pair, then the regularized max-min of the design (one row mix p
+shared across worlds, per-world opponent mixes q_j with a KL penalty to the next-action head, KL to
+our raw policy) solved on the device by 64 damped mirror steps with the exact regularized opponent
+response. One-sided: the opponent's payoffs are conditioned on our real team. 6 tests.
+
+Fresh generator teams (seed 720026), 480M checkpoint, paired setups. Single-battle p95: Method 2 92
+ms, Method 1 arm C 77 ms.
+
+Pilot (512 games against sampled raw; 512 battles per baseline; raw against raw 51.6%):
+
+| Arm | vs raw | vs max-damage, delta | vs heuristics, delta |
+|---|---:|---:|---:|
+| C (Method 1) | 60.4% | +2.5 | +0.8 |
+| M2-hi (lambda_foe 1.0, sampled) | 54.9% | +1.6 | +2.0 |
+| M2-mid (0.3, sampled) | 55.1% | +1.6 | +2.0 |
+| M2-lo (0.1, sampled) | 55.3% | +1.2 | +1.6 |
+| M2-mid-greedy (argmax p) | 57.0% | +0.4 | +1.6 |
+
+Confirmation, M2-mid-greedy directly against Method 1 arm C over 2,048 fresh setups (4,096 games,
+both seats): 47.1% [45.6, 48.5]. Against the baselines (2,048 battles each, next to C): +0.8 [-0.5,
++2.2] points vs max-damage and +0.2 [-1.3, +1.6] vs heuristics, both within noise of C. The solver
+converged (median saddle gap about 1e-8; the largest 0.085); the row mix was below 0.9 on its top
+action in about 27% of decisions.
+
+Reading: in this one-sided form, with two opponent columns at wide requests, Method 2 loses to
+Method 1 and is not worth running on Showdown. Not tested: a wider column set (the cap may be what
+costs it) and the two-sided private-type version. Method 1 arm C stays the searcher.

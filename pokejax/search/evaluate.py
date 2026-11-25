@@ -48,7 +48,7 @@ def root_slice(tree, sides):
 
 
 class EngineMatch:
-	def __init__(self, env, player, method, arm, baseline):
+	def __init__(self, env, player, method, arm, baseline, *, foe_method=None, sample_raw=False):
 		self.env, self.player, self.method, self.arm, self.baseline = (
 			env,
 			player,
@@ -56,8 +56,10 @@ class EngineMatch:
 			arm,
 			baseline,
 		)
+		self.foe_method = foe_method
+		self.sample_raw = sample_raw
 
-	def run(self, state, sides, key, roots=None):
+	def run(self, state, sides, key, roots=None, on_decision=None):
 		tables = self.env.tables
 		model, params = self.player.seat.model, self.player.params
 		rows = jnp.arange(sides.size)
@@ -74,12 +76,25 @@ class EngineMatch:
 			)
 		previous_actions = jnp.zeros(sides.size, jnp.int32)
 		refused = jnp.zeros(sides.size, jnp.bool_)
+		if self.foe_method is not None:
+			foe_sides = 1 - sides
+			foe_key = jax.random.fold_in(search_key, 1)
+			foe_beliefs = self.foe_method.new_beliefs(
+				np.asarray(jax.random.key_data(foe_key)), sides.size
+			)
+			foe_previous, foe_refused = previous_actions, refused
+		sample = self.sample_raw or bool(self.method and self.method.config.sample_strength)
 		metrics = np.zeros((len(SearchMetrics._fields), sides.size))
 		for ply in range(self.env.config.max_steps):
 			# This simulator runs the real competitors. Their observations and
 			# carries are kept separate at the rollout boundary below.
 			after, logits, _, head = forward(
-				model, params, match.position, carry, tables, self.method is not None
+				model,
+				params,
+				match.position,
+				carry,
+				tables,
+				self.method is not None or self.foe_method is not None,
 			)
 			own, foe, noise = choices(
 				match,
@@ -88,13 +103,13 @@ class EngineMatch:
 				sample_key,
 				jnp.int32(ply),
 				self.baseline,
-				self.method is not None and not self.method.config.sample_strength,
+				self.method is not None and not sample,
 			)
 			decision = None
 			if self.method is not None:
 				keys = jax.random.split(jax.random.fold_in(search_key, ply), sides.size)
 				our_after, our_logits, our_head = root_slice((after, logits, head), sides)
-				noise = noise if self.method.config.sample_strength else jnp.zeros_like(noise)
+				noise = noise if sample else jnp.zeros_like(noise)
 				if diagnostic:
 					decision, measures = self.method.diagnostic_oracle(
 						params, match.position, sides, our_after, our_logits, our_head, keys, noise
@@ -114,6 +129,27 @@ class EngineMatch:
 					)
 				own = decision.action
 				metrics += np.asarray(measures)
+				if on_decision is not None:
+					on_decision(decision)
+			if self.foe_method is not None:
+				foe_keys = jax.random.split(jax.random.fold_in(foe_key, ply), sides.size)
+				foe_view = views(match.position, foe_sides, tables, foe_refused)
+				foe_after, foe_logits, foe_head = root_slice((after, logits, head), foe_sides)
+				foe_decision, _ = self.foe_method.choose(
+					params,
+					foe_view,
+					foe_beliefs,
+					foe_after,
+					foe_logits,
+					foe_head,
+					foe_keys,
+					jnp.zeros_like(foe_logits),
+					foe_previous,
+				)
+				foe = foe_decision.action
+				foe_known = match.position.state.trap_known[rows, foe_sides]
+				foe_moving = match.position.state.request[rows, foe_sides] != 0
+				foe_previous = jnp.where(foe_moving & ~foe_view.has_held, foe, foe_previous)
 			if roots is not None:
 				view = views(match.position, sides, tables, refused)
 				roots.append((view, root_slice(carry, sides), previous_actions))
@@ -122,6 +158,8 @@ class EngineMatch:
 			moving = match.position.state.request[rows, sides] != 0
 			match = play(match, sides, own, foe, decision, tables)
 			refused = ~known & match.position.state.trap_known[rows, sides]
+			if self.foe_method is not None:
+				foe_refused = ~foe_known & match.position.state.trap_known[rows, foe_sides]
 			previous_actions = jnp.where(moving & ~held, own, previous_actions)
 			carry = after
 			if bool((match.position.state.winner != ONGOING).all()):
