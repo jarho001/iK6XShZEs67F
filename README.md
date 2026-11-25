@@ -644,3 +644,58 @@ python -m pokejax.train.panel 120M=work/runs/p6-long/checkpoint-3662.npz 240M=wo
 python -m pokejax.showdown.compare --checkpoint work/runs/p6-long/checkpoint-14650.npz --battles 4096
 python -m pokejax.train.plot work/runs/p6-long work/runs/p6-p2 work/runs/rtx3060ti --opponent max-damage --x steps --out docs/p6-long.svg
 ```
+
+### Forward search, task 1: signal test (diagnostic oracle)
+
+Branch `search`. `pokejax/search/` holds a search transition (`step` with masks, refused trap
+switches, held choices, forced switches, absorbing terminal states; equal to `Env.advance` on 4,160
+compared lane transitions), batched lane copies, and a rollout search (Method 1) that here reads the
+true battle state and both players' real histories. It is a diagnostic oracle, never a strength
+claim. Checkpoint: `work/runs/p6-long/checkpoint-14650.npz` (480M). All search arms: 16 worlds x 2
+opponent draws, margin 0, override when the paired advantage over the raw greedy action is positive.
+
+Single-battle decision latency on the 3060 Ti (200 warm decisions; first call includes compilation):
+
+| Depth | Worlds x draws | Opponent model | p50 ms | p95 ms | p99 ms | First call s |
+|---:|---:|---|---:|---:|---:|---:|
+| 1 | 16 x 2 | next-action head | 23.4 | 26.8 | 27.0 | 43.8 |
+| 1 | 16 x 2 | mirrored actor | 15.9 | 21.2 | 21.5 | 15.2 |
+| 1 | 32 x 2 | next-action head | 19.9 | 23.2 | 23.6 | 13.4 |
+| 1 | 32 x 2 | mirrored actor | 17.2 | 22.9 | 23.5 | 13.2 |
+| 3 | 16 x 2 | next-action head | 34.3 | 41.6 | 42.2 | 13.6 |
+| 3 | 16 x 2 | mirrored actor | 34.1 | 41.6 | 42.1 | 13.2 |
+
+Head-to-head against the raw checkpoint (sampled), paired setups, both seats, 95% bootstrap
+intervals by setup:
+
+| Arm | Games | Win % [95% CI] | Overrides | Mean advantage |
+|---|---:|---:|---:|---:|
+| depth 1, next-action head | 512 | 58.2 [53.9, 62.3] | 50.3% | 0.031 |
+| depth 1, mirrored actor | 512 | 80.3 [77.0, 83.6] | 62.0% | 0.049 |
+| depth 3, mirrored actor | 512 | 84.6 [81.5, 87.5] | 55.3% | 0.057 |
+| depth 3, mirrored actor | 8,192 | 86.0 [85.2, 86.7] | 55.5% | 0.057 |
+| raw greedy (control) | 8,192 | 50.7 [49.8, 51.7] | | |
+
+Against the baselines, the selected arm (depth 3, mirrored actor) collapsed: 45.9% against
+max-damage and 45.3% against heuristics, against 92.3% and 91.5% for the sampled raw policy on the same
+1,024 setups (paired differences -46.4 [-49.7, -43.0] and -46.2 [-49.4, -42.8] points). Short
+checks afterwards (256 panel battles each, seed 772, not paired intervals):
+
+| Arm | vs max-damage | vs heuristics |
+|---|---:|---:|
+| raw sampled | 94.9% | 93.8% |
+| raw greedy (128 battles) | 92.2% | |
+| depth 1, mirrored actor, margin 10 (never overrides) | 92.2% (128) | |
+| depth 1, mirrored actor (128 battles) | 43.8% | |
+| depth 1, next-action head | 90.6% | 90.6% |
+| depth 3, next-action head | 70.3% | 71.5% |
+
+Reading. The value network can rank actions: with the true state, the depth-1 search using our own
+next-action head beats the raw policy (58%). The mirrored actor's 80-86% is mostly a best response to
+an opponent model that is exactly the real opponent's policy, which no deployed searcher has. Any
+part of the search that assumes the opponent plays like our network (the mirrored actor at the root,
+or both sides sampling the policy in deeper rollouts) loses heavily against opponents that do not:
+this is the failure the design named (a wrong opponent distribution with a critic trained on its own
+policies). The never-override control equals raw greedy, so the drop is not a plumbing error. The next
+task therefore uses the next-action head at depth 1 by default and keeps baseline matches beside every
+head-to-head selection.
