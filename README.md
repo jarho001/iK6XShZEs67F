@@ -645,6 +645,96 @@ python -m pokejax.showdown.compare --checkpoint work/runs/p6-long/checkpoint-146
 python -m pokejax.train.plot work/runs/p6-long work/runs/p6-p2 work/runs/rtx3060ti --opponent max-damage --x steps --out docs/p6-long.svg
 ```
 
+### Phase 7 results
+
+The lab run (task 2): the kit of task 1 (commit bdc75a3) on two RTX 6000 Ada cards (48 GB each), host
+d4a70bf9710e, LAB_HOURS 12, from 20:01 UTC on 2026-11-24 to 06:15 UTC on 2026-11-25. Every step
+completed. Results archive `work/lab-results/2026-11-24-d4a70bf9710e-rtx6000.tar.gz` (outside git,
+with the kit's own `summary.md`, logs and all kept checkpoints).
+
+Arms, one per GPU, the same league, auxiliary losses and linear learning-rate decay (1e-3 to 1e-4 over
+the run) as the Phase 6 long run:
+
+| Arm | Parameters | Batch rows | Updates | Environment steps | Learner steps/s | Training wall time |
+|---|---:|---:|---:|---:|---:|---:|
+| base (`configs/p7-pairwise.toml`, the Phase 6 network) | 442,519 | 4,096 | 8,999 | 2,359,033,856 | 76,675 | 8 h 54 min |
+| wide (widths 96/128/128/64 to 192/256/256/96) | 1,143,767 | 4,096 | 6,156 | 1,613,758,464 | 52,696 | 8 h 50 min |
+
+The batch sweep (20 updates per size): the environment scaled with rows (7.4M steps/s at 8,192 rows),
+but learning stayed at about 77,000 (base) and 53,000 (wide) steps per second at every size, so both
+arms are learner-bound. 8,192 rows ran out of memory for wide and 16,384 for base; both trained at
+4,096. Training was clean: no non-finite value, the largest approximate KL 0.010 (base) and 0.011
+(wide), explained variance rising from 0.66 to 0.74.
+
+Strength per compute doubling (panel mean of the four baselines and the two Phase 6 reference
+checkpoints P2-40M and P6-480M, 2,048 paired setups per opponent, greedy actions; the kit's panel,
+team pool of training):
+
+| Doubling | Base, panel change [95%] | Wide, panel change [95%] |
+|---|---|---|
+| 30M to 60M | +7.0 [+6.1, +7.9] | +5.3 [+4.4, +6.2] |
+| 60M to 120M | +3.8 [+2.9, +4.7] | +4.2 [+3.3, +5.0] |
+| 120M to 240M | +4.6 [+3.7, +5.5] | +3.2 [+2.3, +4.0] |
+| 240M to 480M | +3.0 [+2.2, +3.8] | +2.0 [+1.2, +2.9] |
+| 480M to 960M | +2.5 [+1.7, +3.3] | +2.3 [+1.6, +3.1] |
+| 960M to 1,920M | +2.2 [+1.4, +2.9] | (run ended at 1,614M: +1.6 [+0.9, +2.3]) |
+| 1,920M to 2,359M (1.23x, not a doubling) | +0.5 [-0.1, +1.2] | |
+
+Every full doubling still gained more than 2 points, so the stop rule (two doublings in a row without
+meaningful gain) did not trigger; a longer base run is likely to gain more. At equal steps the arms
+are level (960M panel means 85.9 base, 86.1 wide); wide costs 31% more time per update, so per hour
+of GPU base is ahead. The base arm at 480M scores 91.8% against max-damage and 50.6% against the
+Phase 6 480M checkpoint, which reproduces Phase 6 at 8x the batch rows.
+
+Held-out teams. The kit's panel and cross-play drew from the training pool (`work/teams/gen5-teams.npz`),
+not from teams held out from training as this phase asks. So the final comparison was rerun on the
+3060 Ti on 16,384 fresh generator teams (seed 720030, `work/lab-results/2026-11-24-rtx6000/heldout/`):
+4,096 paired setups per opponent, and cross-play over 2,048 team draws played on both seats (4,096
+games per pair). The held-out figures are within about one point of the training-pool ones, so the
+lab numbers are not inflated by memorised teams.
+
+Held-out panel (win rate in per cent, greedy, sampled in brackets):
+
+| Checkpoint | Random | Random-move | Max-damage | Heuristics | P2 (40M) | P6 (480M) |
+|---|---:|---:|---:|---:|---:|---:|
+| base 2,359M | 99.9 (99.9) | 99.2 (99.2) | 95.0 (95.0) | 94.6 (94.7) | 77.0 (76.6) | 64.8 (65.2) |
+| wide 1,614M | 99.9 (99.8) | 99.1 (99.1) | 95.1 (94.8) | 94.4 (93.9) | 73.9 (74.5) | 61.9 (62.0) |
+| base 480M | 99.9 (99.7) | 98.7 (98.6) | 92.1 (90.9) | 91.2 (89.6) | 68.1 (65.7) | 51.3 (48.4) |
+
+Panel differences: base 2,359M minus wide 1,614M +1.02 points [+0.51, +1.52] greedy, +1.08 [+0.55,
++1.60] sampled; base 2,359M minus base 480M +4.85 [+4.33, +5.36] greedy, +6.27 [+5.70, +6.83] sampled.
+
+Held-out cross-play (first against second, paired-draw 95% interval):
+
+| Pair | Greedy | Sampled |
+|---|---|---|
+| base 2,359M vs wide 1,614M | 51.0% [49.6, 52.4] | 53.1% [51.6, 54.4] |
+| base 2,359M vs P6 480M | 65.1% [63.7, 66.5] | 64.9% [63.6, 66.4] |
+| base 2,359M vs P2 40M | 78.3% [77.1, 79.6] | 77.8% [76.5, 79.0] |
+| wide 1,614M vs P6 480M | 64.2% [62.9, 65.6] | 63.5% [62.1, 64.9] |
+| P2 40M vs P6 480M | 32.3% [31.0, 33.6] | 31.4% [30.1, 32.8] |
+
+Choice for the external test: the base arm's final checkpoint (2,359M steps,
+`runs/p7-pairwise-gpu0/checkpoint-8999.npz` in the archive). It leads wide on the panel with an interval
+above zero and in sampled cross-play, ties it greedy, and is cheaper to run. The forward search was
+built and measured on the Phase 6 480M checkpoint; moving it to this one needs its own paired check.
+
+Caveats. One seed per arm. The two arms differ in width and in the number of updates their time budget
+allowed, and each checkpoint was taken at its own point of the learning-rate decay, so the doubling
+gains mix more data with a lower learning rate. The last base step is a 1.23x step at the end of the
+decay. Not measured: Showdown transfer of the new checkpoint (Phase 5 style), and the engine
+benchmarks (LAB_BENCH was off).
+
+Commands (held-out rerun, from the repository root):
+
+```bash
+python -m pokejax.train.panel base-2359M=$B/checkpoint-8999.npz wide-1614M=$W/checkpoint-6156.npz base-480M=$B/checkpoint-1832.npz --opponent ref-P2-40M=work/reference-checkpoints/p6-p2-40M/checkpoint.npz --opponent ref-P6-480M=work/reference-checkpoints/p6-long-480M/checkpoint.npz --battles 4096 --batch 1024 --difference base-2359M wide-1614M --difference base-2359M base-480M --team-pool $HELDOUT --out $OUT/panel.json
+python -m pokejax.train.crossplay base-2359M=$B/checkpoint-8999.npz wide-1614M=$W/checkpoint-6156.npz ref-P2-40M=work/reference-checkpoints/p6-p2-40M/checkpoint.npz ref-P6-480M=work/reference-checkpoints/p6-long-480M/checkpoint.npz --draws 2048 --batch 1024 --team-pool $HELDOUT --out $OUT/crossplay.json
+```
+
+The held-out pool is `reference/generate-teams.cjs --count 16384 --seed 720030`, converted with
+`pokejax.search.evaluate.ensure_draws`.
+
 ### Forward search, task 1: signal test (diagnostic oracle)
 
 Branch `search`. `pokejax/search/` holds a search transition (`step` with masks, refused trap
