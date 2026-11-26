@@ -18,7 +18,8 @@ steps with no real choice (a no-op or a single legal action).
 
 The pool holds pool.size parameter sets stacked on a leading axis, all copies of the initial
 parameters at first. Every pool.every updates the parameters after that update replace the set of
-the next slot (round robin), and the replaced set is kept as the member's previous parameters: a
+a slot (round robin for recent, age-spaced for spread), and the replaced set is kept as the
+member's previous parameters: a
 pool row whose battle began before the insertion keeps reading them until its battle ends
 (league.PoolParams, pool_fresh). Pool members are never trained.
 
@@ -235,7 +236,14 @@ class Trainer:
 		stacked = jax.tree.map(
 			lambda x: jnp.broadcast_to(x, (self.config.pool.size,) + x.shape), learner.params
 		)
-		return learner._replace(pool=PoolParams(current=stacked, previous=stacked))
+		inserted = (
+			jnp.zeros((self.config.pool.size,), jnp.int32)
+			if self.config.pool.retention == "spread"
+			else None
+		)
+		return learner._replace(
+			pool=PoolParams(current=stacked, previous=stacked, inserted=inserted)
+		)
 
 	def parameter_count(self, learner: LearnerState) -> int:
 		return count_parameters(learner.params)
@@ -391,7 +399,14 @@ class Trainer:
 		if every == 0:
 			return pool, fresh, inserts
 		due = jnp.asarray(update) % every == 0
-		slot = inserts % self.config.pool.size
+		size = self.config.pool.size
+		slot = inserts % size
+		if self.config.pool.retention == "spread" and size > 1:
+			order = jnp.argsort(pool.inserted, stable=True)
+			ages = jnp.asarray(update, jnp.float32) - pool.inserted[order]
+			ratios = ages[:-1] / jnp.maximum(ages[1:], 1)
+			chosen = order[1 + jnp.argmin(ratios)]
+			slot = jnp.where(inserts < size, slot, chosen)
 		previous = jax.tree.map(
 			lambda old, current: old.at[slot].set(jnp.where(due, current[slot], old[slot])),
 			pool.previous,
@@ -406,7 +421,10 @@ class Trainer:
 			per_member = fresh.shape[0] // self.config.pool.size
 			member = jnp.arange(fresh.shape[0]) // per_member
 			fresh = jnp.where(due & (member == slot), False, fresh)
-		return PoolParams(current, previous), fresh, inserts + due.astype(jnp.int32)
+		inserted = pool.inserted
+		if inserted is not None:
+			inserted = inserted.at[slot].set(jnp.where(due, update, inserted[slot]))
+		return PoolParams(current, previous, inserted), fresh, inserts + due.astype(jnp.int32)
 
 	def _update_step(self, learner: LearnerState):
 		p, r = self.config.ppo, self.config.rollout

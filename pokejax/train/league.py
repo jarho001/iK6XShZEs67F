@@ -34,8 +34,14 @@ no-op or a single legal action, whose log-probability is zero.
 Pool rows keep the parameters they started a battle with. Each pool member has its current and its
 previous parameters (PoolParams); a pool row reads the current ones from the start of a battle until
 the insertion that replaces its member, and the previous ones after it (pool_fresh is false), so an
-insertion never changes a battle in progress. The config keeps pool.size * pool.every *
-rollout.rollout_length at least env.max_steps, so no battle outlives two insertions into its member.
+insertion never changes a battle in progress. For recent retention, the config keeps pool.size *
+pool.every * rollout.rollout_length at least env.max_steps. Spread requires one insertion interval
+to cover max_steps, since it can replace the
+same slot twice in succession. Thus no battle outlives two replacements of its member.
+
+Spread fills slots in order, then sorts members by insertion update. Of adjacent members, it drops
+the newer one of the pair with the smallest ratio of ages; ties favor the oldest pair. The oldest
+member is protected, and the incoming newest always stays. A one-slot pool replaces its only member.
 """
 
 import functools
@@ -129,6 +135,7 @@ class PoolParams(NamedTuple):
 
 	current: Any
 	previous: Any
+	inserted: Any = None  # spread only: insertion updates by slot; zero denotes initial parameters
 
 
 def select_lanes(mask, new, old):

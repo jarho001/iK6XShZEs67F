@@ -117,10 +117,12 @@ class OpponentSection:
 class PoolSection:
 	size: int = 8  # K: past parameter sets, stacked on the device
 	every: int = 50  # M: updates between insertions of the current parameters; 0 for never
+	retention: str = "recent"
 
 	def __post_init__(self):
 		_check_int(self.size, 1, "pool.size")
 		_check_int(self.every, 0, "pool.every")
+		_check_choice(self.retention, ("recent", "spread"), "pool.retention")
 
 
 @dataclass(frozen=True)
@@ -401,6 +403,11 @@ class TrainConfig:
 			f"opponent.shares.pool gives {pool_rows} rows, which must be a multiple of "
 			f"pool.size = {self.pool.size}",
 		)
+		if pool_rows and self.pool.every and self.pool.retention == "spread":
+			_check(
+				self.pool.every * self.rollout.rollout_length >= self.env.max_steps,
+				"spread requires pool.every x rollout.rollout_length to reach env.max_steps",
+			)
 		if pool_rows and self.pool.every:
 			horizon = self.pool.size * self.pool.every * self.rollout.rollout_length
 			_check(
