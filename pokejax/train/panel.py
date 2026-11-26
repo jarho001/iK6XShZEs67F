@@ -121,7 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
 	)
 	parser.add_argument(
 		"--baselines",
-		nargs="+",
+		nargs="*",
 		choices=POLICY_NAMES,
 		default=list(POLICY_NAMES),
 		help="the baselines on the panel (default: all four)",

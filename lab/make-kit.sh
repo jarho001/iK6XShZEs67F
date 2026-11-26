@@ -63,6 +63,11 @@ if [ ! -f "$pool" ]; then
 	echo "missing $pool: the kit needs the team pool" >&2
 	exit 1
 fi
+heldout="work/lab-results/2026-11-24-rtx6000/heldout/heldout-720030.npz"
+if [ ! -f "$heldout" ]; then
+	echo "missing $heldout: the kit needs the held-out study pool" >&2
+	exit 1
+fi
 # The reference checkpoints of the panel (pokejax/lab.py REFERENCE_CHECKPOINTS), as
 # "source checkpoint, source configuration, folder in the kit".
 references=(
@@ -89,7 +94,7 @@ else
 	git archive --format=tar HEAD | tar -xf - -C "$kit" || exit 1
 fi
 mkdir -p "$kit/work/teams" || exit 1
-cp "$pool" "$kit/work/teams/" || exit 1
+cp "$pool" "$heldout" "$kit/work/teams/" || exit 1
 {
 	echo "commit=$commit"
 	echo "dirty=$dirty"

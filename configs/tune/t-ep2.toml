@@ -1,0 +1,88 @@
+# Phase 7, task 1: the pairwise network with the four auxiliary losses (the Phase 6 exit architecture,
+# P2's configuration, work/codex/exp/p6-long.toml) at 4,096 battle rows per update instead of 512.
+# Nothing else in the network, the auxiliary losses, the league or PPO changes: the rows are the only
+# size that does, so the arm measures the same network with a larger batch (64-step rollouts, 4,096 x
+# 64 = 262,144 environment steps per update, about 8 times the Phase 6 run's 32,768).
+# The lab (lab/run.sh, LAB_ARMS) sets run.updates from its time budget (--updates), ppo.decay_updates
+# to that count (the learning rate falls from 1e-3 to 1e-4 over the run), checkpoint.keep to the
+# doubling step counts and evaluation.every to a twelfth of the run. The values below are for a
+# manual run only: python -m pokejax.train --config configs/p7-pairwise.toml
+# Evaluation every 500 updates and a resumable checkpoint every 250 (about 65M steps) as in Phase 6.
+
+[run]
+name = "t-ep2"
+seed = 0
+updates = 4000
+
+[opponent]
+shares = { selfplay = 0.375, pool = 0.25, random = 0.0625, random-move = 0.0625, max-damage = 0.125, heuristics = 0.125 }
+
+[pool]
+size = 8
+every = 50
+
+[rollout]
+batch_size = 4096
+rollout_length = 64
+sequence_length = 16
+
+[env]
+max_steps = 1000
+shaping = false
+shaping_coef = 0.1
+
+[network]
+arch = "pairwise"
+core = "gru"
+activation = "silu"
+core_width = 128
+width = 96
+pair_width = 64
+interaction_width = 8
+context_width = 128
+species_embedding = 24
+move_embedding = 16
+item_embedding = 8
+ability_embedding = 8
+type_embedding = 12
+code_embedding = 4
+features = false
+action_head = "dense"
+
+# Training-only auxiliary losses (weights as in design-sol.md; zero switches a target off).
+[auxiliary]
+next_action = 0.05
+item = 0.01
+ability = 0.01
+moves = 0.03
+
+[ppo]
+epochs = 2
+minibatches = 4
+learning_rate = 1e-3
+learning_rate_end = 1e-4
+lr_schedule = "linear"
+decay_updates = 0
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+value_clip = 0.2
+value_coef = 0.5
+entropy_coef = 0.01
+max_grad_norm = 0.5
+adam_eps = 1e-5
+
+[logging]
+every = 10
+
+[evaluation]
+every = 500
+battles = 1024
+final_battles = 4096
+batch = 1024
+opponents = ["random", "random-move", "max-damage", "heuristics"]
+greedy = true
+
+[checkpoint]
+every = 250
+keep = []

@@ -76,6 +76,24 @@ OVERHEAD = 1.25  # per update: evaluations and checkpoints on top of the rollout
 # (configs/p7-pairwise.toml) and its wide variant (configs/p7-pairwise-wide.toml). The first arm is the
 # base arm: its sweep also measures SWEEP_BASE_BATCH.
 DEFAULT_ARMS = (Path("configs/p7-pairwise.toml"), Path("configs/p7-pairwise-wide.toml"))
+STUDY_ARMS = tuple(
+	Path(f"configs/tune/{name}.toml")
+	for name in (
+		"t-base",
+		"t-base-s1",
+		"t-lr4",
+		"t-base-s2",
+		"t-lr2",
+		"t-ep2",
+		"t-lr4-ep2",
+		"t-lr2-ep2",
+		"t-ent003",
+		"t-ent03",
+		"t-mb8",
+		"t-lam98",
+	)
+)
+STUDY_POOL = Path("work/teams/heldout-720030.npz")
 SELFPLAY_CONFIG = Path("configs/selfplay.toml")
 BENCH_BATCHES = (4096, 16384, 65536, 131072)
 # The steps per scan and the repetitions of pokejax.bench's defaults, so that the lab's numbers compare
@@ -162,6 +180,8 @@ class Settings:
 	team_pool: Path
 	arms: tuple[Path, ...]
 	bench: bool
+	study: bool = False
+	panel_pool: Path | None = None
 
 	@property
 	def results(self) -> Path:
@@ -231,7 +251,7 @@ def arms_from_env(environ: Mapping[str, str]) -> tuple[Path, ...]:
 		return tuple(Path(part) for part in parts if part)
 	if environ.get("LAB_TRAIN_CONFIG", "").strip():
 		return (Path(environ["LAB_TRAIN_CONFIG"].strip()),)
-	return DEFAULT_ARMS
+	return STUDY_ARMS if environ.get("LAB_STUDY") == "1" else DEFAULT_ARMS
 
 
 def settings_from_env(environ: Mapping[str, str] | None = None) -> Settings:
@@ -244,6 +264,17 @@ def settings_from_env(environ: Mapping[str, str] | None = None) -> Settings:
 		team_pool=Path(environ.get("LAB_TEAM_POOL", str(DEFAULT_POOL))),
 		arms=arms_from_env(environ),
 		bench=environ.get("LAB_BENCH", "0") == "1",
+		study=environ.get("LAB_STUDY", "0") == "1",
+		panel_pool=Path(
+			environ.get(
+				"LAB_PANEL_POOL",
+				str(
+					STUDY_POOL
+					if environ.get("LAB_STUDY") == "1"
+					else Path(environ.get("LAB_TEAM_POOL", str(DEFAULT_POOL)))
+				),
+			)
+		),
 	)
 
 
@@ -661,6 +692,12 @@ def step_facts(settings: Settings) -> StepResult:
 		"panel_safety": PANEL_SAFETY,
 		"gpus": _gpus_or_none(settings),
 	}
+	if settings.study:
+		facts.update(
+			study=True,
+			panel_pool=str(settings.panel_pool),
+			panel_pool_sha256=_sha256(settings.panel_pool) if settings.panel_pool else None,
+		)
 	(settings.lab_dir / "facts.json").write_text(
 		json.dumps(facts, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8"
 	)
@@ -1082,7 +1119,10 @@ def probe_run(settings: Settings, run: Run) -> dict[str, Any]:
 	start = load_config(run.arm).rollout.batch_size
 	floor = TRAIN_FLOOR
 	if settings.smoke:
-		start, floor = min(start, SMOKE_TRAIN_BATCH), SMOKE_TRAIN_FLOOR
+		start, floor = (
+			min(start, SMOKE_TRAIN_FLOOR if settings.study else SMOKE_TRAIN_BATCH),
+			SMOKE_TRAIN_FLOOR,
+		)
 	probe_updates = SMOKE_PROBE_UPDATES if settings.smoke else PROBE_UPDATES
 
 	def attempt(batch: int) -> dict[str, Any]:
@@ -1158,13 +1198,17 @@ def plan_runs(
 			for position, run in enumerate(active):
 				probe = probes[run.name]
 				if settings.smoke:
-					updates = SMOKE_TRAIN_UPDATES
+					updates = 2 if settings.study else SMOKE_TRAIN_UPDATES
 					base_steps = probe["steps_per_update"]  # smoke: a checkpoint at 1, 2, 4 updates
 				else:
 					available = share - probe["probe_cold_update_seconds"] - STARTUP_SECONDS
 					updates = plan_updates(probe["probe_update_seconds"], available)
 					base_steps = KEEP_BASE_STEPS
-				kept = doubling_checkpoints(updates, probe["steps_per_update"], base_steps)
+				kept = (
+					[updates]
+					if settings.study
+					else doubling_checkpoints(updates, probe["steps_per_update"], base_steps)
+				)
 				plans[run.name] = {
 					"run": run.name,
 					"arm": str(run.arm),
@@ -1189,7 +1233,25 @@ def plan_runs(
 			plan = plans.get(run.name) or fixed.get(run.name)
 			if plan is not None:
 				kept_by_run[run] = len(plan["keep"])
-		new_reserve = panel_reserve_seconds(kept_by_run, gpus, settings.smoke)
+		new_reserve = (
+			PANEL_SAFETY
+			* max(
+				(
+					sum(
+						2 * PANEL_JOB_SECONDS
+						+ (4 * PANEL_BATTLES + 2 * FINAL_PANEL_BATTLES)
+						* 2
+						* PANEL_SECONDS_PER_BATTLE
+						for run in kept_by_run
+						if run.gpu == gpu
+					)
+					for gpu in gpus
+				),
+				default=0.0,
+			)
+			if settings.study
+			else panel_reserve_seconds(kept_by_run, gpus, settings.smoke)
+		)
 		if abs(new_reserve - reserve) < 1.0:
 			reserve = new_reserve
 			break
@@ -1372,13 +1434,18 @@ def panel_command(
 	batch: int,
 	out: Path,
 	differences: Sequence[tuple[str, str]] = (),
+	include_references: bool = True,
+	include_baselines: bool = True,
 ) -> list[str]:
 	command = [sys.executable, "-m", "pokejax.train.panel"]
 	command += [f"{label}={path}" for label, path in candidates]
-	for label, path in REFERENCE_CHECKPOINTS:
-		command += ["--opponent", f"{label}={path}"]
+	if include_references:
+		for label, path in REFERENCE_CHECKPOINTS:
+			command += ["--opponent", f"{label}={path}"]
+	if not include_baselines:
+		command += ["--baselines"]
 	command += ["--battles", str(battles), "--batch", str(batch), "--seed", "0"]
-	command += ["--team-pool", str(settings.team_pool), "--out", str(out)]
+	command += ["--team-pool", str(settings.panel_pool or settings.team_pool), "--out", str(out)]
 	for first, second in differences:
 		command += ["--difference", first, second]
 	return command
@@ -1446,6 +1513,33 @@ def step_panel(settings: Settings) -> StepResult:
 		if any(not checkpoint["path"].exists() for checkpoint in kept):
 			notes.append(f"{run.name}: a kept checkpoint is missing, no panel")
 			continue
+		if settings.study:
+			final = kept[-1]
+			candidate = [(final["label"], final["path"])]
+			batch = 128 if settings.smoke else PANEL_BATCH
+			for suffix, size, refs, baselines in (
+				(("final", 128, True, True),)
+				if settings.smoke
+				else (
+					("baseline", PANEL_BATTLES, False, True),
+					("final", FINAL_PANEL_BATTLES, True, False),
+				)
+			):
+				out = settings.panel_dir / f"{run.name}-{suffix}.json"
+				command = panel_command(
+					settings,
+					candidate,
+					battles=size,
+					batch=batch,
+					out=out,
+					include_references=refs,
+					include_baselines=baselines,
+				)
+				jobs[run.gpu].append(
+					Job(f"{run.name}-{suffix}", run.gpu, tuple(command), out, PANEL_TIMEOUT_SECONDS)
+				)
+			finals.append((final["label"], final["path"]))
+			continue
 		candidates = [(checkpoint["label"], checkpoint["path"]) for checkpoint in kept]
 		differences = [(kept[i]["label"], kept[i - 1]["label"]) for i in range(1, len(kept))]
 		battles = SMOKE_PANEL_BATTLES if settings.smoke else PANEL_BATTLES
@@ -1476,7 +1570,7 @@ def step_panel(settings: Settings) -> StepResult:
 			Job(f"{run.name}-final", run.gpu, tuple(final_command), final_out, timeout)
 		)
 		finals.append((final["label"], final["path"]))
-	if len(finals) + len(REFERENCE_CHECKPOINTS) >= 2:
+	if not settings.study and len(finals) + len(REFERENCE_CHECKPOINTS) >= 2:
 		cross_out = settings.panel_dir / "crossplay.json"
 		jobs[gpus[0]].append(
 			Job(
@@ -1573,7 +1667,11 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def step_pack(settings: Settings) -> StepResult:
 	failed_plots = make_plots(settings)
-	summary = lab_report.summary_markdown(settings.lab_dir)
+	summary = (
+		lab_report.study_summary(settings.lab_dir)
+		if settings.study
+		else lab_report.summary_markdown(settings.lab_dir)
+	)
 	(settings.lab_dir / "summary.md").write_text(summary, encoding="utf-8")
 	archive = archive_name(settings, socket.gethostname())
 	archive.parent.mkdir(parents=True, exist_ok=True)

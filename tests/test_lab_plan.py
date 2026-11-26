@@ -444,3 +444,132 @@ def test_a_fresh_start_clears_the_kept_checkpoints_of_an_aborted_run(tmp_path, m
 	)
 	lab.train_run(settings, run, plan)
 	assert not (run_dir / "checkpoint-115.npz").exists()
+
+
+def test_study_configs_and_plan(tmp_path):
+	import tomllib
+
+	settings = lab.settings_from_env({"LAB_STUDY": "1", "LAB_DIR": str(tmp_path)})
+	assert len(settings.arms) == 12 and settings.panel_pool == lab.STUDY_POOL
+	base = tomllib.loads(BASE_ARM.read_text())
+	expected = {
+		"t-base": {},
+		"t-base-s1": {"run.seed": 1},
+		"t-base-s2": {"run.seed": 2},
+		"t-lr2": {"ppo.learning_rate": 0.002, "ppo.learning_rate_end": 0.0002},
+		"t-lr4": {"ppo.learning_rate": 0.004, "ppo.learning_rate_end": 0.0004},
+		"t-ep2": {"ppo.epochs": 2},
+		"t-lr2-ep2": {"ppo.learning_rate": 0.002, "ppo.learning_rate_end": 0.0002, "ppo.epochs": 2},
+		"t-lr4-ep2": {"ppo.learning_rate": 0.004, "ppo.learning_rate_end": 0.0004, "ppo.epochs": 2},
+		"t-ent003": {"ppo.entropy_coef": 0.003},
+		"t-ent03": {"ppo.entropy_coef": 0.03},
+		"t-mb8": {"ppo.minibatches": 8},
+		"t-lam98": {"ppo.gae_lambda": 0.98},
+	}
+	for arm in settings.arms:
+		load_config(arm)
+		config = tomllib.loads(arm.read_text())
+		assert config["run"]["name"] == arm.stem
+		changes = {
+			f"{section}.{key}": value
+			for section in config
+			for key, value in config[section].items()
+			if (section, key) != ("run", "name") and base[section][key] != value
+		}
+		assert changes == expected[arm.stem]
+	runs = assign_runs(settings.arms, [0, 1])
+	assert [len(lab.runs_on(runs, gpu)) for gpu in (0, 1)] == [6, 6]
+	plans = lab.plan_runs(settings, runs, {r.name: _probe(4096) for r in runs}, {}, 36000, 0)
+	assert len({p["window_seconds"] for p in plans.values()}) == 1
+	assert all(
+		p["keep"] == [p["updates"]] and p["decay_updates"] == p["updates"] for p in plans.values()
+	)
+	command = lab.panel_command(
+		settings,
+		[("x", Path("x"))],
+		battles=4096,
+		batch=1024,
+		out=Path("out"),
+		include_baselines=False,
+	)
+	assert command[command.index("--team-pool") + 1] == str(lab.STUDY_POOL)
+	assert settings.team_pool != settings.panel_pool
+	assert "sweep: skipped in study mode" in (ROOT / "lab/run.sh").read_text()
+
+
+def test_study_panel_jobs_are_final_only_and_resume(tmp_path, monkeypatch):
+	settings = _settings(tmp_path, study=True, panel_pool=tmp_path / "heldout.npz")
+	_gpu_list(settings, 2)
+	refs = []
+	for label, path in lab.REFERENCE_CHECKPOINTS:
+		ref = tmp_path / path.parent.name / path.name
+		ref.parent.mkdir()
+		ref.write_bytes(b"x")
+		refs.append((label, ref))
+	monkeypatch.setattr(lab, "REFERENCE_CHECKPOINTS", tuple(refs))
+	for run in assign_runs(settings.arms, [0, 1]):
+		run_dir = settings.runs / run.name
+		run_dir.mkdir(parents=True)
+		(run_dir / "result.json").write_text("{}")
+		(run_dir / "checkpoint-2.npz").write_bytes(b"x")
+		lab._write_plan(settings, run, {"keep": [2], "steps_per_update": 10, "updates": 2})
+	commands = []
+
+	def fake(command, *, gpu, log_path, timeout):
+		commands.append(command)
+		out = Path(command[command.index("--out") + 1])
+		out.parent.mkdir(parents=True, exist_ok=True)
+		out.write_text("{}")
+		return {"returncode": 0, "timed_out": False, "wall_seconds": 1, "log": str(log_path)}
+
+	monkeypatch.setattr(lab, "run_measurement", fake)
+	assert lab.step_panel(settings).status == "complete"
+	assert len(commands) == 4
+	for command in commands:
+		assert "pokejax.train.panel" in command
+		assert command[command.index("--team-pool") + 1] == str(settings.panel_pool)
+		assert command.count("--opponent") in (0, 2)
+		assert command[command.index("--battles") + 1] == (
+			"4096" if "--opponent" in command else "2048"
+		)
+	assert lab.step_panel(settings).status == "complete" and len(commands) == 4
+
+
+def test_study_report_ranks_reference_greedy_and_shows_metrics(tmp_path):
+	for name, rate in (("t-base", 0.4), ("t-lr4", 0.6)):
+		run = f"{name}-gpu0"
+		directory = tmp_path / "runs" / run
+		directory.mkdir(parents=True)
+		plan = {"arm": f"configs/tune/{name}.toml", "updates": 2, "steps_per_update": 100}
+		(directory / "lab-plan.json").write_text(json.dumps(plan))
+		(directory / "metrics.jsonl").write_text(
+			json.dumps(
+				{
+					"kind": "update",
+					"update": 2,
+					"env_steps": 200,
+					"approx_kl": 0.01,
+					"clip_fraction": 0.2,
+					"entropy": 0.3,
+					"explained_variance": 0.4,
+				}
+			)
+			+ "\n"
+		)
+		opponents = {
+			n: {"win_rate": rate, "ci95": [rate - 0.1, rate + 0.1]}
+			for n in (*lab_report.BASELINE_ORDER, "ref-P6-480M", "ref-P2-40M")
+		}
+		panel = {
+			"results": {
+				checkpoint_label(run, 200): {
+					mode: {"opponents": opponents} for mode in ("sampled", "greedy")
+				}
+			}
+		}
+		(tmp_path / "panel").mkdir(exist_ok=True)
+		(tmp_path / "panel" / f"{run}-final.json").write_text(json.dumps(panel))
+	text = lab_report.study_summary(tmp_path)
+	assert text.index("t-lr4-gpu0") < text.index("t-base-gpu0")
+	assert "60.00 [50.00, 70.00]" in text and "0.0100" in text
+	assert "60.00 / 60.00" in text and "ppo.learning_rate=0.004" in text

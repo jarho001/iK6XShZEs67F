@@ -33,6 +33,12 @@ status=0
 gpu_ok=1
 for step in preflight facts bench sweep train panel; do
 	case "$step" in
+		sweep)
+			if [ "${LAB_STUDY:-0}" = 1 ]; then
+				echo "sweep: skipped in study mode"
+				continue
+			fi
+			;;
 		bench)
 			if [ "${LAB_BENCH:-0}" != 1 ]; then
 				echo "bench: off (set LAB_BENCH=1 to run it)"

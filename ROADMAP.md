@@ -471,7 +471,16 @@ Tasks, in order:
    smoke mode runs on the 3060 Ti.
 2. The lab run and its analysis: strength per compute doubling for each
    arm, README results, the choice of the model for the external test.
-3. The external test (ladder or published bots), when the owner decides.
+3. A tuning study before the next long run: the lab kit's study mode
+   (LAB_STUDY=1) trains twelve short runs of the base network at 4,096
+   rows on the two cards, equal time each, varying the learning rate,
+   epochs, minibatches, entropy and GAE lambda (configs/tune/, with two
+   seed replicates), each scored on held-out teams against the Phase 6
+   references and the baselines. The best two or three are then extended
+   to a longer budget before one of them sets the next long run. Added
+   because the PPO settings were tuned at 512 to 1,024 rows and the lab
+   ran at 4,096 without retuning, and every doubling still gained.
+4. The external test (ladder or published bots), when the owner decides.
 
 ## Forward search (branch `search`)
 

@@ -194,3 +194,18 @@ the fallback is always exercised there; on the RTX 6000 under Linux it should no
 - Compile times are cold on purpose: no persistent compilation cache is used by the measurements.
 - The panel and the cross-play use the same pool, the same opponents and the same seeds in every run, so
   their numbers compare across arms and across checkpoints.
+
+## Tuning study
+
+After building the kit and image as above, run from the kit directory:
+
+    docker run --rm --gpus all --shm-size=2g -e LAB_STUDY=1 -e LAB_HOURS=10 -v "$PWD":/workspace -w /workspace pokemon-jax-cuda12 bash lab/run.sh
+
+The twelve configurations share each GPU's training window equally; each is probed separately so its
+own update time determines its decay horizon. The sweep and cross-play are skipped. The final
+checkpoints play sampled and greedy panels on the shipped held-out pool (2,048 setups per baseline,
+4,096 per reference). The archive contains the ranked study table, curves and resumable runs. Set
+`LAB_PANEL_POOL` to override the held-out pool and `LAB_TEAM_POOL` to override training teams.
+Based on 8,999 base updates in 8.9 hours on RTX 6000, a sixth of the available training time is
+roughly 1,500 updates before allowing for probes, panel and other overhead; faster or slower PPO
+settings reach different update counts. Rerun the same command to resume.

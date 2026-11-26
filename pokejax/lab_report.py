@@ -5,6 +5,7 @@ Both read only the files a lab run writes, so they can be rebuilt from an archiv
 
 import itertools
 import json
+import tomllib
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -651,6 +652,98 @@ def summary_markdown(lab_dir: Path) -> str:
 		"",
 	]
 	return "\n".join(sections)
+
+
+def study_summary(lab_dir: Path) -> str:
+	"""One comparable final-result row per study arm, plus the usual figures."""
+	base = tomllib.loads(Path("configs/p7-pairwise.toml").read_text())
+	rows = []
+	for plan_path in sorted((lab_dir / "runs").glob("*-gpu*/lab-plan.json")):
+		plan = _load(plan_path)
+		run = plan_path.parent.name
+		config = tomllib.loads(Path(plan["arm"]).read_text())
+		diffs = [
+			f"{section}.{key}={value}"
+			for section in config
+			for key, value in config[section].items()
+			if (section, key) != ("run", "name") and base[section].get(key) != value
+		]
+		label = checkpoint_label(run, plan["updates"] * plan["steps_per_update"])
+		refs = _load(lab_dir / "panel" / f"{run}-final.json").get("results", {}).get(label, {})
+		baselines = (
+			_load(lab_dir / "panel" / f"{run}-baseline.json").get("results", {}).get(label, {})
+		)
+
+		if not baselines:
+			baselines = refs
+
+		def rate(mode, opponent, source=refs):
+			cell = source.get(mode, {}).get("opponents", {}).get(opponent)
+			if not cell:
+				return "—"
+			lo, hi = cell["ci95"]
+			return f"{100 * cell['win_rate']:.2f} [{100 * lo:.2f}, {100 * hi:.2f}]"
+
+		metrics = [
+			r for r in read_records(plan_path.parent / "metrics.jsonl") if r.get("kind") == "update"
+		]
+		last = metrics[-1] if metrics else {}
+		means = [
+			sum(baselines[mode]["opponents"][name]["win_rate"] for name in BASELINE_ORDER) / 4
+			if mode in baselines
+			and all(name in baselines[mode]["opponents"] for name in BASELINE_ORDER)
+			else None
+			for mode in ("sampled", "greedy")
+		]
+		mean_text = " / ".join(f"{100 * x:.2f}" if x is not None else "—" for x in means)
+		values = [
+			f"{last[k]:.4f}" if k in last else "—"
+			for k in ("approx_kl", "clip_fraction", "entropy", "explained_variance")
+		]
+		rows.append(
+			(
+				refs.get("greedy", {})
+				.get("opponents", {})
+				.get("ref-P6-480M", {})
+				.get("win_rate", -1),
+				[
+					run,
+					", ".join(diffs) or "base",
+					str(last.get("update", "—")),
+					f"{last['env_steps']:,}" if "env_steps" in last else "—",
+					rate("sampled", "ref-P6-480M"),
+					rate("greedy", "ref-P6-480M"),
+					rate("sampled", "ref-P2-40M"),
+					rate("greedy", "ref-P2-40M"),
+					mean_text,
+					*values,
+				],
+			)
+		)
+	headers = [
+		"Arm",
+		"Changes from base",
+		"Updates",
+		"Environment steps",
+		"P6 sampled [95%]",
+		"P6 greedy [95%]",
+		"P2 sampled [95%]",
+		"P2 greedy [95%]",
+		"Baseline mean sampled / greedy",
+		"KL",
+		"Clip fraction",
+		"Entropy",
+		"Explained variance",
+	]
+	return (
+		"# Tuning study\n\nWin rates and baseline means are percentages.\n\n"
+		+ markdown_table(
+			headers, [row for _, row in sorted(rows, key=lambda x: x[0], reverse=True)]
+		)
+		+ "\n\n## Figures\n\n"
+		+ _figures_section(lab_dir)
+		+ "\n"
+	)
 
 
 def _gib(value: Any) -> str:
