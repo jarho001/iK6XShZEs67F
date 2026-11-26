@@ -974,3 +974,37 @@ mostly best-responds to an opponent model shaped like our network. Raw greedy is
 raw sampled here. Runner notes: a false alarm on a Ditto lead (Imposter changes the first
 observed species) stopped one earlier attempt; those games were discarded and the integration
 replayed.
+
+### Phase 7: the base 2359M model against Foul Play
+
+Question: how does the Phase 7 model (base arm, 2.36B steps,
+`lab/runs/p7-pairwise-gpu0/checkpoint-8999.npz` of the 2026-11-24 lab run) do against Foul Play,
+and does the search (arm C, unchanged) help it? Same setup as search task 5 (pinned local
+Showdown, Foul Play at `8f541f8`, 100 ms per sampled state, paired setups, both seats), fresh team
+seeds (integration 720032, confirmation 720033). Runner `work/s6-run.py` in the search worktree
+(outside git), a copy of task 5's with the checkpoint, seeds and output changed; journal
+`work/codex/runs/s6-foulplay-2359m.jsonl`.
+
+Integration (100 setups) chose raw sampled as the reference (43.5% against greedy's 40.0%).
+Confirmation, 1,355 fresh setups, 2,710 games per arm, 95% bootstrap intervals by setup:
+
+| Arm vs Foul Play | Win % |
+|---|---:|
+| C (search) | 42.8 [41.0, 44.5] |
+| raw sampled | 43.2 [41.5, 44.9] |
+| raw greedy | 46.2 [44.5, 48.0] |
+
+C − sampled (the fixed reference): −0.4 [−2.7, +1.9] points, so under the owner's rule raw stays
+the default. C − greedy: −3.4 [−5.9, −1.0]; greedy − sampled: +3.0 [+0.6, +5.3]. The integration
+stage picked the weaker raw arm on 200 games per arm; greedy is the better way to play this model
+against Foul Play.
+
+0 errors, ties and timeouts in 8,130 games; 0 deadline fallbacks. Latency p50/p95/p99: C
+71/97/132 ms, raw 14/26/36 ms, Foul Play 237/246/251 ms. Two runner stops on false alarms in its
+team check (a Ditto lead transformed by Imposter, a Castform lead changed by rain before the first
+request; the check now skips the lead slot) cost about 5 hours of idle time; no finished game was
+replayed or discarded.
+
+Reading: the Phase 7 model is much stronger than the Phase 6 480M one against Foul Play (46.2%
+greedy against 35.6%), close to even. Depth-1 search on top of it does not help and is worse than
+greedy play, as with the 480M model. Raw greedy is the choice for the external test.
