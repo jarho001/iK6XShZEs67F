@@ -480,10 +480,9 @@ Tasks, in order:
    to a longer budget before one of them sets the next long run. Added
    because the PPO settings were tuned at 512 to 1,024 rows and the lab
    ran at 4,096 without retuning, and every doubling still gained.
-   Status: first study done (README "Phase 7: tuning studies": lr 4e-3 with
-   2 epochs best, +10 points); second study (t2-*: higher learning rates, no
-   random bots) next, then the long run with the best settings and the
-   spread pool.
+   Status: done (README "Phase 7: tuning studies"): lr 4e-3 with 2 epochs,
+   no random bots. Next: the long run, configs/p7-long-spread.toml and
+   configs/p7-long-recent.toml, one per GPU.
 4. The external test (ladder or published bots), when the owner decides.
 
 ## Forward search (branch `search`)

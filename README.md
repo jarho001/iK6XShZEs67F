@@ -1045,5 +1045,19 @@ run. The no-bots arms failed when the container lost GPU access (a systemd reloa
 host; the kit's commands now pass the GPU devices explicitly) and failed again on resume, which reused
 the stale training window; the lab now gives a resumed arm a timeout from its remaining updates.
 
-Second study (configs t2-*): base lr 4e-3 with 2 epochs, against lr 8e-3, lr 1.6e-2 and the
-opponent mix without random bots, with seed replicates; then the long run.
+Second study (kit 5a65b62, 6 arms, about 2.1 h and 3,300 updates each, 870M steps; base lr 4e-3 with
+2 epochs). Greedy / sampled win rate against ref-P6-480M, percent:
+
+| Arm | Change | P6 greedy [95%] | P6 sampled | P2 greedy | Baselines greedy |
+|---|---|---|---:|---:|---:|
+| t2-nobots | no random bots (pool 0.375) | 60.3 [58.8, 61.8] | 58.6 | 73.5 | 96.0 |
+| t2-nobots-s1 | as above, seed 1 | 57.9 | 59.3 | 73.1 | 96.5 |
+| t2-base-s1 | seed 1 | 58.5 | 57.5 | 71.5 | 96.5 |
+| t2-base | lr 4e-3, 2 epochs | 58.1 | 58.0 | 72.8 | 96.0 |
+| t2-lr8 | lr 8e-3 | 56.1 | 55.1 | 71.6 | 96.3 |
+| t2-lr16 | lr 1.6e-2 | 54.1 | 53.3 | 69.6 | 96.0 |
+
+4e-3 is the best learning rate; higher ones lose 2 and 4 points. Dropping the random bots is about +1
+point (within seed noise) and costs nothing against the baselines, so it is kept. The long run uses
+lr 4e-3, 2 epochs, no random bots, one arm per GPU: configs/p7-long-spread.toml (spread pool of 16)
+and configs/p7-long-recent.toml (the last 8), which also tests the spread pool where it can matter.

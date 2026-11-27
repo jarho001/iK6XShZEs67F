@@ -1,0 +1,82 @@
+# Phase 7 long run (p7-long-spread): the tuning studies' best settings (README "Phase 7: tuning studies"):
+# lr 4e-3 decaying linearly to 4e-4, 2 epochs, no random bots (their share moved to the pool), 4,096 rows.
+# The lab sets run.updates, decay_updates, checkpoint.keep and evaluation.every from its time budget.
+# Pool: 16 snapshots spread over the whole run (pool.retention = "spread").
+[run]
+name = "p7-long-spread"
+seed = 0
+updates = 4000
+
+[opponent]
+shares = { selfplay = 0.375, pool = 0.375, random = 0, random-move = 0, max-damage = 0.125, heuristics = 0.125 }
+
+[pool]
+size = 16
+every = 50
+retention = "spread"
+
+[rollout]
+batch_size = 4096
+rollout_length = 64
+sequence_length = 16
+
+[env]
+max_steps = 1000
+shaping = false
+shaping_coef = 0.1
+
+[network]
+arch = "pairwise"
+core = "gru"
+activation = "silu"
+core_width = 128
+width = 96
+pair_width = 64
+interaction_width = 8
+context_width = 128
+species_embedding = 24
+move_embedding = 16
+item_embedding = 8
+ability_embedding = 8
+type_embedding = 12
+code_embedding = 4
+features = false
+action_head = "dense"
+
+# Training-only auxiliary losses (weights as in design-sol.md; zero switches a target off).
+[auxiliary]
+next_action = 0.05
+item = 0.01
+ability = 0.01
+moves = 0.03
+
+[ppo]
+epochs = 2
+minibatches = 4
+learning_rate = 4e-3
+learning_rate_end = 4e-4
+lr_schedule = "linear"
+decay_updates = 0
+gamma = 0.99
+gae_lambda = 0.95
+clip = 0.2
+value_clip = 0.2
+value_coef = 0.5
+entropy_coef = 0.01
+max_grad_norm = 0.5
+adam_eps = 1e-5
+
+[logging]
+every = 10
+
+[evaluation]
+every = 500
+battles = 1024
+final_battles = 4096
+batch = 1024
+opponents = ["random", "random-move", "max-damage", "heuristics"]
+greedy = true
+
+[checkpoint]
+every = 250
+keep = []
