@@ -1289,7 +1289,9 @@ def _per_gpu(
 	return {name: value for group in results for name, value in group}
 
 
-def train_run(settings: Settings, run: Run, plan: Mapping[str, Any]) -> dict[str, Any]:
+def train_run(
+	settings: Settings, run: Run, plan: Mapping[str, Any], *, existing_plan: bool = False
+) -> dict[str, Any]:
 	"""A timed training run of one plan on its GPU, resumed when interrupted (same rows, same keep)."""
 	run_dir = settings.runs / run.name
 	run_dir.mkdir(parents=True, exist_ok=True)
@@ -1337,7 +1339,21 @@ def train_run(settings: Settings, run: Run, plan: Mapping[str, Any]) -> dict[str
 			command += ["--set", setting]
 	if resume:
 		command.append("--resume")
-	timeout = max(plan["window_end"] - time.time(), 60.0) + TRAIN_TIMEOUT_SLACK
+	if existing_plan:
+		# The checkpoint is authoritative; metrics can include updates after it.
+		completed = 0
+		if resume:
+			import numpy as np
+
+			try:
+				with np.load(run_dir / "checkpoint.npz", allow_pickle=False) as checkpoint:
+					completed = int(checkpoint[".update"])
+			except (OSError, ValueError, KeyError):
+				pass  # Let training report a bad checkpoint; allow the full window.
+		remaining = max(0, plan["updates"] - completed) / max(1, plan["updates"])
+		timeout = max(plan["window_seconds"] * remaining, 60.0) + TRAIN_TIMEOUT_SLACK
+	else:
+		timeout = max(plan["window_end"] - time.time(), 60.0) + TRAIN_TIMEOUT_SLACK
 	measured = run_measurement(
 		command, gpu=run.gpu, log_path=settings.logs / f"train-{run.name}.log", timeout=timeout
 	)
@@ -1379,7 +1395,11 @@ def step_train(settings: Settings) -> StepResult:
 			plans[run.name] = new_plans[run.name]
 			_write_plan(settings, run, new_plans[run.name])
 	trainable = [run for run in runs if plans[run.name] is not None]
-	records = _per_gpu(trainable, gpus, lambda run: train_run(settings, run, plans[run.name]))
+	records = _per_gpu(
+		trainable,
+		gpus,
+		lambda run: train_run(settings, run, plans[run.name], existing_plan=run.name in fixed),
+	)
 	for run in trainable:
 		append_record(out, {"kind": "training", "step": "train", **records[run.name]})
 		if records[run.name]["status"] != "ok":
@@ -1625,36 +1645,39 @@ def _archive_filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
 def make_plots(settings: Settings) -> list[str]:
 	"""The training curves as SVG (pokejax.train.plot): each opponent the runs evaluated, by environment
 	steps and by wall minutes, over every run that wrote evaluations. Returns the names that failed."""
-	run_dirs = [
-		path for path in sorted(settings.runs.glob("*-gpu*")) if (path / "metrics.jsonl").exists()
-	]
-	if not run_dirs:
-		return []
-	evaluated: set[str] | None = None
-	for path in run_dirs:
-		config = _load_json(path / "config.json")
-		names = set(config.get("evaluation", {}).get("opponents", []))
-		evaluated = names if evaluated is None else evaluated & names
-	opponents = [name for name in PLOT_OPPONENTS if name in (evaluated or set())]
+	from pokejax.train.plot import MAX_RUNS, PlotError, run_series
+
+	run_dirs = sorted(settings.runs.glob("*-gpu*"))
 	failed = []
-	for opponent in opponents:
+	for opponent in PLOT_OPPONENTS:
 		for x_mode in ("steps", "minutes"):
-			name = f"{opponent}-by-{x_mode}.svg"
-			command = [
-				sys.executable,
-				"-m",
-				"pokejax.train.plot",
-				*[str(path) for path in run_dirs],
-				"--opponent",
-				opponent,
-				"--x",
-				x_mode,
-				"--out",
-				str(settings.lab_dir / "plots" / name),
-			]
-			completed = _run_quietly(command, timeout=900)
-			if completed.returncode != 0:
-				failed.append(name)
+			eligible = []
+			for path in run_dirs:
+				try:
+					run_series(
+						path, opponent=opponent, policy="sampled", x_mode=x_mode, training=False
+					)
+				except (PlotError, OSError, ValueError, KeyError):
+					continue
+				eligible.append(path)
+			for start in range(0, len(eligible), MAX_RUNS):
+				suffix = f"-part{start // MAX_RUNS + 1}" if len(eligible) > MAX_RUNS else ""
+				name = f"{opponent}-by-{x_mode}{suffix}.svg"
+				command = [
+					sys.executable,
+					"-m",
+					"pokejax.train.plot",
+					*[str(path) for path in eligible[start : start + MAX_RUNS]],
+					"--opponent",
+					opponent,
+					"--x",
+					x_mode,
+					"--out",
+					str(settings.lab_dir / "plots" / name),
+				]
+				completed = _run_quietly(command, timeout=900)
+				if completed.returncode != 0:
+					failed.append(name)
 	return failed
 
 

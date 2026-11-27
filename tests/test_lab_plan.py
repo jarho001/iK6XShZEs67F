@@ -573,3 +573,125 @@ def test_study_report_ranks_reference_greedy_and_shows_metrics(tmp_path):
 	assert text.index("t-lr4-gpu0") < text.index("t-base-gpu0")
 	assert "60.00 [50.00, 70.00]" in text and "0.0100" in text
 	assert "60.00 / 60.00" in text and "ppo.learning_rate=0.004" in text
+
+
+def test_existing_plan_timeout_uses_checkpoint_remaining_share(tmp_path, monkeypatch):
+	import numpy as np
+
+	settings = _settings(tmp_path)
+	run = Run(BASE_ARM, 0)
+	run_dir = settings.runs / run.name
+	run_dir.mkdir(parents=True)
+	np.savez(run_dir / "checkpoint.npz", **{".update": 200})
+	plan = {"config": "c.toml", "updates": 600, "decay_updates": 600, "keep": [115, 600],
+		"eval_every": 50, "window_end": 1, "window_seconds": 3600}  # fmt: skip
+	original = dict(plan)
+	calls = []
+
+	def fake(command, *, gpu, log_path, timeout):
+		calls.append((command, timeout))
+		return {"returncode": 1, "timed_out": False, "wall_seconds": 1, "log": str(log_path)}
+
+	monkeypatch.setattr(lab, "run_measurement", fake)
+	lab.train_run(settings, run, plan, existing_plan=True)
+	assert calls[0][1] == pytest.approx(2400 + lab.TRAIN_TIMEOUT_SLACK)
+	assert "--resume" in calls[0][0]
+	assert "ppo.decay_updates=600" in calls[0][0]
+	assert "checkpoint.keep=[115,600]" in calls[0][0]
+	assert plan == original
+	lab.train_run(settings, run, plan)
+	assert calls[1][1] == 60 + lab.TRAIN_TIMEOUT_SLACK
+
+
+def test_second_study_configs():
+	import tomllib
+
+	base = tomllib.loads(Path("configs/tune/t-lr4-ep2.toml").read_text())
+	shares = {"selfplay": 0.375, "pool": 0.375, "random": 0, "random-move": 0,
+		"max-damage": 0.125, "heuristics": 0.125}  # fmt: skip
+	expected = {
+		"t2-base": {},
+		"t2-base-s1": {"run.seed": 1},
+		"t2-lr8": {"ppo.learning_rate": 0.008, "ppo.learning_rate_end": 0.0008},
+		"t2-lr16": {"ppo.learning_rate": 0.016, "ppo.learning_rate_end": 0.0016},
+		"t2-nobots": {"opponent.shares": shares},
+		"t2-nobots-s1": {"opponent.shares": shares, "run.seed": 1},
+	}
+	for name, changes in expected.items():
+		path = Path(f"configs/tune/{name}.toml")
+		load_config(path)
+		config = tomllib.loads(path.read_text())
+		assert config["run"]["name"] == name
+		actual = {f"{section}.{key}": value for section in config
+			for key, value in config[section].items()
+			if (section, key) != ("run", "name") and base[section][key] != value}  # fmt: skip
+		assert actual == changes
+	arms = [Path(f"configs/tune/{name}.toml") for name in expected]
+	runs = assign_runs(arms, [0, 1])
+	assert [[r.arm.stem for r in lab.runs_on(runs, gpu)] for gpu in (0, 1)] == [
+		["t2-base", "t2-lr8", "t2-nobots"],
+		["t2-base-s1", "t2-lr16", "t2-nobots-s1"],
+	]
+
+
+def test_pack_figures_skip_missing_curves_and_split_large_studies(tmp_path, monkeypatch):
+	settings = _settings(tmp_path)
+	for i in range(10):
+		directory = settings.runs / f"arm{i}-gpu0"
+		directory.mkdir(parents=True)
+		(directory / "metrics.jsonl").write_text(
+			json.dumps({"kind": "update", "update": 1, "seconds": 1, "env_steps": 10})
+			+ "\n"
+			+ (
+				json.dumps(
+					{
+						"kind": "evaluation",
+						"update": 1,
+						"results": [
+							{
+								"opponent": "max-damage",
+								"policy": "sampled",
+								"win_rate": 0.5,
+								"ci95": [0.4, 0.6],
+								"battles": 10,
+							}
+						],
+					}
+				)
+				+ "\n"
+				if i < 9
+				else ""
+			)
+		)
+	calls = []
+
+	def fake(command, *, timeout):
+		calls.append(command)
+		return type("Result", (), {"returncode": 0})()
+
+	monkeypatch.setattr(lab, "_run_quietly", fake)
+	assert lab.make_plots(settings) == []
+	assert len(calls) == 4
+	assert all("arm9-gpu0" not in " ".join(command) for command in calls)
+	assert all("-part" in command[-1] for command in calls)
+
+
+def test_step_train_distinguishes_saved_and_new_plans(tmp_path, monkeypatch):
+	settings = _settings(tmp_path)
+	_gpu_list(settings, 1)
+	runs = assign_runs(settings.arms, [0])
+	fixed = {"config": "fixed", "updates": 6, "decay_updates": 6, "keep": [6],
+		"eval_every": 1, "window_end": 1, "window_seconds": 600,
+		"batch_size": 4096, "attempts": []}  # fmt: skip
+	lab._write_plan(settings, runs[0], fixed)
+	monkeypatch.setattr(lab, "probe_run", lambda settings, run: _probe(4096))
+	seen = {}
+
+	def fake(settings, run, plan, *, existing_plan=False):
+		seen[run.name] = (existing_plan, dict(plan))
+		return {"status": "ok"}
+
+	monkeypatch.setattr(lab, "train_run", fake)
+	assert lab.step_train(settings).status == "complete"
+	assert seen[runs[0].name] == (True, fixed)
+	assert seen[runs[1].name][0] is False

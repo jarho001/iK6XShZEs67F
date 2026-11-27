@@ -1008,3 +1008,42 @@ replayed or discarded.
 Reading: the Phase 7 model is much stronger than the Phase 6 480M one against Foul Play (46.2%
 greedy against 35.6%), close to even. Depth-1 search on top of it does not help and is worse than
 greedy play, as with the 480M model. Raw greedy is the choice for the external test.
+
+### Phase 7: tuning studies
+
+Study mode of the lab kit (`LAB_STUDY=1`): short runs of the base network at 4,096 rows on the two
+RTX 6000 cards, equal wall-clock time per arm, the final checkpoint of each scored on the held-out
+pool (heldout-720030) against ref-P6-480M and ref-P2-40M (4,096 setups) and the four baselines (2,048
+setups). Configs in configs/tune/; the learning rate decays linearly to a tenth over each run.
+
+First study (kit 0e4aef2, 12 arms, about 1.6 h and 1,000 updates each; 1,800 with 2 epochs). The lab's
+panel step lost the GPUs, so the panel ran on the 3060 Ti with the same jobs. Greedy win rate against
+ref-P6-480M, percent:
+
+| Arm | Change | P6 greedy [95%] | P6 sampled | P2 greedy | KL | Clip fraction |
+|---|---|---|---:|---:|---:|---:|
+| t-lr4-ep2 | lr 4e-3, 2 epochs | 52.0 [50.5, 53.6] | 51.7 | 69.3 | 0.0008 | 0.009 |
+| t-lr2-ep2 | lr 2e-3, 2 epochs | 50.7 | 49.8 | 66.4 | 0.0006 | 0.006 |
+| t-lr4 | lr 4e-3 | 49.9 | 50.4 | 66.3 | 0.0016 | 0.019 |
+| t-lr2 | lr 2e-3 | 48.8 | 48.9 | 67.2 | 0.0015 | 0.017 |
+| t-mb8 | 8 minibatches | 47.7 | 46.9 | 65.1 | 0.0014 | 0.015 |
+| t-ent03 | entropy 0.03 | 44.1 | 39.9 | 62.6 | 0.0011 | 0.008 |
+| t-base (seeds 0-2) | lr 1e-3, 4 epochs | 41.4 to 42.4 | 39.2 to 41.3 | 58.1 to 60.0 | 0.0010 | 0.010 |
+| t-ep2 | 2 epochs | 41.0 | 40.5 | 57.5 | 0.0008 | 0.008 |
+| t-lam98 | GAE lambda 0.98 | 40.0 | 39.8 | 58.5 | 0.0009 | 0.009 |
+| t-ent003 | entropy 0.003 | 39.1 | 39.3 | 57.6 | 0.0013 | 0.015 |
+
+Seed spread of the base is about 1 point. The learning rate is the main lever (+7 to +10 points at
+2e-3 to 4e-3); 2 epochs help only together with it (more environment steps in the same time).
+Entropy and lambda do not help. The KL and clip fraction stay far below usual PPO values even at
+4e-3, so the grid's top may still be low. All arms beat the baselines 93 to 96%.
+
+Spread pool (kit 27119a4, same budget per arm): t-spread 42.1 and t-spread-s1 42.0 greedy against
+ref-P6-480M, the base seeds s3 and s4 42.1 and 42.4. No difference, but a short run cannot show one:
+about 20 pool insertions fill a 16-member pool either way. The spread pool is kept for the long
+run. The no-bots arms failed when the container lost GPU access (a systemd reload on the shared
+host; the kit's commands now pass the GPU devices explicitly) and failed again on resume, which reused
+the stale training window; the lab now gives a resumed arm a timeout from its remaining updates.
+
+Second study (configs t2-*): base lr 4e-3 with 2 epochs, against lr 8e-3, lr 1.6e-2 and the
+opponent mix without random bots, with seed replicates; then the long run.

@@ -83,14 +83,16 @@ RTX 3060 Ti it takes about forty minutes, most of it compiling, and both arms ru
 that one GPU. You do not need it on the lab machine, but it is a good first check:
 
     cd <kit>
-    docker run --rm --gpus all --shm-size=2g \
+    docker run --rm --gpus all --device /dev/nvidiactl --device /dev/nvidia-uvm \
+      --device /dev/nvidia0 --device /dev/nvidia1 --shm-size=2g \
       -e LAB_SMOKE=1 -v "$PWD":/workspace -w /workspace \
       pokemon-jax-cuda12 bash lab/run.sh
 
 The full run, with the time budget in hours. Twelve hours is the first choice:
 
     cd <kit>
-    docker run --rm --gpus all --shm-size=2g \
+    docker run --rm --gpus all --device /dev/nvidiactl --device /dev/nvidia-uvm \
+      --device /dev/nvidia0 --device /dev/nvidia1 --shm-size=2g \
       -e LAB_HOURS=12 -v "$PWD":/workspace -w /workspace \
       pokemon-jax-cuda12 bash lab/run.sh
 
@@ -199,7 +201,8 @@ the fallback is always exercised there; on the RTX 6000 under Linux it should no
 
 After building the kit and image as above, run from the kit directory:
 
-    docker run --rm --gpus all --shm-size=2g -e LAB_STUDY=1 -e LAB_HOURS=10 -v "$PWD":/workspace -w /workspace pokemon-jax-cuda12 bash lab/run.sh
+    docker run --rm --gpus all --device /dev/nvidiactl --device /dev/nvidia-uvm \
+      --device /dev/nvidia0 --device /dev/nvidia1 --shm-size=2g -e LAB_STUDY=1 -e LAB_HOURS=10 -v "$PWD":/workspace -w /workspace pokemon-jax-cuda12 bash lab/run.sh
 
 The twelve configurations share each GPU's training window equally; each is probed separately so its
 own update time determines its decay horizon. The sweep and cross-play are skipped. The final
@@ -209,3 +212,15 @@ checkpoints play sampled and greedy panels on the shipped held-out pool (2,048 s
 Based on 8,999 base updates in 8.9 hours on RTX 6000, a sixth of the available training time is
 roughly 1,500 updates before allowing for probes, panel and other overhead; faster or slower PPO
 settings reach different update counts. Rerun the same command to resume.
+
+The second study tests higher learning rates and the opponent mix without random bots:
+
+    docker run --name pokejax-tune2 --gpus all --device /dev/nvidiactl --device /dev/nvidia-uvm \
+      --device /dev/nvidia0 --device /dev/nvidia1 --shm-size=2g -e LAB_STUDY=1 -e LAB_HOURS=8 \
+      -e LAB_ARMS=configs/tune/t2-base.toml,configs/tune/t2-base-s1.toml,configs/tune/t2-lr8.toml,configs/tune/t2-lr16.toml,configs/tune/t2-nobots.toml,configs/tune/t2-nobots-s1.toml \
+      -v "$PWD":/workspace -w /workspace -d pokemon-jax-cuda12 bash lab/run.sh
+
+The round-robin order puts base, lr8 and nobots on GPU 0, and base-s1, lr16 and
+nobots-s1 on GPU 1. On a shared host a systemd reload can revoke a running container's GPU access;
+the explicit device flags avoid it. After removing the stopped container (`docker rm pokejax-tune2`),
+rerun the same command to resume failed arms.
