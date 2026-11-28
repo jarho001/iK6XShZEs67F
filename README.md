@@ -1061,3 +1061,30 @@ Second study (kit 5a65b62, 6 arms, about 2.1 h and 3,300 updates each, 870M step
 point (within seed noise) and costs nothing against the baselines, so it is kept. The long run uses
 lr 4e-3, 2 epochs, no random bots, one arm per GPU: configs/p7-long-spread.toml (spread pool of 16)
 and configs/p7-long-recent.toml (the last 8), which also tests the spread pool where it can matter.
+
+### Phase 7: the long run with the tuned settings
+
+Kit ae5eeaf, 12 hours on the two RTX 6000 cards, lr 4e-3 with 2 epochs, no random bots, one arm per
+GPU: p7-long-spread (spread pool of 16) 16,335 updates and 4,282M steps; p7-long-recent (the last 8)
+16,121 updates and 4,226M steps; about 535 training minutes each. Panel on the held-out pool.
+
+| Final checkpoint | vs ref-P6-480M sampled / greedy | vs ref-P2-40M sampled | Panel mean sampled / greedy | vs base 2359M greedy / sampled (4,096) |
+|---|---|---|---|---|
+| p7-long-spread | 64.9 / 66.3 (cross-play) | 76.6 | 88.5 / 88.8 | 51.7 [50.1, 53.2] / 51.5 |
+| p7-long-recent | 65.8 / 65.9 (cross-play) | 77.3 | 88.6 / 88.2 | 52.5 [51.0, 54.0] / 51.7 |
+
+Spread against recent in cross-play: 50.1% sampled, 50.8% greedy. The spread pool makes no
+difference over 16,000 updates either.
+
+The tuned settings gain only about 2 points over the base 2359M model (lr 1e-3, 4 epochs, 2,359M
+steps in 531 minutes) at the same wall-clock time. Per environment step they learn more slowly (at
+1,920M steps 58.7 against 62.3 vs ref-P6-480M), per minute the curves almost coincide. The short
+studies overstated the gain: each run's learning rate decays over its own length, so in a 1.6-hour run
+the base rate of 1e-3 never trained long at a useful rate, and a higher rate compensated. Over a
+long run the decay schedule matters less. Short-run tuning with a per-run decay measures early speed,
+not the end point. The last doubling (1,920M to 3,840M steps) still gained about 2 panel points and 4
+to 5 points against ref-P6-480M.
+
+Command (from the repository root): python -m pokejax.train.panel spread=<spread final>
+recent=<recent final> --opponent old2359M=<lab 2026-11-24 p7-pairwise-gpu0 checkpoint-8999.npz>
+--baselines --battles 4096 --batch 1024 --seed 0 --team-pool work/teams/heldout-720030.npz

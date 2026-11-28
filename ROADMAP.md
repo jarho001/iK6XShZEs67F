@@ -481,8 +481,9 @@ Tasks, in order:
    because the PPO settings were tuned at 512 to 1,024 rows and the lab
    ran at 4,096 without retuning, and every doubling still gained.
    Status: done (README "Phase 7: tuning studies"): lr 4e-3 with 2 epochs,
-   no random bots. Next: the long run, configs/p7-long-spread.toml and
-   configs/p7-long-recent.toml, one per GPU.
+   no random bots. Long run done (README "Phase 7: the long run with the
+   tuned settings"): about 2 points over the base 2359M model at equal
+   time; the spread pool makes no difference.
 4. The external test (ladder or published bots), when the owner decides.
 
 ## Forward search (branch `search`)
